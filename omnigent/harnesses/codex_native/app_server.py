@@ -4392,10 +4392,7 @@ def codex_remote_attach_flag(codex_cli_version: tuple[int, int, int] | None) -> 
     ``--remote-control`` on 0.159+ (and when the version is unknown, which
     tracks the latest shipped binary), ``--remote`` on older releases.
     """
-    if (
-        codex_cli_version is None
-        or codex_cli_version >= _MIN_REMOTE_CONTROL_FLAG_CODEX_VERSION
-    ):
+    if codex_cli_version is None or codex_cli_version >= _MIN_REMOTE_CONTROL_FLAG_CODEX_VERSION:
         return "--remote-control"
     return "--remote"
 
