@@ -84,13 +84,15 @@ def test_remote_resume_option_spellings(args: tuple[str, ...], expected: dict) -
     assert app_server._codex_resume_permission_params(args) == expected
     assert app_server.build_codex_remote_args(
         codex_args=args, thread_id="thread-test", remote_url="ws://127.0.0.1:9876"
-    ) == ["resume", "--remote-control", "ws://127.0.0.1:9876", "thread-test"]
+    ) == ["resume", "--remote", "ws://127.0.0.1:9876", "thread-test"]
 
 
 @pytest.mark.parametrize(
     ("version", "expected_flag"),
     [
-        (None, "--remote-control"),
+        # Unknown version stays on --remote: the wrong flag is a hard clap
+        # crash, so only a confirmed 0.159+ earns the rename.
+        (None, "--remote"),
         ((0, 159, 0), "--remote-control"),
         ((0, 160, 1), "--remote-control"),
         ((0, 158, 9), "--remote"),
@@ -384,7 +386,7 @@ async def test_remote_resume_add_dir_preserves_configured_roots(
     assert resume["config"]["sandbox_workspace_write.network_access"] is False
     assert app_server.build_codex_remote_args(
         codex_args=args, thread_id="thread-test", remote_url="ws://127.0.0.1:9876"
-    ) == ["resume", "--remote-control", "ws://127.0.0.1:9876", "thread-test"]
+    ) == ["resume", "--remote", "ws://127.0.0.1:9876", "thread-test"]
 
 
 def test_profile_legacy_selection_overrides_base_named_selection(tmp_path: Path) -> None:

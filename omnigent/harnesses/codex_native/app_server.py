@@ -4389,10 +4389,17 @@ def codex_remote_resume_omits_permission_args(
 def codex_remote_attach_flag(codex_cli_version: tuple[int, int, int] | None) -> str:
     """App-server attach flag name for *codex_cli_version*.
 
-    ``--remote-control`` on 0.159+ (and when the version is unknown, which
-    tracks the latest shipped binary), ``--remote`` on older releases.
+    ``--remote-control`` only when the probed version is known to be 0.159+;
+    ``--remote`` otherwise, including when the version is unknown. The wrong
+    flag name is a hard clap parse error (codex exits 2 before creating a
+    thread), so an unknown version stays on the long-standing ``--remote`` that
+    every older binary accepts rather than risk the rename on a binary that may
+    predate it.
     """
-    if codex_cli_version is None or codex_cli_version >= _MIN_REMOTE_CONTROL_FLAG_CODEX_VERSION:
+    if (
+        codex_cli_version is not None
+        and codex_cli_version >= _MIN_REMOTE_CONTROL_FLAG_CODEX_VERSION
+    ):
         return "--remote-control"
     return "--remote"
 
