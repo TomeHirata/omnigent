@@ -153,6 +153,10 @@ _MIN_POLICY_HOOK_CODEX_VERSION = (0, 129, 0)
 _MIN_BYPASS_HOOK_TRUST_CODEX_VERSION = (0, 131, 0)
 # Codex rejects permission flags on remote resume starting with this release.
 _MIN_REMOTE_RESUME_PERMISSION_GUARD_CODEX_VERSION = (0, 154, 0)
+# Codex renamed the app-server attach flag ``--remote`` -> ``--remote-control``
+# in this release; older binaries only know ``--remote``. Passing the wrong
+# name makes clap exit 2 at launch, so the flag name is version-gated.
+_MIN_REMOTE_CONTROL_FLAG_CODEX_VERSION = (0, 159, 0)
 _MODEL_MIGRATION_CATALOG_TIMEOUT_SECONDS = 3.0
 
 
@@ -4418,6 +4422,20 @@ def codex_remote_resume_omits_permission_args(
     )
 
 
+def codex_remote_attach_flag(codex_cli_version: tuple[int, int, int] | None) -> str:
+    """App-server attach flag name for *codex_cli_version*.
+
+    ``--remote-control`` on 0.159+ (and when the version is unknown, which
+    tracks the latest shipped binary), ``--remote`` on older releases.
+    """
+    if (
+        codex_cli_version is None
+        or codex_cli_version >= _MIN_REMOTE_CONTROL_FLAG_CODEX_VERSION
+    ):
+        return "--remote-control"
+    return "--remote"
+
+
 def build_codex_remote_args(
     *,
     codex_args: tuple[str, ...],
@@ -4508,15 +4526,16 @@ def build_codex_remote_args(
     passthrough = without_codex_config_profile(passthrough)
     if bypass_hook_trust:
         passthrough = [_CODEX_BYPASS_HOOK_TRUST_FLAG, *passthrough]
+    remote_flag = codex_remote_attach_flag(codex_cli_version)
     if thread_id is None:
-        return [*override_args, *passthrough, "--remote", remote_url]
+        return [*override_args, *passthrough, remote_flag, remote_url]
     if not codex_remote_resume_omits_permission_args(codex_cli_version):
-        return [*override_args, *passthrough, "resume", "--remote", remote_url, thread_id]
+        return [*override_args, *passthrough, "resume", remote_flag, remote_url, thread_id]
     # Codex rejects explicit permission overrides on remote resume, even
     # when they match the app-server policy. config_overrides went to server
     # startup; codex_args went to preload's thread/resume call.
     resume_args = _strip_codex_resume_permission_args((*override_args, *passthrough))
-    return [*resume_args, "resume", "--remote", remote_url, thread_id]
+    return [*resume_args, "resume", remote_flag, remote_url, thread_id]
 
 
 def _terminate_process_tree(process: asyncio.subprocess.Process) -> None:

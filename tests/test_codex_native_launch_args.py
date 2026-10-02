@@ -84,7 +84,33 @@ def test_remote_resume_option_spellings(args: tuple[str, ...], expected: dict) -
     assert app_server._codex_resume_permission_params(args) == expected
     assert app_server.build_codex_remote_args(
         codex_args=args, thread_id="thread-test", remote_url="ws://127.0.0.1:9876"
-    ) == ["resume", "--remote", "ws://127.0.0.1:9876", "thread-test"]
+    ) == ["resume", "--remote-control", "ws://127.0.0.1:9876", "thread-test"]
+
+
+@pytest.mark.parametrize(
+    ("version", "expected_flag"),
+    [
+        (None, "--remote-control"),
+        ((0, 159, 0), "--remote-control"),
+        ((0, 160, 1), "--remote-control"),
+        ((0, 158, 9), "--remote"),
+        ((0, 154, 0), "--remote"),
+    ],
+)
+def test_remote_attach_flag_version_gated(
+    version: tuple[int, int, int] | None, expected_flag: str
+) -> None:
+    assert app_server.codex_remote_attach_flag(version) == expected_flag
+    fresh = app_server.build_codex_remote_args(
+        codex_args=(),
+        thread_id=None,
+        remote_url="ws://127.0.0.1:9876",
+        codex_cli_version=version,
+    )
+    # The attach flag immediately precedes the transport URL.
+    assert fresh[fresh.index("ws://127.0.0.1:9876") - 1] == expected_flag
+    other_flag = "--remote" if expected_flag == "--remote-control" else "--remote-control"
+    assert other_flag not in fresh
 
 
 @pytest.mark.parametrize(
@@ -358,7 +384,7 @@ async def test_remote_resume_add_dir_preserves_configured_roots(
     assert resume["config"]["sandbox_workspace_write.network_access"] is False
     assert app_server.build_codex_remote_args(
         codex_args=args, thread_id="thread-test", remote_url="ws://127.0.0.1:9876"
-    ) == ["resume", "--remote", "ws://127.0.0.1:9876", "thread-test"]
+    ) == ["resume", "--remote-control", "ws://127.0.0.1:9876", "thread-test"]
 
 
 def test_profile_legacy_selection_overrides_base_named_selection(tmp_path: Path) -> None:
