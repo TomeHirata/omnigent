@@ -711,14 +711,15 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
   //   for a block carrying neither.
   // - input_file: always render as a chip (non-image files can't be
   //   previewed inline).
-  const text = extractUserText(bubble.content);
+  const isShellCommand = bubble.shellCommand !== undefined;
+  const text = isShellCommand ? `!${bubble.shellCommand}` : extractUserText(bubble.content);
   const images = bubble.content.filter((c): c is ImageContentBlock => c.type === "input_image");
   const fileChips = bubble.content.filter(
     (c): c is Extract<MessageContentBlock, { type: "input_file" }> => c.type === "input_file",
   );
   // "@"-mentioned workspace files/folders ride in as "[Attached: …]" text
   // markers (no input_file block), so surface them as chips.
-  const mentionedChips = extractAttachedPaths(bubble.content);
+  const mentionedChips = isShellCommand ? [] : extractAttachedPaths(bubble.content);
   // Equality selector so Zustand only re-renders the matching bubble.
   const flashing = useChatStore((s) => s.flashItemId === bubble.itemId);
   const { isCopied, handleCopy } = useCopyMessage(() => text);
@@ -730,6 +731,7 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
   // a large DOM for text the user hasn't asked to read yet.
   const isLong = text.length > COLLAPSE_THRESHOLD;
   const [isCollapsed, setIsCollapsed] = useState(isLong);
+  const visibleText = isCollapsed ? sliceByCodePoint(text, COLLAPSE_THRESHOLD) : text;
   // Runtime-injected `[System: ...]` notifications ride in on role=user. When
   // the content is a pure system marker, swap in a muted centered indicator.
   if (images.length === 0 && fileChips.length === 0 && mentionedChips.length === 0) {
@@ -865,13 +867,19 @@ function UserBubble({ bubble }: { bubble: Extract<Bubble, { kind: "user" }> }) {
             {text && (
               <>
                 <div className={cn("relative", isCollapsed && "max-h-64 overflow-hidden")}>
-                  <FilePathAwareMessageResponse
-                    breaks
-                    mode="static"
-                    remarkRehypeOptions={USER_MESSAGE_REMARK_REHYPE_OPTIONS}
-                  >
-                    {isCollapsed ? sliceByCodePoint(text, COLLAPSE_THRESHOLD) : text}
-                  </FilePathAwareMessageResponse>
+                  {isShellCommand ? (
+                    <pre className="whitespace-pre-wrap break-words font-mono text-sm">
+                      <code>{visibleText}</code>
+                    </pre>
+                  ) : (
+                    <FilePathAwareMessageResponse
+                      breaks
+                      mode="static"
+                      remarkRehypeOptions={USER_MESSAGE_REMARK_REHYPE_OPTIONS}
+                    >
+                      {visibleText}
+                    </FilePathAwareMessageResponse>
+                  )}
                   {/* Gradient fade at the bottom of collapsed prompts to signal
                       there is more content below. */}
                   {isCollapsed && isLong && (
