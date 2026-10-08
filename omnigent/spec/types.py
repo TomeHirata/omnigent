@@ -1060,7 +1060,8 @@ class SharePolicy(str, Enum):
     - :attr:`NONE`: sharing disabled — ``sys_session_share`` is not
       registered at all (default).
     - :attr:`NON_PUBLIC`: the agent may grant access to named users
-      (emails), but NOT to ``__public__`` — no anonymous-read exposure.
+      (emails) or ``__authenticated__`` (all signed-in users, read/edit),
+      but NOT to ``__public__`` — no anonymous-read exposure.
     - :attr:`PUBLIC`: the agent may additionally grant ``__public__``
       (anonymous read of the full transcript).
     """

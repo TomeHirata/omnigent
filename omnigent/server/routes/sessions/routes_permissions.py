@@ -30,12 +30,15 @@ from omnigent.server._elicitation_registry import (
     _PreResolvedHarnessElicitation,
 )
 from omnigent.server.auth import (
+    LEVEL_EDIT,
     LEVEL_MANAGE,
     LEVEL_OWNER,
     LEVEL_READ,
+    RESERVED_USER_AUTHENTICATED,
     RESERVED_USER_PUBLIC,
     AuthProvider,
     SharingMode,
+    is_authenticated_user,
     workspace_sharing_blocked,
 )
 from omnigent.server.routes._auth_helpers import (
@@ -168,6 +171,17 @@ def register_permissions_routes(
             if body.level > LEVEL_READ:
                 raise OmnigentError(
                     "Public access is limited to read-only (level 1)",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+        if body.user_id == RESERVED_USER_AUTHENTICATED:
+            if not is_authenticated_user(user_id):
+                raise OmnigentError(
+                    "Signed-in user sharing requires an authenticated user.",
+                    code=ErrorCode.INVALID_INPUT,
+                )
+            if body.level > LEVEL_EDIT:
+                raise OmnigentError(
+                    "Signed-in user access is limited to edit (level 2)",
                     code=ErrorCode.INVALID_INPUT,
                 )
         target = await asyncio.to_thread(permission_store.get_user, body.user_id)

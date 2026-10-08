@@ -26,16 +26,21 @@ from omnigent.db.utils import (
 )
 from omnigent.entities import Account, ResolvedAccess, SessionPermission
 from omnigent.server.auth import (
+    LEVEL_EDIT,
     LEVEL_OWNER,
+    RESERVED_USER_AUTHENTICATED,
     RESERVED_USER_LOCAL,
     RESERVED_USER_PUBLIC,
+    is_authenticated_user,
 )
 from omnigent.stores.permission_store import PermissionStore
 
 # Sentinel rows excluded from list_users() — never real, actionable
 # actors. Mirrors accounts_store._HIDDEN_LIST_USERS so the admin user
 # list is identical across auth modes.
-_HIDDEN_LIST_USERS = frozenset({RESERVED_USER_PUBLIC, RESERVED_USER_LOCAL})
+_HIDDEN_LIST_USERS = frozenset(
+    {RESERVED_USER_PUBLIC, RESERVED_USER_LOCAL, RESERVED_USER_AUTHENTICATED}
+)
 
 # Short-lived cache of resolve_access() results. The per-event access-control
 # check on a busy session otherwise re-reads session_permissions + users on
@@ -511,7 +516,7 @@ class SqlAlchemyPermissionStore(PermissionStore):
         required_level: int,
     ) -> bool:
         """Check grant-level access. See base class for contract."""
-        if user_id is None:
+        if user_id is None or user_id == RESERVED_USER_AUTHENTICATED:
             return False
 
         grant = self.get(user_id, conversation_id)
@@ -522,6 +527,14 @@ class SqlAlchemyPermissionStore(PermissionStore):
         if public_grant is not None and public_grant.level >= required_level:
             return True
 
+        if is_authenticated_user(user_id):
+            authenticated_grant = self.get(RESERVED_USER_AUTHENTICATED, conversation_id)
+            if (
+                authenticated_grant is not None
+                and min(authenticated_grant.level, LEVEL_EDIT) >= required_level
+            ):
+                return True
+
         return False
 
     def get_permission_level(
@@ -530,17 +543,19 @@ class SqlAlchemyPermissionStore(PermissionStore):
         conversation_id: str,
     ) -> int | None:
         """Return the user's effective permission level. See base class for contract."""
-        if user_id is None:
+        if user_id is None or user_id == RESERVED_USER_AUTHENTICATED:
             return None
         if self.is_admin(user_id):
             return LEVEL_OWNER
         grant = self.get(user_id, conversation_id)
-        if grant is not None:
-            return grant.level
-        public_grant = self.get(RESERVED_USER_PUBLIC, conversation_id)
-        if public_grant is not None:
-            return public_grant.level
-        return None
+        if grant is None:
+            grant = self.get(RESERVED_USER_PUBLIC, conversation_id)
+        level = grant.level if grant is not None else None
+        if is_authenticated_user(user_id):
+            authenticated_grant = self.get(RESERVED_USER_AUTHENTICATED, conversation_id)
+            if authenticated_grant is not None:
+                level = max(level or 0, min(authenticated_grant.level, LEVEL_EDIT))
+        return level
 
     def _resolve_cache_lookup(self, conversation_id: str, user_id: str) -> ResolvedAccess | None:
         """Return a live cached resolve_access result, or ``None`` on miss/expiry."""
@@ -607,8 +622,8 @@ class SqlAlchemyPermissionStore(PermissionStore):
         user_id: str | None,
         conversation_id: str,
     ) -> ResolvedAccess:
-        """Resolve admin flag + user + public grants together. See base class."""
-        if user_id is None:
+        """Resolve admin flag + direct and group grants together. See base class."""
+        if user_id is None or user_id == RESERVED_USER_AUTHENTICATED:
             return ResolvedAccess(
                 is_admin=False,
                 user_grant_level=None,
@@ -626,7 +641,7 @@ class SqlAlchemyPermissionStore(PermissionStore):
             # committed mid-read can't be undone by a stale positive.
             generation = self._resolve_cache_generation_now()
         # One session = one connection checkout + transaction. Against a
-        # remote DB (Lakebase) this is the round-trip that matters; the three
+        # remote DB (Lakebase) this is the round-trip that matters; the
         # primary-key reads below pipeline on the same connection rather than
         # paying three separate checkout/BEGIN/COMMIT cycles (which is what
         # calling is_admin + check_access + get_permission_level separately
@@ -640,12 +655,23 @@ class SqlAlchemyPermissionStore(PermissionStore):
                 SqlSessionPermission,
                 (workspace_id, RESERVED_USER_PUBLIC, conversation_id),
             )
+            authenticated_grant = (
+                session.get(
+                    SqlSessionPermission,
+                    (workspace_id, RESERVED_USER_AUTHENTICATED, conversation_id),
+                )
+                if is_authenticated_user(user_id)
+                else None
+            )
             access = ResolvedAccess(
                 is_admin=user_row is not None
                 and user_row.deleted_at is None
                 and user_row.is_admin,
                 user_grant_level=user_grant.level if user_grant is not None else None,
                 public_grant_level=public_grant.level if public_grant is not None else None,
+                authenticated_grant_level=(
+                    authenticated_grant.level if authenticated_grant is not None else None
+                ),
             )
         # Cache only a positive standing: a no-access result is left uncached so
         # a freshly granted user is authorized on their next request, not after
@@ -654,6 +680,7 @@ class SqlAlchemyPermissionStore(PermissionStore):
             access.is_admin
             or access.user_grant_level is not None
             or access.public_grant_level is not None
+            or access.authenticated_grant_level is not None
         ):
             self._resolve_cache_store(conversation_id, user_id, access, generation)
         return access

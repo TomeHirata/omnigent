@@ -1381,7 +1381,7 @@ class ConversationStore(ABC):
     @abstractmethod
     def get_session_owner(self, conversation_id: str, *, owner_only: bool = False) -> str | None:
         """
-        Return the highest-privilege non-public grantee of a session.
+        Return the highest-privilege individual grantee of a session.
 
         By default, lower-level grants are a fallback when no owner grant exists,
         preserving cost attribution for shared sessions. Use ``owner_only=True``

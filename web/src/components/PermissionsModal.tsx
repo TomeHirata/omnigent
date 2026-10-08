@@ -53,6 +53,7 @@ import { useRebasePath } from "@/lib/routing";
 import { cn } from "@/lib/utils";
 
 const PUBLIC_USER = "__public__";
+const AUTHENTICATED_USER = "__authenticated__";
 
 /** Numeric permission level → display label for fixed (non-editable) rows. */
 const LEVEL_LABELS: Record<number, string> = {
@@ -87,6 +88,8 @@ export function PermissionsModal({
   // Public (anyone-with-the-link) access is a separate server switch from the
   // sharing tiers; when off, hide the toggle (the server rejects the grant too).
   const publicSharingEnabled = info === "loading" ? true : info.public_sharing_enabled;
+  const authenticatedSharingEnabled =
+    info !== "loading" && info.authenticated_sharing_enabled === true;
   // In "off" mode never fetch the grant list — the modal short-circuits to a
   // notice below, so the request would be wasted (and the server rejects any
   // grant anyway).
@@ -116,8 +119,11 @@ export function PermissionsModal({
   const hasWorkspace = !!session?.workspace;
   const workspaceShared = session?.shareWorkspaceFiles ?? false;
 
-  const userGrants = (permissions ?? []).filter((p) => p.user_id !== PUBLIC_USER);
+  const userGrants = (permissions ?? []).filter(
+    (p) => p.user_id !== PUBLIC_USER && p.user_id !== AUTHENTICATED_USER,
+  );
   const publicGrant = (permissions ?? []).find((p) => p.user_id === PUBLIC_USER);
+  const authenticatedGrant = (permissions ?? []).find((p) => p.user_id === AUTHENTICATED_USER);
   const isPublic = !!publicGrant;
 
   function handleGrant(e: FormEvent) {
@@ -219,6 +225,40 @@ export function PermissionsModal({
               disabled={grant.isPending || revoke.isPending || (workspaceBlocked && !isPublic)}
               componentId="diagnostics.permissions.public_toggle"
             />
+          </div>
+        )}
+
+        {(authenticatedSharingEnabled || authenticatedGrant) && (
+          <div className="flex min-w-0 items-center justify-between gap-3 rounded-lg border px-3 py-2">
+            <p className="min-w-0 text-ui font-medium">All signed-in users</p>
+            <Select
+              value={String(authenticatedGrant?.level ?? 0)}
+              onValueChange={(value) => {
+                if (value === "0") handleRevoke(AUTHENTICATED_USER);
+                else handleChangeLevel(AUTHENTICATED_USER, Number(value));
+              }}
+              disabled={isLoading || grant.isPending || revoke.isPending}
+              componentId="diagnostics.permissions.authenticated_level"
+              valueHasNoPii
+            >
+              <SelectTrigger className="h-8 w-28 shrink-0" aria-label="All signed-in users">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="0">No access</SelectItem>
+                <SelectItem value="1" disabled={workspaceBlocked || !authenticatedSharingEnabled}>
+                  Read
+                </SelectItem>
+                {(!sharingReadOnly || authenticatedGrant?.level === 2) && (
+                  <SelectItem
+                    value="2"
+                    disabled={sharingReadOnly || workspaceBlocked || !authenticatedSharingEnabled}
+                  >
+                    Edit
+                  </SelectItem>
+                )}
+              </SelectContent>
+            </Select>
           </div>
         )}
 

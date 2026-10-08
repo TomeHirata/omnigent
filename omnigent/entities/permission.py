@@ -39,8 +39,12 @@ class ResolvedAccess:
     :param public_grant_level: The ``"__public__"`` sentinel grant level
         on the conversation (same ``1``–``4`` scale), or ``None`` if the
         session is not public.
+    :param authenticated_grant_level: The ``"__authenticated__"`` grant
+        for a signed-in caller, or ``None`` for anonymous/local callers
+        or when the session has no such grant. Effective access is capped at edit.
     """
 
     is_admin: bool
     user_grant_level: int | None
     public_grant_level: int | None
+    authenticated_grant_level: int | None = None

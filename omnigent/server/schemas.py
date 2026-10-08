@@ -2937,7 +2937,8 @@ class GrantPermissionRequest(BaseModel):
     Request body for ``PUT /v1/sessions/{id}/permissions``.
 
     :param user_id: The user to grant access to, e.g.
-        ``"alice@example.com"`` or ``"__public__"`` for public
+        ``"alice@example.com"``, ``"__authenticated__"`` for signed-in
+        users (read/edit), or ``"__public__"`` for public
         read access.
     :param level: Numeric permission level: ``1`` = read,
         ``2`` = edit, ``3`` = manage.

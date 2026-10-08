@@ -2601,7 +2601,7 @@
             "type": "integer"
           },
           "user_id": {
-            "description": "The user to grant access to, e.g. `\"alice@example.com\"` or `\"__public__\"` for public read access.",
+            "description": "The user to grant access to, e.g. `\"alice@example.com\"`, `\"__authenticated__\"` for signed-in users (read/edit), or `\"__public__\"` for public read access.",
             "title": "User Id",
             "type": "string"
           }
@@ -5193,6 +5193,11 @@
           "archive_worktree_cleanup": {
             "default": true,
             "title": "Archive Worktree Cleanup",
+            "type": "boolean"
+          },
+          "authenticated_sharing_enabled": {
+            "default": false,
+            "title": "Authenticated Sharing Enabled",
             "type": "boolean"
           },
           "branding": {

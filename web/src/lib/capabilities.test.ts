@@ -89,6 +89,23 @@ describe("sandboxProviderOptions", () => {
   });
 });
 
+describe("signed-in sharing capability", () => {
+  it.each([undefined, false, "true", 1])(
+    "requires explicit boolean support (%s)",
+    async (value) => {
+      expect(
+        (await probe({ authenticated_sharing_enabled: value })).authenticated_sharing_enabled,
+      ).toBe(false);
+    },
+  );
+
+  it("recognizes explicit support from the server", async () => {
+    expect(
+      (await probe({ authenticated_sharing_enabled: true })).authenticated_sharing_enabled,
+    ).toBe(true);
+  });
+});
+
 describe("resolveServerInfo sandbox_providers", () => {
   it("keeps the provider list from the probe", async () => {
     // Regression: the probe rebuilds ServerInfo field by field, so a

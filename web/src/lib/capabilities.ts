@@ -144,6 +144,8 @@ export interface ServerInfo {
    * the "Public access" toggle. Fails open to ``true``.
    */
   public_sharing_enabled: boolean;
+  /** Supports read/edit grants to all signed-in users; absent on older servers. */
+  authenticated_sharing_enabled?: boolean;
   /**
    * Installed omnigent server version (same value as ``/api/version``),
    * e.g. ``"0.3.0.dev0"``. Shown in the session info popover's version
@@ -356,6 +358,7 @@ export async function resolveServerInfo(): Promise<ServerInfo> {
             : "on",
           // Fail open: only an explicit false disables the public toggle.
           public_sharing_enabled: data.public_sharing_enabled !== false,
+          authenticated_sharing_enabled: data.authenticated_sharing_enabled === true,
           server_version: typeof data.server_version === "string" ? data.server_version : null,
           smart_routing_enabled: smartRoutingEnabled,
           smart_routing_sources: parseSmartRoutingSources(

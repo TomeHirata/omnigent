@@ -29,7 +29,13 @@ from omnigent.runtime import inflight_text, session_stream
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server import presence
 from omnigent.server.app import create_app
-from omnigent.server.auth import LEVEL_EDIT, LEVEL_MANAGE, LEVEL_OWNER, LEVEL_READ
+from omnigent.server.auth import (
+    LEVEL_EDIT,
+    LEVEL_MANAGE,
+    LEVEL_OWNER,
+    LEVEL_READ,
+    RESERVED_USER_AUTHENTICATED,
+)
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.comment_store.sqlalchemy_store import SqlAlchemyCommentStore
@@ -387,6 +393,105 @@ async def _list_permissions(
 
 
 # ── Critical CUJ: full grant/revoke/list lifecycle ──────────
+
+
+async def test_authenticated_edit_sharing_lifecycle(auth_client: httpx.AsyncClient) -> None:
+    session = await _create_session_as(auth_client, "", "automation")
+    session_id = session["id"]
+    grant = await _grant_permission(
+        auth_client,
+        session_id,
+        granter="automation",
+        target_user=RESERVED_USER_AUTHENTICATED,
+        level=LEVEL_EDIT,
+    )
+    assert grant.status_code == 200, grant.text
+    headers = {"X-Forwarded-Email": "new-member"}
+    snapshot = await auth_client.get(f"/v1/sessions/{session_id}", headers=headers)
+    assert snapshot.status_code == 200, snapshot.text
+    assert snapshot.json()["permission_level"] == LEVEL_EDIT
+    assert await _list_sessions_as(auth_client, "new-member") == []
+    changed = await auth_client.patch(
+        f"/v1/sessions/{session_id}", json={"title": "Follow-up"}, headers=headers
+    )
+    assert changed.status_code == 200, changed.text
+    event = await auth_client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={"type": "interrupt", "data": {}},
+        headers=headers,
+    )
+    assert event.status_code == 202, event.text
+    management = await _grant_permission(
+        auth_client, session_id, granter="new-member", target_user="another", level=LEVEL_READ
+    )
+    assert management.status_code == 403
+    stop = await auth_client.post(
+        f"/v1/sessions/{session_id}/events",
+        json={"type": "stop_session", "data": {}},
+        headers=headers,
+    )
+    assert stop.status_code == 403
+    assert (await auth_client.get(f"/v1/sessions/{session_id}")).status_code == 401
+    for level in (LEVEL_MANAGE, LEVEL_OWNER):
+        refused = await _grant_permission(
+            auth_client,
+            session_id,
+            granter="automation",
+            target_user=RESERVED_USER_AUTHENTICATED,
+            level=level,
+        )
+        assert refused.status_code in (400, 422)
+    downgraded = await _grant_permission(
+        auth_client,
+        session_id,
+        granter="automation",
+        target_user=RESERVED_USER_AUTHENTICATED,
+        level=LEVEL_READ,
+    )
+    assert downgraded.status_code == 200
+    snapshot = await auth_client.get(f"/v1/sessions/{session_id}", headers=headers)
+    assert snapshot.json()["permission_level"] == LEVEL_READ
+    assert (
+        await auth_client.patch(
+            f"/v1/sessions/{session_id}", json={"title": "Denied"}, headers=headers
+        )
+    ).status_code == 403
+    revoked = await _revoke_permission(
+        auth_client, session_id, revoker="automation", target_user=RESERVED_USER_AUTHENTICATED
+    )
+    assert revoked.status_code == 204
+    assert (
+        await auth_client.get(f"/v1/sessions/{session_id}", headers=headers)
+    ).status_code == 404
+
+
+async def test_authenticated_edit_overrides_direct_read_and_inherits_to_children(
+    auth_client: httpx.AsyncClient,
+) -> None:
+    parent = await _create_session_as(auth_client, "", "automation")
+    for grantee, level in (("member", LEVEL_READ), (RESERVED_USER_AUTHENTICATED, LEVEL_EDIT)):
+        grant = await _grant_permission(
+            auth_client, parent["id"], granter="automation", target_user=grantee, level=level
+        )
+        assert grant.status_code == 200
+    rows = await _list_sessions_as(auth_client, "member")
+    assert next(row for row in rows if row["id"] == parent["id"])["permission_level"] == LEVEL_EDIT
+    child = await auth_client.post(
+        "/v1/sessions",
+        json={"agent_id": parent["agent_id"], "parent_session_id": parent["id"]},
+        headers={"X-Forwarded-Email": "automation"},
+    )
+    assert child.status_code == 201, child.text
+    snapshot = await auth_client.get(
+        f"/v1/sessions/{child.json()['id']}", headers={"X-Forwarded-Email": "member"}
+    )
+    assert snapshot.status_code == 200, snapshot.text
+    changed = await auth_client.patch(
+        f"/v1/sessions/{child.json()['id']}",
+        json={"title": "Child follow-up"},
+        headers={"X-Forwarded-Email": "member"},
+    )
+    assert changed.status_code == 200, changed.text
 
 
 async def test_full_permission_lifecycle(

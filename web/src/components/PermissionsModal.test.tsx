@@ -774,6 +774,134 @@ describe("PermissionsModal", () => {
     });
   });
 
+  describe("signed-in user access", () => {
+    it("grants edit access without creating a public grant", async () => {
+      listMock.mockResolvedValue([]);
+      grantMock.mockResolvedValue({
+        user_id: "__authenticated__",
+        conversation_id: "conv_abc",
+        level: 2,
+      });
+      render(<PermissionsModal sessionId="conv_abc" open onOpenChange={() => {}} />, {
+        wrapper: createInfoWrapper({
+          authenticated_sharing_enabled: true,
+          public_sharing_enabled: false,
+        }),
+      });
+      const trigger = await screen.findByRole("combobox", { name: "All signed-in users" });
+      await waitFor(() => expect(trigger).toBeEnabled());
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key: "Enter" });
+      const listbox = await screen.findByRole("listbox");
+      expect(
+        within(listbox)
+          .getAllByRole("option")
+          .map((o) => o.textContent),
+      ).toEqual(["No access", "Read", "Edit"]);
+      fireEvent.click(within(listbox).getByRole("option", { name: "Edit" }));
+      await waitFor(() =>
+        expect(grantMock).toHaveBeenCalledWith("conv_abc", "__authenticated__", 2),
+      );
+      expect(screen.queryByText("__authenticated__")).not.toBeInTheDocument();
+      expect(screen.queryByText("Public access")).not.toBeInTheDocument();
+    });
+
+    it("revokes group access when No access is selected", async () => {
+      listMock.mockResolvedValue([
+        { user_id: "__authenticated__", conversation_id: "conv_abc", level: 2 },
+      ]);
+      revokeMock.mockResolvedValue();
+      render(<PermissionsModal sessionId="conv_abc" open onOpenChange={() => {}} />, {
+        wrapper: createInfoWrapper({ authenticated_sharing_enabled: true }),
+      });
+      const trigger = await screen.findByRole("combobox", { name: "All signed-in users" });
+      await waitFor(() => expect(trigger).toHaveTextContent("Edit"));
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key: "Enter" });
+      fireEvent.click(await screen.findByRole("option", { name: "No access" }));
+      await waitFor(() => expect(revokeMock).toHaveBeenCalledWith("conv_abc", "__authenticated__"));
+    });
+
+    it("caps new group grants at read in read-only mode", async () => {
+      listMock.mockResolvedValue([]);
+      render(<PermissionsModal sessionId="conv_abc" open onOpenChange={() => {}} />, {
+        wrapper: createInfoWrapper({
+          authenticated_sharing_enabled: true,
+          sharing_mode: "read_only",
+        }),
+      });
+      const trigger = await screen.findByRole("combobox", { name: "All signed-in users" });
+      await waitFor(() => expect(trigger).toBeEnabled());
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key: "Enter" });
+      const listbox = await screen.findByRole("listbox");
+      expect(
+        within(listbox)
+          .getAllByRole("option")
+          .map((o) => o.textContent),
+      ).toEqual(["No access", "Read"]);
+    });
+
+    it("keeps existing edit access revocable after switching to read-only mode", async () => {
+      listMock.mockResolvedValue([
+        { user_id: "__authenticated__", conversation_id: "conv_abc", level: 2 },
+      ]);
+      render(<PermissionsModal sessionId="conv_abc" open onOpenChange={() => {}} />, {
+        wrapper: createInfoWrapper({
+          authenticated_sharing_enabled: true,
+          sharing_mode: "read_only",
+        }),
+      });
+      const trigger = await screen.findByRole("combobox", { name: "All signed-in users" });
+      await waitFor(() => expect(trigger).toHaveTextContent("Edit"));
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key: "Enter" });
+      expect(await screen.findByRole("option", { name: "Edit" })).toHaveAttribute("data-disabled");
+      expect(screen.getByRole("option", { name: "No access" })).not.toHaveAttribute(
+        "data-disabled",
+      );
+    });
+
+    it("hides the group control on older servers", async () => {
+      listMock.mockResolvedValue([]);
+      render(<PermissionsModal sessionId="conv_abc" open onOpenChange={() => {}} />, {
+        wrapper: createInfoWrapper({}),
+      });
+      await waitFor(() => expect(listMock).toHaveBeenCalled());
+      expect(
+        screen.queryByRole("combobox", { name: "All signed-in users" }),
+      ).not.toBeInTheDocument();
+    });
+
+    it("allows only revocation on a blocked workspace", async () => {
+      listMock.mockResolvedValue([
+        { user_id: "__authenticated__", conversation_id: "conv_abc", level: 1 },
+      ]);
+      render(
+        <PermissionsModal
+          sessionId="conv_abc"
+          workspace="/home/alice"
+          open
+          onOpenChange={() => {}}
+        />,
+        {
+          wrapper: createInfoWrapper({
+            authenticated_sharing_enabled: true,
+            sharing_mode: "restricted_read_only",
+          }),
+        },
+      );
+      const trigger = await screen.findByRole("combobox", { name: "All signed-in users" });
+      await waitFor(() => expect(trigger).toHaveTextContent("Read"));
+      trigger.focus();
+      fireEvent.keyDown(trigger, { key: "Enter" });
+      expect(await screen.findByRole("option", { name: "Read" })).toHaveAttribute("data-disabled");
+      expect(screen.getByRole("option", { name: "No access" })).not.toHaveAttribute(
+        "data-disabled",
+      );
+    });
+  });
+
   describe("share QR code", () => {
     // The QR encodes an `omnigent://<host>/c/<id>` deep link (the same scheme
     // the desktop shell's deep-link handler parses — see electron/src/deepLink.js).

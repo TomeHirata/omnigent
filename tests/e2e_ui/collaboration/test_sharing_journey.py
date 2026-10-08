@@ -157,10 +157,12 @@ def _goto_expecting_snapshot(page: Page, base_url: str, session_id: str) -> int:
 
 
 @pytest.mark.flaky(reruns=2, reruns_delay=5)
+@pytest.mark.parametrize("group_grant", [False, True], ids=["named-user", "signed-in-users"])
 def test_share_grant_downgrade_revoke_journey(
     browser: Browser,
     live_server: str,
     shared: _SharedFixture,
+    group_grant: bool,
 ) -> None:
     sid = shared.session_id
     marker = f"bob-turn-{uuid.uuid4().hex[:8]}"
@@ -168,6 +170,19 @@ def test_share_grant_downgrade_revoke_journey(
     # as every other e2e_ui browser context.
     owner_ctx = browser.new_context()
     bob_ctx = _user_context(browser, shared.bob_email)
+    grantee = "__authenticated__" if group_grant else shared.bob_email
+    granter = shared.owner
+    if group_grant:
+        manager_email = f"manager-{shared.bob_email}"
+        shared.owner.put(
+            f"/v1/sessions/{sid}/permissions",
+            json={"user_id": manager_email, "level": 3},
+        ).raise_for_status()
+        granter = httpx.Client(
+            base_url=live_server,
+            headers={"X-Forwarded-Email": manager_email},
+            timeout=30,
+        )
     try:
         # ── Pre-grant: Bob has nothing, and is told nothing ──────
         bob_page = bob_ctx.new_page()
@@ -180,9 +195,9 @@ def test_share_grant_downgrade_revoke_journey(
         owner_page = owner_ctx.new_page()
         assert _goto_expecting_snapshot(owner_page, live_server, sid) == 200
 
-        shared.owner.put(
+        granter.put(
             f"/v1/sessions/{sid}/permissions",
-            json={"user_id": shared.bob_email, "level": _LEVEL_EDIT},
+            json={"user_id": grantee, "level": _LEVEL_EDIT},
         ).raise_for_status()
         assert _goto_expecting_snapshot(bob_page, live_server, sid) == 200
         composer = bob_page.get_by_placeholder(_COMPOSER)
@@ -197,9 +212,9 @@ def test_share_grant_downgrade_revoke_journey(
         expect(owner_page.locator(_BUBBLE, has_text=marker).first).to_be_visible(timeout=30_000)
 
         # ── Downgrade to READ: composer locks after reload ───────
-        shared.owner.put(
+        granter.put(
             f"/v1/sessions/{sid}/permissions",
-            json={"user_id": shared.bob_email, "level": _LEVEL_READ},
+            json={"user_id": grantee, "level": _LEVEL_READ},
         ).raise_for_status()
         assert _goto_expecting_snapshot(bob_page, live_server, sid) == 200
         readonly = bob_page.get_by_placeholder(_READONLY_PLACEHOLDER)
@@ -217,15 +232,15 @@ def test_share_grant_downgrade_revoke_journey(
         assert send.status_code == 403
 
         # ── Revoke: Bob is back to anti-enumeration 404s ─────────
-        shared.owner.delete(
-            f"/v1/sessions/{sid}/permissions/{shared.bob_email}"
-        ).raise_for_status()
+        granter.delete(f"/v1/sessions/{sid}/permissions/{grantee}").raise_for_status()
         assert _goto_expecting_snapshot(bob_page, live_server, sid) == 404
         expect(bob_page.get_by_placeholder(_COMPOSER)).to_have_count(0)
         assert shared.bob.get(f"/v1/sessions/{sid}").status_code == 404
     finally:
         owner_ctx.close()
         bob_ctx.close()
+        if granter is not shared.owner:
+            granter.close()
 
 
 def _open_agent_info(page: Page) -> None:

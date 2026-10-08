@@ -21,6 +21,7 @@ lifespan) since none of these paths need the runtime.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -35,6 +36,7 @@ from omnigent.server.auth import (
     LEVEL_MANAGE,
     LEVEL_OWNER,
     LEVEL_READ,
+    RESERVED_USER_AUTHENTICATED,
     RESERVED_USER_PUBLIC,
     AuthProvider,
     SharingMode,
@@ -48,6 +50,7 @@ from omnigent.server.sharing_settings import (
     write_public_sharing_override,
     write_sharing_mode_override,
 )
+from omnigent.spec.types import AgentSpec, SharePolicy
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
@@ -166,6 +169,96 @@ def _admin_app(
 
 
 @pytest.mark.parametrize(
+    "mode,workspace,level,expected",
+    [
+        (SharingMode.ON, None, LEVEL_READ, 200),
+        (SharingMode.ON, None, LEVEL_EDIT, 200),
+        (SharingMode.ON, None, LEVEL_MANAGE, 400),
+        (SharingMode.READ_ONLY, None, LEVEL_EDIT, 403),
+        (SharingMode.RESTRICTED_READ_ONLY, "/home/alice", LEVEL_READ, 403),
+        (SharingMode.RESTRICTED_READ_ONLY, "/home/alice/project", LEVEL_READ, 200),
+        (SharingMode.OFF, None, LEVEL_READ, 403),
+    ],
+)
+async def test_authenticated_grants_obey_sharing_policy_independently_of_public_access(
+    db_uri: str,
+    tmp_path: Path,
+    mode: SharingMode,
+    workspace: str | None,
+    level: int,
+    expected: int,
+) -> None:
+    app, session_id = _seed_owned_session(
+        db_uri, tmp_path, sharing_mode=mode, workspace=workspace, public_sharing=False
+    )
+    async with _client(app, _OWNER) as client:
+        response = await client.put(
+            f"/v1/sessions/{session_id}/permissions",
+            json={"user_id": RESERVED_USER_AUTHENTICATED, "level": level},
+        )
+        assert response.status_code == expected, response.text
+        if expected == 200:
+            assert response.json()["level"] == level
+        else:
+            assert (
+                SqlAlchemyPermissionStore(db_uri).get(RESERVED_USER_AUTHENTICATED, session_id)
+                is None
+            )
+
+
+async def test_local_manager_cannot_grant_signed_in_user_access(
+    db_uri: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1")
+    app, session_id = _seed_owned_session(db_uri, tmp_path)
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    permissions.ensure_user("local")
+    permissions.grant("local", session_id, LEVEL_OWNER)
+    async with _client(app) as client:
+        response = await client.put(
+            f"/v1/sessions/{session_id}/permissions",
+            json={"user_id": RESERVED_USER_AUTHENTICATED, "level": LEVEL_EDIT},
+        )
+        assert response.status_code == 400, response.text
+        assert "requires an authenticated user" in response.text
+    assert permissions.get(RESERVED_USER_AUTHENTICATED, session_id) is None
+
+
+@pytest.mark.parametrize("policy", [SharePolicy.NON_PUBLIC, SharePolicy.PUBLIC])
+@pytest.mark.parametrize("level", ["read", "edit", "manage"])
+async def test_agent_sharing_tool_uses_signed_in_group_with_server_limits(
+    db_uri: str, tmp_path: Path, policy: SharePolicy, level: str
+) -> None:
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    app, session_id = _seed_owned_session(db_uri, tmp_path, public_sharing=False)
+    async with _client(app, _OWNER) as client:
+        result = json.loads(
+            await execute_tool(
+                tool_name="sys_session_share",
+                arguments=json.dumps({"user_id": RESERVED_USER_AUTHENTICATED, "level": level}),
+                server_client=client,
+                conversation_id=session_id,
+                agent_spec=AgentSpec(spec_version=1, agent_session_sharing=policy),
+            )
+        )
+    grant = SqlAlchemyPermissionStore(db_uri).get(RESERVED_USER_AUTHENTICATED, session_id)
+    if level == "manage":
+        assert result["status_code"] == 400
+        assert "limited to edit" in result["error"]
+        assert grant is None
+    else:
+        assert result == {
+            "shared": True,
+            "session_id": session_id,
+            "user_id": RESERVED_USER_AUTHENTICATED,
+            "level": level,
+        }
+        assert grant is not None
+        assert grant.level == (LEVEL_READ if level == "read" else LEVEL_EDIT)
+
+
+@pytest.mark.parametrize(
     "value,expected",
     [
         (SharingMode.OFF, SharingMode.OFF),
@@ -255,6 +348,38 @@ async def test_info_reports_default_on(
         resp = await c.get("/v1/info")
         assert resp.status_code == 200
         assert resp.json()["sharing_mode"] == "on"
+
+
+@pytest.mark.parametrize(
+    "with_auth,with_permissions,single_user,expected",
+    [
+        (True, True, False, True),
+        (False, False, False, False),
+        (True, False, False, False),
+        (True, True, True, False),
+    ],
+)
+async def test_info_reports_authenticated_sharing_support(
+    db_uri: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_auth: bool,
+    with_permissions: bool,
+    single_user: bool,
+    expected: bool,
+) -> None:
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "1" if single_user else "0")
+    app = _build_app(
+        db_uri,
+        tmp_path,
+        auth_provider=UnifiedAuthProvider(source="header") if with_auth else None,
+        permission_store=SqlAlchemyPermissionStore(db_uri) if with_permissions else None,
+        public_sharing=False,
+    )
+    async with _client(app) as client:
+        response = await client.get("/v1/info")
+        assert response.status_code == 200, response.text
+        assert response.json()["authenticated_sharing_enabled"] is expected
 
 
 @pytest.mark.parametrize(

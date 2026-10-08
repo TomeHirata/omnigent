@@ -297,7 +297,7 @@ def test_config_uppercase_secret_hash_is_normalised(monkeypatch: pytest.MonkeyPa
     assert _client_matches(_CLIENT_ID, _CLIENT_SECRET, config, _COOKIE_SECRET) is True
 
 
-@pytest.mark.parametrize("reserved", ["local", "__public__"])
+@pytest.mark.parametrize("reserved", ["local", "__public__", "__authenticated__"])
 def test_config_reserved_principal_is_an_error(
     monkeypatch: pytest.MonkeyPatch, reserved: str
 ) -> None:

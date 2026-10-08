@@ -20,16 +20,19 @@ from __future__ import annotations
 import re
 import time
 from collections.abc import Callable, Iterator
+from pathlib import Path
 
 import httpx
 import pytest
 from playwright.sync_api import Browser, Page, expect
 
+from tests._helpers.session import post_session_bundle
 from tests.e2e_ui.collaboration._multi_user_server import (
     ADMIN_EMAIL,
     MultiUserServer,
     spawn_multi_user_server,
 )
+from tests.e2e_ui.conftest import _build_hello_world_bundle
 
 # ``__public__`` is the synthetic user id the server stores for a public
 # grant (mirrors ``PUBLIC_USER`` in PermissionsModal.tsx).
@@ -215,6 +218,74 @@ def test_permissions_modal_controls_drive_server_state(
     dialog.get_by_role("button", name="Revoke").click()
     expect(dialog.get_by_title(grantee)).to_have_count(0)
     _wait_for(lambda: grantee not in _permissions(base_url, session_id))
+
+
+def test_signed_in_users_control_grants_downgrades_and_revokes(
+    browser: Browser,
+    multi_user_server: MultiUserServer,
+    tmp_path: Path,
+) -> None:
+    base_url = multi_user_server.base_url
+    created = post_session_bundle(
+        httpx.post,
+        f"{base_url}/v1/sessions",
+        _build_hello_world_bundle(),
+        headers={"X-Forwarded-Email": ADMIN_EMAIL},
+        timeout=30,
+    )
+    created.raise_for_status()
+    session_id = created.json()["session_id"]
+    admin_context = browser.new_context(
+        extra_http_headers={"X-Forwarded-Email": ADMIN_EMAIL},
+        record_video_dir=str(tmp_path / "video"),
+    )
+    member_context = browser.new_context(
+        extra_http_headers={"X-Forwarded-Email": "new-member@ui.test"},
+        record_video_dir=str(tmp_path / "video"),
+    )
+    try:
+        page = admin_context.new_page()
+        page.goto(f"{multi_user_server.public_url}/c/{session_id}")
+        _open_share_modal(page)
+        dialog = page.get_by_role("dialog")
+        group = dialog.get_by_role("combobox", name="All signed-in users")
+        group.click()
+        page.get_by_role("option", name="Edit", exact=True).click()
+        expect(group).to_have_text("Edit")
+        _wait_for(lambda: _permissions(base_url, session_id).get("__authenticated__") == 2)
+        page.screenshot(path=str(tmp_path / "signed-in-sharing-desktop.png"))
+
+        member = member_context.new_page()
+        member.goto(f"{multi_user_server.public_url}/c/{session_id}")
+        expect(member.get_by_placeholder("Send a message…")).to_be_enabled(timeout=30_000)
+        assert httpx.get(f"{base_url}/v1/sessions/{session_id}", timeout=10).status_code == 401
+
+        group.click()
+        page.get_by_role("option", name="Read", exact=True).click()
+        _wait_for(lambda: _permissions(base_url, session_id).get("__authenticated__") == 1)
+        member.reload()
+        expect(
+            member.get_by_placeholder("You have read-only access to this session")
+        ).to_be_disabled(timeout=30_000)
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        expect(group).to_be_visible()
+        page.screenshot(path=str(tmp_path / "signed-in-sharing-mobile.png"))
+        assert dialog.evaluate("(el) => el.scrollWidth <= el.clientWidth")
+        group.click()
+        page.get_by_role("option", name="No access", exact=True).click()
+        _wait_for(lambda: "__authenticated__" not in _permissions(base_url, session_id))
+        with member.expect_response(
+            lambda response: (
+                response.url.split("?")[0].endswith(f"/v1/sessions/{session_id}")
+                and response.request.method == "GET"
+            )
+        ) as snapshot:
+            member.reload()
+        assert snapshot.value.status == 404
+    finally:
+        admin_context.close()
+        member_context.close()
 
 
 def test_share_modal_qr_code_opens_mobile_deep_link(

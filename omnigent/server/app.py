@@ -178,6 +178,7 @@ class ServerInfoResponse(BaseModel):
     enabled_connections: list[str]
     sharing_mode: Literal["on", "read_only", "restricted_read_only", "off"]
     public_sharing_enabled: bool
+    authenticated_sharing_enabled: bool = False
     server_version: str
     smart_routing_enabled: bool
     smart_routing_sources: SmartRoutingSourcesInfo
@@ -2995,6 +2996,9 @@ def create_app(
                 "enabled_connections": enabled_connections,
                 "sharing_mode": sharing_mode.value,
                 "public_sharing_enabled": public_sharing_enabled,
+                "authenticated_sharing_enabled": (
+                    auth_provider is not None and permission_store is not None and not single_user
+                ),
                 "server_version": _server_version(),
                 "smart_routing_enabled": smart_routing_enabled,
                 "smart_routing_sources": smart_routing_sources,

@@ -3,6 +3,7 @@
 Each grant is a ``(user_id, conversation_id, level)`` triple where
 level is an integer: 1=read, 2=edit, 3=manage. The ``"__public__"``
 sentinel user ID represents public read access.
+``"__authenticated__"`` grants read/edit access to every signed-in user.
 """
 
 from abc import ABC, abstractmethod
@@ -40,8 +41,8 @@ class PermissionStore(ABC):
         responsible for authorization checks (only managers may
         grant).
 
-        :param user_id: The grantee, e.g. ``"alice@example.com"``
-            or ``"__public__"`` for public access.
+        :param user_id: An individual grantee, e.g. ``"alice@example.com"``,
+            or a group sentinel (``"__public__"`` / ``"__authenticated__"``).
         :param conversation_id: The session to grant access to,
             e.g. ``"conv_abc123"``.
         :param level: Numeric permission level (1=read, 2=edit,
@@ -114,8 +115,8 @@ class PermissionStore(ABC):
         """Return all grants for multiple sessions in one batched query.
 
         Issues a single ``WHERE conversation_id IN (…)`` query and
-        returns ALL grants for those sessions (all users, including
-        the ``"__public__"`` sentinel).  Callers filter in memory
+        returns ALL grants for those sessions (individuals and
+        group sentinels). Callers filter in memory
         for the specific user or owner they care about.
 
         :param conversation_ids: List of conversation IDs to fetch,
@@ -170,8 +171,8 @@ class PermissionStore(ABC):
     def list_users(self, *, limit: int = 1000) -> list[Account]:
         """Return every real user row, for the admin user list.
 
-        Excludes the reserved sentinels (``"__public__"`` and
-        ``"local"``) that aren't real actors, mirroring
+        Excludes the reserved sentinels (``"__public__"``,
+        ``"__authenticated__"``, and ``"local"``) that aren't real actors, mirroring
         :meth:`SqlAlchemyAccountStore.list_users` so the OIDC/header
         admin surface can reuse the accounts-mode ``Account`` shape.
         The ``password_hash`` is never included (see :class:`Account`).
@@ -220,8 +221,9 @@ class PermissionStore(ABC):
     ) -> bool:
         """Check whether *user_id* has a grant at *required_level* or above.
 
-        Checks the user's direct grant and the ``__public__`` sentinel
-        grant.  Does NOT handle admin bypass or sub-agent parent
+        Checks the user's direct grant, ``__public__``, and (for signed-in
+        callers only) ``__authenticated__`` capped at edit.
+        Does NOT handle admin bypass or sub-agent parent
         delegation — callers are responsible for those.
 
         :param user_id: The authenticated user, or ``None`` if unauthenticated.
@@ -254,9 +256,9 @@ class PermissionStore(ABC):
         user_id: str | None,
         conversation_id: str,
     ) -> ResolvedAccess:
-        """Fetch admin flag + the user's and public grants in one round-trip.
+        """Fetch admin flag + direct, public, and signed-in grants in one round-trip.
 
-        Bundles the three reads that back :meth:`check_access` and
+        Bundles the reads that back :meth:`check_access` and
         :meth:`get_permission_level` so a caller needing BOTH the access
         decision and the displayed level pays a single store round-trip
         instead of two. Does NOT apply the admin bypass, public fallback,
@@ -270,7 +272,7 @@ class PermissionStore(ABC):
         :param conversation_id: The session to resolve, e.g.
             ``"conv_abc123"``.
         :returns: A :class:`ResolvedAccess` snapshot. For ``user_id=None``
-            every field is falsy (``is_admin=False``, both levels ``None``).
+            every field is falsy (``is_admin=False``, all levels ``None``).
         """
         ...
 

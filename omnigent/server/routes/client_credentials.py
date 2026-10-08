@@ -98,6 +98,7 @@ from starlette.datastructures import FormData
 from starlette.responses import JSONResponse, Response
 
 from omnigent.server.auth import (
+    RESERVED_USER_AUTHENTICATED,
     RESERVED_USER_LOCAL,
     RESERVED_USER_PUBLIC,
     UnifiedAuthProvider,
@@ -229,7 +230,7 @@ class MachineClientConfig:
             )
         # The machine principal must be a real, distinct identity — the
         # reserved sentinels resolve to no account the grant could scope to.
-        if sub in (RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC):
+        if sub in (RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC, RESERVED_USER_AUTHENTICATED):
             raise RuntimeError(
                 f"client-credentials: {_SUB_ENV}={sub!r} is a reserved identity; "
                 "point it at a distinct, dedicated principal"

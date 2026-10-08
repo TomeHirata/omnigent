@@ -50,9 +50,15 @@ from omnigent.db.utils import (
     run_write_transaction,
 )
 from omnigent.entities import Account, AccountToken
-from omnigent.server.auth import RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC
+from omnigent.server.auth import (
+    RESERVED_USER_AUTHENTICATED,
+    RESERVED_USER_LOCAL,
+    RESERVED_USER_PUBLIC,
+)
 
-_HIDDEN_LIST_USERS = frozenset({RESERVED_USER_PUBLIC, RESERVED_USER_LOCAL})
+_HIDDEN_LIST_USERS = frozenset(
+    {RESERVED_USER_PUBLIC, RESERVED_USER_LOCAL, RESERVED_USER_AUTHENTICATED}
+)
 
 
 def _to_account(row: SqlUser) -> Account:
@@ -361,11 +367,11 @@ class SqlAlchemyAccountStore:
     def list_users(self) -> list[Account]:
         """Return all users for the admin members page.
 
-        Excludes two sentinel rows that aren't actionable in
+        Excludes sentinel rows that aren't actionable in
         accounts mode:
 
-        - ``"__public__"`` — anonymous-grant sentinel, never a
-          real user.
+        - ``"__public__"`` and ``"__authenticated__"`` — group-grant
+          sentinels, never real users.
         - ``"local"`` — backfilled by the original session-permissions
           migration so pre-accounts deploys had a default owner row
           for existing conversations. In accounts mode the name is
@@ -403,7 +409,7 @@ class SqlAlchemyAccountStore:
         immediate session already holds the write lock, so no per-row
         clause is needed.
 
-        Excludes ``_HIDDEN_LIST_USERS`` (``"local"``, ``"__public__"``)
+        Excludes the reserved sentinels in ``_HIDDEN_LIST_USERS``
         the same way :meth:`list_users` does — the legacy ``"local"``
         row can carry ``is_admin=True`` from the pre-accounts backfill,
         but it's reserved and can't authenticate in accounts mode, so
