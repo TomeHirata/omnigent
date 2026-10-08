@@ -625,13 +625,13 @@ def resolve_matching_text(conversation_id: str, text: str, *, hold: bool = False
             return MatchedDrain(matched=None, skipped=[])
         ordered = [(pid, entry) for pid, entry in entries.items() if not entry.held]
         texts = [_collapse_whitespace(_content_text(entry.content)) for _pid, entry in ordered]
-        interrupted = [entry.interrupted for _pid, entry in ordered]
         # Two passes. An exact (whitespace-collapsed) match first, so two
         # messages that differ only in a marker-like phrase the person typed
         # at the front stay distinct. Then, for entries carrying attachments:
         # the executor pastes one generated marker line per file block ahead
         # of the text, so drop exactly that many from the mirror and compare
         # with the entry's own text — typed marker-like text still counts.
+        interrupted = [entry.interrupted for _pid, entry in ordered]
         match_index = _first_match(texts, exact_needle, interrupted)
         if match_index is None:
             marker_matches: list[int] = []
