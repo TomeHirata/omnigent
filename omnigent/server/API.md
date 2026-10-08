@@ -1369,6 +1369,14 @@ in-flight HTTP roundtrip rather than the full turn duration. Clients
 should rely on `session.input.consumed` events and item-id dedupe
 against the snapshot to reconcile accepted inputs.
 
+Native shell-mode inputs (`!cmd`) settle when the matching `terminal_command`
+input is persisted. Its output does not acknowledge an input, and no
+`session.input.consumed` event is emitted for the shell command. Clients should
+remove only the sent bubble matching that command. During a mixed-version
+rollout, an older client can retain that bubble until refreshing its snapshot;
+an older server can still report the command as `native_prompt_not_recorded`.
+Updated clients preserve later bubbles when that older server's receipt arrives.
+
 ### Sessions Typical Flow
 
 ```
