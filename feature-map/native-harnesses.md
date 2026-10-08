@@ -288,6 +288,14 @@ Cross-harness journeys:
   checks output recovery across a real server restart and injected stream-open
   failures. It supplies native-style events; it does not run a vendor CLI.
   Run with plain `uv run pytest` and the browser prerequisites in the skill.
+- **`disconnect`, completed Claude Task child (own environment):**
+  `tests/e2e_ui/sessions/test_claude_native_idle_handoff.py::test_completed_claude_child_survives_stale_status_handoff`
+  uses the real Claude CLI, native child forwarder, two server replicas, and a
+  runner tunnel cut. A completed child with stale saved `running` state must
+  not acquire a failure on the new replica, in its chat or the Agents panel,
+  including after reload. Run with plain `uv run pytest` and the browser
+  prerequisites in the skill. Requires Claude Code and tmux; machine-managed
+  Claude credentials need an isolated container for the scripted model endpoint.
 
 - **`plugin-inventory` (component and host tests):**
   `tests/e2e/test_host_plugins_e2e.py::test_host_plugin_inventory` starts a real
