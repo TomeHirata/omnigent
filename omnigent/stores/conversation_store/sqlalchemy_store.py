@@ -1971,7 +1971,7 @@ class SqlAlchemyConversationStore(ConversationStore):
 
     def get_session_owner(self, conversation_id: str, *, owner_only: bool = False) -> str | None:
         """
-        Return the highest-privilege individual grantee of a session.
+        Return the highest-privilege non-public grantee of a session.
 
         By default, lower-level grants are a fallback when no owner grant exists,
         preserving cost attribution for shared sessions. Use ``owner_only=True``
@@ -1988,11 +1988,7 @@ class SqlAlchemyConversationStore(ConversationStore):
         self, conversation_id: str, *, owner_only: bool = False
     ) -> AccountAuthority | None:
         """Read the owner grant and registration together, including external identities."""
-        from omnigent.server.auth import (
-            LEVEL_OWNER,
-            RESERVED_USER_AUTHENTICATED,
-            RESERVED_USER_PUBLIC,
-        )
+        from omnigent.server.auth import LEVEL_OWNER, RESERVED_USER_PUBLIC
 
         query = (
             select(SqlSessionPermission.user_id, SqlUser.account_generation)
@@ -2005,11 +2001,7 @@ class SqlAlchemyConversationStore(ConversationStore):
             )
             .where(SqlSessionPermission.workspace_id == current_workspace_id())
             .where(SqlSessionPermission.conversation_id == conversation_id)
-            .where(
-                SqlSessionPermission.user_id.notin_(
-                    (RESERVED_USER_PUBLIC, RESERVED_USER_AUTHENTICATED)
-                )
-            )
+            .where(SqlSessionPermission.user_id != RESERVED_USER_PUBLIC)
             .where(SqlUser.deleted_at.is_(None))
             .order_by(SqlSessionPermission.level.desc())
             .limit(1)

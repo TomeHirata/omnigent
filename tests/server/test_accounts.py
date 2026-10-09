@@ -1302,14 +1302,14 @@ def test_invite_is_single_use(accounts_app: TestClient) -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "username,expected_status",
-    [("local", 400), ("__public__", 422), ("__authenticated__", 422)],
-)
-def test_register_rejects_reserved_username(
-    accounts_app: TestClient, username: str, expected_status: int
-) -> None:
-    """Reserved names fail registration, either validation or the explicit guard."""
+def test_register_rejects_reserved_username(accounts_app: TestClient) -> None:
+    """Reserved usernames ("local", "__public__") cannot be claimed.
+
+    The auth provider also rejects them at cookie validation time
+    so even bypassing this guard wouldn't authenticate, but
+    catching it at registration time gives a clean error and
+    prevents the row from being created.
+    """
     admin = _login(accounts_app, "admin", "admin-pw-12345")
     token = admin.post("/auth/invite", json={}).json()["token"]
 
@@ -1317,54 +1317,10 @@ def test_register_rejects_reserved_username(
 
     resp = _TC(accounts_app.app).post(
         "/auth/register",
-        json={"invite": token, "username": username, "password": "aaaaaaaa"},
+        json={"invite": token, "username": "local", "password": "aaaaaaaa"},
     )
-    assert resp.status_code == expected_status
-    if expected_status == 400:
-        assert "reserved" in resp.json()["error"].lower()
-    else:
-        assert resp.json()["detail"][0]["loc"] == ["body", "username"]
-
-
-def test_signed_in_group_sharing_includes_accounts_created_after_the_grant(
-    accounts_app: TestClient,
-) -> None:
-    from tests._helpers.session import post_session_bundle
-    from tests.server.helpers import build_agent_bundle
-
-    admin = _login(accounts_app, "admin", "admin-pw-12345")
-    created = post_session_bundle(
-        admin.post,
-        "/v1/sessions",
-        build_agent_bundle(name="shared-automation"),
-    )
-    assert created.status_code == 201, created.text
-    path = f"/v1/sessions/{created.json()['session_id']}"
-    grant = admin.put(f"{path}/permissions", json={"user_id": "__authenticated__", "level": 2})
-    assert grant.status_code == 200, grant.text
-    members = admin.get("/auth/users")
-    assert "__authenticated__" not in {user["id"] for user in members.json()["users"]}
-
-    invite = admin.post("/auth/invite", json={}).json()["token"]
-    with TestClient(accounts_app.app) as member:
-        assert member.get(path).status_code == 401
-        registered = member.post(
-            "/auth/register",
-            json={"invite": invite, "username": "new-member", "password": "member-pw-12345"},
-        )
-        assert registered.status_code == 200, registered.text
-        _login(member, "new-member", "member-pw-12345")
-        snapshot = member.get(path)
-        assert snapshot.status_code == 200, snapshot.text
-        assert snapshot.json()["permission_level"] == 2
-        assert member.patch(path, json={"title": "Team follow-up"}).status_code == 200
-        assert (
-            member.put(f"{path}/permissions", json={"user_id": "another", "level": 2}).status_code
-            == 403
-        )
-        assert member.get("/auth/users").status_code == 403
-        assert admin.delete("/auth/users/new-member").status_code == 204
-        assert member.get(path).status_code == 401
+    assert resp.status_code == 400
+    assert "reserved" in resp.json()["error"].lower()
 
 
 def test_alice_cannot_see_bobs_admin_endpoints(accounts_app: TestClient) -> None:
@@ -1474,7 +1430,21 @@ def test_admin_list_excludes_legacy_local_and_public_sentinels(
     accounts_app: TestClient,
     tmp_path: Path,
 ) -> None:
-    """Reserved identities are not actionable members, even when stored rows exist."""
+    """The Members page hides ``"local"`` and ``"__public__"``.
+
+    Both rows exist in the ``users`` table — ``"local"`` is
+    backfilled by the original session-permissions migration so
+    pre-accounts deploys had a default owner row for existing
+    conversations, and ``"__public__"`` is the anonymous-grant
+    sentinel. Neither is actionable in accounts mode (reserved
+    names can't authenticate, can't be reset, can't be promoted),
+    so listing them on the Members page is dead weight.
+
+    We seed both rows directly (bypassing the accounts API, which
+    rejects reserved names) into the same sqlite file the
+    ``accounts_app`` fixture wired up, then confirm the admin
+    list filter drops them.
+    """
     from omnigent.db.db_models import SqlUser
     from omnigent.db.utils import get_or_create_engine, make_managed_session_maker
 
@@ -1482,7 +1452,7 @@ def test_admin_list_excludes_legacy_local_and_public_sentinels(
     engine = get_or_create_engine(db_url)
     session_maker = make_managed_session_maker(engine)
     with session_maker() as session:
-        for sentinel in ("local", "__public__", "__authenticated__"):
+        for sentinel in ("local", "__public__"):
             if session.get(SqlUser, (0, sentinel)) is None:
                 session.add(SqlUser(id=sentinel, is_admin=False))
         session.commit()
@@ -1498,7 +1468,6 @@ def test_admin_list_excludes_legacy_local_and_public_sentinels(
     assert "__public__" not in user_ids, (
         "list_users() must hide the '__public__' anonymous-grant sentinel"
     )
-    assert "__authenticated__" not in user_ids
 
 
 def test_admin_cannot_delete_self(accounts_app: TestClient) -> None:

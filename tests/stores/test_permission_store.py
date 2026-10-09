@@ -13,11 +13,8 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import event
 
-from omnigent.db.db_models import SqlSessionPermission, SqlUser
 from omnigent.entities import SessionPermission
-from omnigent.errors import ErrorCode, OmnigentError
-from omnigent.server.auth import RESERVED_USER_AUTHENTICATED, RESERVED_USER_PUBLIC
-from omnigent.server.permissions import resolved_allows, resolved_level
+from omnigent.server.auth import RESERVED_USER_PUBLIC
 from omnigent.stores.conversation_store.sqlalchemy_store import (
     SqlAlchemyConversationStore,
 )
@@ -488,7 +485,7 @@ def test_list_users_returns_real_users_with_admin_flag(
 def test_list_users_excludes_reserved_sentinels(
     store: SqlAlchemyPermissionStore,
 ) -> None:
-    """``list_users`` hides reserved identities.
+    """``list_users`` hides the ``local`` and ``__public__`` sentinels.
 
     They aren't real, actionable actors, matching
     ``account_store.list_users()`` so the admin list is identical
@@ -496,7 +493,6 @@ def test_list_users_excludes_reserved_sentinels(
     """
     store.ensure_user("local", is_admin=True)
     store.ensure_user("__public__")
-    store.ensure_user(RESERVED_USER_AUTHENTICATED)
     store.ensure_user("real@test.com")
 
     ids = {u.id for u in store.list_users()}
@@ -820,171 +816,6 @@ def test_list_conversations_direct_grant_required_public_alone_hidden(
 
 
 # ── resolve_access ───────────────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize("level", [1, 2])
-def test_authenticated_grant_applies_to_new_users(
-    store: SqlAlchemyPermissionStore, db_uri: str, level: int
-) -> None:
-    store.ensure_user(RESERVED_USER_AUTHENTICATED)
-    conv_id = _create_conversation(db_uri)
-    store.grant(RESERVED_USER_AUTHENTICATED, conv_id, level)
-
-    for user in ("alice@test.com", "future-member@test.com"):
-        assert store.get(user, conv_id) is None
-        assert store.check_access(user, conv_id, level)
-        assert not store.check_access(user, conv_id, 3)
-        assert store.get_permission_level(user, conv_id) == level
-        access = store.resolve_access(user, conv_id)
-        assert access.authenticated_grant_level == level
-        assert resolved_allows(access, level)
-        assert not resolved_allows(access, 3)
-        assert resolved_level(access) == level
-
-
-@pytest.mark.parametrize("user", [None, "", "local", "__public__", "__authenticated__"])
-def test_authenticated_grant_never_applies_to_anonymous_or_local_users(
-    store: SqlAlchemyPermissionStore, db_uri: str, user: str | None
-) -> None:
-    store.ensure_user(RESERVED_USER_AUTHENTICATED)
-    if user == "local":
-        store.set_admin("local", False)
-    conv_id = _create_conversation(db_uri)
-    store.grant(RESERVED_USER_AUTHENTICATED, conv_id, 2)
-
-    assert not store.check_access(user, conv_id, 1)
-    assert store.get_permission_level(user, conv_id) is None
-    access = store.resolve_access(user, conv_id)
-    assert access.authenticated_grant_level is None
-    assert not resolved_allows(access, 1)
-    assert resolved_level(access) is None
-
-
-@pytest.mark.parametrize("direct_level,expected", [(1, 2), (2, 2), (3, 3), (4, 4)])
-def test_authenticated_edit_combines_with_direct_access(
-    store: SqlAlchemyPermissionStore, db_uri: str, direct_level: int, expected: int
-) -> None:
-    store.ensure_user(RESERVED_USER_AUTHENTICATED)
-    store.ensure_user("alice")
-    conv_id = _create_conversation(db_uri)
-    store.grant("alice", conv_id, direct_level)
-    store.grant(RESERVED_USER_AUTHENTICATED, conv_id, 2)
-
-    assert store.get_permission_level("alice", conv_id) == expected
-    assert resolved_level(store.resolve_access("alice", conv_id)) == expected
-
-
-def test_authenticated_grant_downgrade_and_revoke_evict_all_cached_users(
-    store: SqlAlchemyPermissionStore, db_uri: str
-) -> None:
-    store.ensure_user(RESERVED_USER_AUTHENTICATED)
-    conv_id = _create_conversation(db_uri)
-    store.grant(RESERVED_USER_AUTHENTICATED, conv_id, 2)
-    users = ("alice", "bob")
-    for user in users:
-        assert resolved_allows(store.resolve_access(user, conv_id), 2)
-    store.grant(RESERVED_USER_AUTHENTICATED, conv_id, 1)
-    for user in users:
-        assert resolved_level(store.resolve_access(user, conv_id)) == 1
-        assert not resolved_allows(store.resolve_access(user, conv_id), 2)
-    store.revoke(RESERVED_USER_AUTHENTICATED, conv_id)
-    for user in users:
-        assert resolved_level(store.resolve_access(user, conv_id)) is None
-
-
-def test_authenticated_grant_cannot_confer_management_even_with_invalid_stored_level(
-    store: SqlAlchemyPermissionStore, db_uri: str
-) -> None:
-    store.ensure_user(RESERVED_USER_AUTHENTICATED)
-    conv_id = _create_conversation(db_uri)
-    store.grant(RESERVED_USER_AUTHENTICATED, conv_id, 4)
-    assert store.get_permission_level("alice", conv_id) == 2
-    assert not store.check_access("alice", conv_id, 3)
-    access = store.resolve_access("alice", conv_id)
-    assert resolved_level(access) == 2
-    assert not resolved_allows(access, 3)
-
-
-@pytest.mark.parametrize("level", [1, 2, 3, 4])
-@pytest.mark.parametrize("generation", [None, "a" * 32])
-def test_legacy_authenticated_identity_does_not_become_a_group_on_upgrade(
-    store: SqlAlchemyPermissionStore, db_uri: str, level: int, generation: str | None
-) -> None:
-    conv_id = _create_conversation(db_uri)
-    with store._session("seed_legacy_identity") as session:
-        session.add(
-            SqlUser(
-                id=RESERVED_USER_AUTHENTICATED,
-                is_admin=False,
-                account_generation=generation,
-            )
-        )
-        session.add(
-            SqlSessionPermission(
-                user_id=RESERVED_USER_AUTHENTICATED, conversation_id=conv_id, level=level
-            )
-        )
-        session.commit()
-
-    upgraded = SqlAlchemyPermissionStore(db_uri)
-    upgraded.ensure_user("reader")
-    upgraded.grant("reader", conv_id, 1)
-    assert upgraded.get_permission_level("reader", conv_id) == 1
-    assert resolved_level(upgraded.resolve_access("reader", conv_id)) == 1
-    assert not upgraded.check_access("unrelated", conv_id, 1)
-    assert resolved_level(upgraded.resolve_access("unrelated", conv_id)) is None
-    assert upgraded.get(RESERVED_USER_AUTHENTICATED, conv_id) is None
-    assert upgraded.list_for_sessions([conv_id])[conv_id] == [
-        SessionPermission("reader", conv_id, 1)
-    ]
-    assert upgraded.list_for_session(conv_id) == ([SessionPermission("reader", conv_id, 1)], None)
-    assert upgraded.list_for_user(RESERVED_USER_AUTHENTICATED) == []
-    for operation in (
-        lambda: upgraded.ensure_user(RESERVED_USER_AUTHENTICATED),
-        lambda: upgraded.grant(RESERVED_USER_AUTHENTICATED, conv_id, 2),
-    ):
-        with pytest.raises(OmnigentError) as error:
-            operation()
-        assert error.value.code == ErrorCode.CONFLICT
-    with upgraded._session("read_legacy_permission") as session:
-        row = session.get(SqlSessionPermission, (0, RESERVED_USER_AUTHENTICATED, conv_id))
-        assert row is not None and row.level == level
-
-
-def test_orphaned_legacy_authenticated_grant_blocks_group_creation(
-    store: SqlAlchemyPermissionStore, db_uri: str
-) -> None:
-    conv_id = _create_conversation(db_uri)
-    with store._session("seed_orphaned_legacy_permission") as session:
-        session.add(
-            SqlSessionPermission(
-                user_id=RESERVED_USER_AUTHENTICATED, conversation_id=conv_id, level=2
-            )
-        )
-        session.commit()
-    with pytest.raises(OmnigentError) as error:
-        store.ensure_user(RESERVED_USER_AUTHENTICATED)
-    assert error.value.code == ErrorCode.CONFLICT
-    assert not store.check_access("unrelated", conv_id, 1)
-    assert resolved_level(store.resolve_access("unrelated", conv_id)) is None
-    assert not store.user_exists(RESERVED_USER_AUTHENTICATED)
-
-
-@pytest.mark.parametrize("level", [1, 2, 4])
-def test_authenticated_grant_never_identifies_a_session_owner(
-    store: SqlAlchemyPermissionStore, db_uri: str, level: int
-) -> None:
-    store.ensure_user(RESERVED_USER_AUTHENTICATED)
-    conv_id = _create_conversation(db_uri)
-    store.grant(RESERVED_USER_AUTHENTICATED, conv_id, level)
-    conversations = SqlAlchemyConversationStore(db_uri)
-    assert conversations.get_session_owner(conv_id) is None
-    assert conversations.get_session_owner(conv_id, owner_only=True) is None
-
-    store.ensure_user("alice")
-    store.grant("alice", conv_id, 1)
-    assert conversations.get_session_owner(conv_id) == "alice"
-    assert conversations.get_session_owner(conv_id, owner_only=True) is None
 
 
 def test_resolve_access_direct_grant_only(store: SqlAlchemyPermissionStore, db_uri: str) -> None:

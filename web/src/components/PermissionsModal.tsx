@@ -43,6 +43,7 @@ import {
   useRevokePermission,
 } from "@/hooks/usePermissions";
 import { useSession } from "@/hooks/useSession";
+import { usePublicSharingMaxLevel } from "@/hooks/useSharing";
 import { useUserSearch } from "@/hooks/useUserSearch";
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { withBasePath } from "@/lib/basePath";
@@ -53,7 +54,6 @@ import { useRebasePath } from "@/lib/routing";
 import { cn } from "@/lib/utils";
 
 const PUBLIC_USER = "__public__";
-const AUTHENTICATED_USER = "__authenticated__";
 
 /** Numeric permission level → display label for fixed (non-editable) rows. */
 const LEVEL_LABELS: Record<number, string> = {
@@ -85,11 +85,13 @@ export function PermissionsModal({
   const sharingReadOnly = sharingMode === "read_only" || sharingMode === "restricted_read_only";
   const workspaceBlocked =
     sharingMode === "restricted_read_only" && workspaceSharingBlocked(workspace);
-  // Public (anyone-with-the-link) access is a separate server switch from the
-  // sharing tiers; when off, hide the toggle (the server rejects the grant too).
+  // Disabling public sharing prevents new grants but still permits revocation.
   const publicSharingEnabled = info === "loading" ? true : info.public_sharing_enabled;
-  const authenticatedSharingEnabled =
-    info !== "loading" && info.authenticated_sharing_enabled === true;
+  const { data: livePublicMaxLevel } = usePublicSharingMaxLevel(open && !sharingOff);
+  const publicMaxLevel =
+    (livePublicMaxLevel ?? (info === "loading" ? "read" : info.public_sharing_max_level)) === "edit"
+      ? 2
+      : 1;
   // In "off" mode never fetch the grant list — the modal short-circuits to a
   // notice below, so the request would be wasted (and the server rejects any
   // grant anyway).
@@ -119,12 +121,9 @@ export function PermissionsModal({
   const hasWorkspace = !!session?.workspace;
   const workspaceShared = session?.shareWorkspaceFiles ?? false;
 
-  const userGrants = (permissions ?? []).filter(
-    (p) => p.user_id !== PUBLIC_USER && p.user_id !== AUTHENTICATED_USER,
-  );
+  const userGrants = (permissions ?? []).filter((p) => p.user_id !== PUBLIC_USER);
   const publicGrant = (permissions ?? []).find((p) => p.user_id === PUBLIC_USER);
-  const authenticatedGrant = (permissions ?? []).find((p) => p.user_id === AUTHENTICATED_USER);
-  const isPublic = !!publicGrant;
+  const publicLevel = publicGrant ? Math.min(publicGrant.level, publicMaxLevel) : 0;
 
   function handleGrant(e: FormEvent) {
     e.preventDefault();
@@ -156,11 +155,12 @@ export function PermissionsModal({
     grant.mutate({ userId, level }, { onError: (err) => setError(err.message) });
   }
 
-  function handlePublicToggle(checked: boolean) {
-    if (checked && workspaceBlocked) return;
+  function handlePublicLevel(value: string) {
+    const level = Number(value);
+    if (level > 0 && (workspaceBlocked || !publicSharingEnabled)) return;
     setError(null);
-    if (checked) {
-      grant.mutate({ userId: PUBLIC_USER, level: 1 }, { onError: (err) => setError(err.message) });
+    if (level > 0) {
+      grant.mutate({ userId: PUBLIC_USER, level }, { onError: (err) => setError(err.message) });
     } else {
       revoke.mutate(PUBLIC_USER, {
         onError: (err) => setError(err.message),
@@ -212,47 +212,38 @@ export function PermissionsModal({
           </DialogDescription>
         </DialogHeader>
 
-        {/* Public toggle — hidden when the server disables public access. */}
-        {publicSharingEnabled && (
-          <div className="flex items-center justify-between rounded-lg border px-3 py-2">
-            <div>
-              <p className="text-ui font-medium">Public access</p>
-              <p className="text-sm text-muted-foreground">Anyone can view this session</p>
-            </div>
-            <Switch
-              checked={isPublic}
-              onCheckedChange={handlePublicToggle}
-              disabled={grant.isPending || revoke.isPending || (workspaceBlocked && !isPublic)}
-              componentId="diagnostics.permissions.public_toggle"
-            />
-          </div>
-        )}
-
-        {(authenticatedSharingEnabled || authenticatedGrant) && (
+        {(publicSharingEnabled || publicGrant) && (
           <div className="flex min-w-0 items-center justify-between gap-3 rounded-lg border px-3 py-2">
-            <p className="min-w-0 text-ui font-medium">All signed-in users</p>
+            <div className="min-w-0">
+              <p className="text-ui font-medium">General access</p>
+              <p className="text-sm text-muted-foreground">
+                Anyone with the link, sign-in required
+              </p>
+            </div>
             <Select
-              value={String(authenticatedGrant?.level ?? 0)}
-              onValueChange={(value) => {
-                if (value === "0") handleRevoke(AUTHENTICATED_USER);
-                else handleChangeLevel(AUTHENTICATED_USER, Number(value));
-              }}
-              disabled={isLoading || grant.isPending || revoke.isPending}
-              componentId="diagnostics.permissions.authenticated_level"
+              value={String(publicLevel)}
+              onValueChange={handlePublicLevel}
+              disabled={
+                isLoading ||
+                grant.isPending ||
+                revoke.isPending ||
+                (workspaceBlocked && !publicGrant)
+              }
+              componentId="diagnostics.permissions.public_level"
               valueHasNoPii
             >
-              <SelectTrigger className="h-8 w-28 shrink-0" aria-label="All signed-in users">
+              <SelectTrigger className="h-8 w-28 shrink-0" aria-label="General access">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="0">No access</SelectItem>
-                <SelectItem value="1" disabled={workspaceBlocked || !authenticatedSharingEnabled}>
+                <SelectItem value="1" disabled={workspaceBlocked || !publicSharingEnabled}>
                   Read
                 </SelectItem>
-                {(!sharingReadOnly || authenticatedGrant?.level === 2) && (
+                {publicMaxLevel === 2 && (
                   <SelectItem
                     value="2"
-                    disabled={sharingReadOnly || workspaceBlocked || !authenticatedSharingEnabled}
+                    disabled={sharingReadOnly || workspaceBlocked || !publicSharingEnabled}
                   >
                     Edit
                   </SelectItem>
@@ -343,7 +334,7 @@ export function PermissionsModal({
               componentId="diagnostics.permissions.grant_level"
               valueHasNoPii
             >
-              <SelectTrigger className="mt-1 w-24">
+              <SelectTrigger className="mt-1 w-24" aria-label="New user permission">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>

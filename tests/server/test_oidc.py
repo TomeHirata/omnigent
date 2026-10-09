@@ -278,7 +278,7 @@ def test_header_source_single_user_still_honors_header() -> None:
     assert provider.get_user_id(request) == "alice@example.com"
 
 
-@pytest.mark.parametrize("reserved", ["local", "__public__", "__authenticated__"])
+@pytest.mark.parametrize("reserved", ["local", "__public__"])
 def test_header_source_rejects_reserved_names(
     reserved: str,
 ) -> None:
@@ -578,7 +578,7 @@ def test_oidc_source_returns_none_for_expired_cookie() -> None:
     assert provider.get_user_id(request) is None
 
 
-@pytest.mark.parametrize("reserved", ["local", "__public__", "__authenticated__"])
+@pytest.mark.parametrize("reserved", ["local", "__public__"])
 def test_oidc_source_rejects_reserved_sub_claims(reserved: str) -> None:
     """OIDC source rejects cookies with reserved user names in sub.
 

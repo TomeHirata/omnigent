@@ -89,24 +89,22 @@ describe("sandboxProviderOptions", () => {
   });
 });
 
-describe("signed-in sharing capability", () => {
-  it.each([undefined, false, "true", 1])(
-    "requires explicit boolean support (%s)",
+describe("resolveServerInfo sandbox_providers", () => {
+  it.each([undefined, null, "", "manage", 2, true])(
+    "defaults an absent or invalid public ceiling %s to Read",
     async (value) => {
-      expect(
-        (await probe({ authenticated_sharing_enabled: value })).authenticated_sharing_enabled,
-      ).toBe(false);
+      expect((await probe({ public_sharing_max_level: value })).public_sharing_max_level).toBe(
+        "read",
+      );
     },
   );
 
-  it("recognizes explicit support from the server", async () => {
-    expect(
-      (await probe({ authenticated_sharing_enabled: true })).authenticated_sharing_enabled,
-    ).toBe(true);
+  it("recognizes an explicit public Edit ceiling", async () => {
+    expect((await probe({ public_sharing_max_level: "edit" })).public_sharing_max_level).toBe(
+      "edit",
+    );
   });
-});
 
-describe("resolveServerInfo sandbox_providers", () => {
   it("keeps the provider list from the probe", async () => {
     // Regression: the probe rebuilds ServerInfo field by field, so a
     // forgotten field is dropped before any component sees it.

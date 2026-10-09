@@ -30,15 +30,12 @@ from omnigent.server._elicitation_registry import (
     _PreResolvedHarnessElicitation,
 )
 from omnigent.server.auth import (
-    LEVEL_EDIT,
     LEVEL_MANAGE,
     LEVEL_OWNER,
     LEVEL_READ,
-    RESERVED_USER_AUTHENTICATED,
     RESERVED_USER_PUBLIC,
     AuthProvider,
     SharingMode,
-    is_authenticated_user,
     workspace_sharing_blocked,
 )
 from omnigent.server.routes._auth_helpers import (
@@ -168,24 +165,16 @@ def register_permissions_routes(
                     "Public access has been disabled for this Omnigent server.",
                     code=ErrorCode.FORBIDDEN,
                 )
-            if body.level > LEVEL_READ:
+            from omnigent.server.sharing_settings import PublicSharingMaxLevel
+
+            ceiling = getattr(
+                request.app.state, "public_sharing_max_level", lambda: PublicSharingMaxLevel.READ
+            )()
+            if body.level > ceiling.level:
                 raise OmnigentError(
-                    "Public access is limited to read-only (level 1)",
+                    f"Public access is limited to {ceiling.value} (level {ceiling.level})",
                     code=ErrorCode.INVALID_INPUT,
                 )
-        if body.user_id == RESERVED_USER_AUTHENTICATED:
-            if not is_authenticated_user(user_id):
-                raise OmnigentError(
-                    "Signed-in user sharing requires an authenticated user.",
-                    code=ErrorCode.INVALID_INPUT,
-                )
-            if body.level > LEVEL_EDIT:
-                raise OmnigentError(
-                    "Signed-in user access is limited to edit (level 2)",
-                    code=ErrorCode.INVALID_INPUT,
-                )
-            # Pin the newly marked group generation, not the pre-creation absence.
-            await asyncio.to_thread(permission_store.ensure_user, body.user_id)
         target = await asyncio.to_thread(permission_store.get_user, body.user_id)
         with target_account_scope(body.user_id, target.account_generation if target else None):
             existing = await asyncio.to_thread(permission_store.get, body.user_id, session_id)
@@ -194,8 +183,7 @@ def register_permissions_routes(
                     "Cannot modify owner permissions",
                     code=ErrorCode.FORBIDDEN,
                 )
-            if body.user_id != RESERVED_USER_AUTHENTICATED:
-                await asyncio.to_thread(permission_store.ensure_user, body.user_id)
+            await asyncio.to_thread(permission_store.ensure_user, body.user_id)
             perm = await asyncio.to_thread(
                 permission_store.grant, body.user_id, session_id, body.level
             )

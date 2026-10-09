@@ -9,7 +9,8 @@ this single function.
 from __future__ import annotations
 
 from omnigent.entities import Conversation, ResolvedAccess
-from omnigent.server.auth import LEVEL_EDIT, LEVEL_MANAGE, LEVEL_OWNER
+from omnigent.server.auth import LEVEL_MANAGE, LEVEL_OWNER
+from omnigent.server.sharing_settings import effective_public_level
 from omnigent.stores.conversation_store import ConversationStore
 from omnigent.stores.permission_store import PermissionStore
 
@@ -71,7 +72,7 @@ def resolved_allows(access: ResolvedAccess, required_level: int) -> bool:
     """Whether *access* grants *required_level*, ignoring sub-agent delegation.
 
     The in-memory equivalent of the admin bypass plus
-    :meth:`PermissionStore.check_access` (direct, public, or signed-in-user
+    :meth:`PermissionStore.check_access` (direct grant OR ``"__public__"``
     grant), for a :class:`ResolvedAccess` snapshot already fetched from the
     store. Sub-agent parent delegation is the caller's responsibility — this
     only considers the grants on the conversation the snapshot was resolved
@@ -86,12 +87,8 @@ def resolved_allows(access: ResolvedAccess, required_level: int) -> bool:
         return True
     if access.user_grant_level is not None and access.user_grant_level >= required_level:
         return True
-    if access.public_grant_level is not None and access.public_grant_level >= required_level:
-        return True
-    if (
-        access.authenticated_grant_level is not None
-        and min(access.authenticated_grant_level, LEVEL_EDIT) >= required_level
-    ):
+    public_level = effective_public_level(access.public_grant_level)
+    if public_level is not None and public_level >= required_level:
         return True
     return False
 
@@ -100,10 +97,8 @@ def resolved_level(access: ResolvedAccess) -> int | None:
     """The effective level for UI display from a resolved-access snapshot.
 
     The in-memory equivalent of :meth:`PermissionStore.get_permission_level`:
-    admin → ``LEVEL_OWNER``; otherwise the user's own grant, falling back to
-    the ``"__public__"`` grant, else ``None``. Note this deliberately prefers
-    the user's own grant over a (possibly higher) public grant, matching the
-    store. A signed-in-user grant can raise that displayed level up to edit.
+    admin → ``LEVEL_OWNER``; otherwise the maximum of the direct grant and
+    the capped public grant, or ``None`` if neither grants access.
 
     :param access: The resolved-access snapshot for one ``(user, conv)``.
     :returns: Numeric level (1/2/3/4), or ``None`` when the user has no
@@ -111,12 +106,12 @@ def resolved_level(access: ResolvedAccess) -> int | None:
     """
     if access.is_admin:
         return LEVEL_OWNER
-    level = access.user_grant_level
-    if level is None:
-        level = access.public_grant_level
-    if access.authenticated_grant_level is not None:
-        level = max(level or 0, min(access.authenticated_grant_level, LEVEL_EDIT))
-    return level
+    levels = [
+        level
+        for level in (access.user_grant_level, effective_public_level(access.public_grant_level))
+        if level is not None
+    ]
+    return max(levels) if levels else None
 
 
 def check_is_manager(

@@ -2601,7 +2601,7 @@
             "type": "integer"
           },
           "user_id": {
-            "description": "The user to grant access to, e.g. `\"alice@example.com\"`, `\"__authenticated__\"` for signed-in users (read/edit), or `\"__public__\"` for public read access.",
+            "description": "The user to grant access to, e.g. `\"alice@example.com\"` or `\"__public__\"` for public access subject to the server's public permission ceiling.",
             "title": "User Id",
             "type": "string"
           }
@@ -5195,11 +5195,6 @@
             "title": "Archive Worktree Cleanup",
             "type": "boolean"
           },
-          "authenticated_sharing_enabled": {
-            "default": false,
-            "title": "Authenticated Sharing Enabled",
-            "type": "boolean"
-          },
           "branding": {
             "$ref": "#/components/schemas/BrandingInfo"
           },
@@ -5258,6 +5253,15 @@
           "public_sharing_enabled": {
             "title": "Public Sharing Enabled",
             "type": "boolean"
+          },
+          "public_sharing_max_level": {
+            "default": "read",
+            "enum": [
+              "read",
+              "edit"
+            ],
+            "title": "Public Sharing Max Level",
+            "type": "string"
           },
           "sandbox_provider": {
             "anyOf": [
@@ -8315,6 +8319,17 @@
               }
             ],
             "title": "Public Sharing"
+          },
+          "public_sharing_max_level": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Public Sharing Max Level"
           },
           "sharing_mode": {
             "anyOf": [

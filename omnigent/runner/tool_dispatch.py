@@ -315,13 +315,12 @@ _SESSION_RENAME_TITLE_MAX_CHARS: int = SysSessionRenameTool().get_schema()["func
     "parameters"
 ]["properties"]["title"]["maxLength"]
 
-# Grantee sentinel for an anonymous, public read-only share. Mirrors the
+# Grantee sentinel for public link access. Mirrors the
 # server's RESERVED_USER_PUBLIC; only specs with
 # ``agent_session_sharing: public`` may grant it (enforced in
 # _session_share_via_rest — the server can't see the agent's sharing
 # policy, so the runner is the gate).
 _PUBLIC_USER_SENTINEL = "__public__"
-_AUTHENTICATED_USER_SENTINEL = "__authenticated__"
 
 # Spec ``agent_session_sharing:`` policy values
 # (omnigent.spec.types.SharePolicy) that enable the sys_session_share
@@ -5137,7 +5136,7 @@ async def _session_share_via_rest(
     Same channel and security posture as the other session REST tools:
     the server enforces that ``server_client``'s identity holds
     manage-level access on the target (the session owner does), and caps
-    public (``__public__``) grants at read.
+    public (``__public__``) grants at the configured ceiling (read by default).
 
     The spec's ``agent_session_sharing:`` policy is enforced HERE, in the
     runner, because the server cannot see it: an ``agent_session_sharing:
@@ -5153,7 +5152,7 @@ async def _session_share_via_rest(
     above read level) instead of a bare status code.
 
     :param args: Parsed tool arguments. Requires ``user_id`` (grantee
-        email, ``"__authenticated__"``, or ``"__public__"``); optional ``level`` (``"read"``
+        email or ``"__public__"``); optional ``level`` (``"read"``
         default / ``"edit"`` / ``"manage"``) and ``session_id``.
     :param conversation_id: The caller's own session id, used as the
         default target when ``session_id`` is omitted.
@@ -5206,20 +5205,6 @@ async def _session_share_via_rest(
             {"error": f"sys_session_share: level must be one of {sorted(level_by_name)}"}
         )
     try:
-        if user_id == _AUTHENTICATED_USER_SENTINEL:
-            info = await server_client.get("/v1/info", timeout=30.0)
-            info.raise_for_status()
-            capabilities = info.json()
-            if (
-                not isinstance(capabilities, dict)
-                or capabilities.get("authenticated_sharing_enabled") is not True
-            ):
-                return json.dumps(
-                    {
-                        "error": "unsupported_server: signed-in user sharing is not supported",
-                        "session_id": target,
-                    }
-                )
         resp = await server_client.put(
             f"/v1/sessions/{target}/permissions",
             json={"user_id": user_id, "level": level_by_name[level_name]},

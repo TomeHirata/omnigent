@@ -110,12 +110,9 @@ from omnigent.server._elicitation_registry import (
     _PreResolvedHarnessElicitation,
 )
 from omnigent.server.auth import (
-    LEVEL_EDIT,
     LEVEL_OWNER,
     LEVEL_READ,
-    RESERVED_USER_AUTHENTICATED,
     RESERVED_USER_PUBLIC,
-    is_authenticated_user,
 )
 from omnigent.server.host_registry import HostConnection, HostRegistry, RunnerExitReports
 from omnigent.server.managed_hosts import (
@@ -1290,16 +1287,12 @@ def _permission_level_from_grants(
     if is_admin:
         return LEVEL_OWNER
     user_grant = next((g for g in grants if g.user_id == user_id), None)
-    if user_grant is None:
-        user_grant = next((g for g in grants if g.user_id == RESERVED_USER_PUBLIC), None)
-    level = user_grant.level if user_grant is not None else None
-    if is_authenticated_user(user_id):
-        authenticated_grant = next(
-            (g for g in grants if g.user_id == RESERVED_USER_AUTHENTICATED), None
-        )
-        if authenticated_grant is not None:
-            level = max(level or 0, min(authenticated_grant.level, LEVEL_EDIT))
-    return level
+    if user_grant is not None:
+        return user_grant.level
+    public_grant = next((g for g in grants if g.user_id == RESERVED_USER_PUBLIC), None)
+    if public_grant is not None:
+        return public_grant.level
+    return None
 
 
 def _owner_from_grants(grants: list[SessionPermission]) -> str | None:

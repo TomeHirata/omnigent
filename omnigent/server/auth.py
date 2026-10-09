@@ -47,17 +47,8 @@ _AUTH_ENABLED_ENV = "OMNIGENT_AUTH_ENABLED"
 
 RESERVED_USER_LOCAL = "local"
 RESERVED_USER_PUBLIC = "__public__"
-RESERVED_USER_AUTHENTICATED = "__authenticated__"
-_RESERVED_USERS = frozenset(
-    {RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC, RESERVED_USER_AUTHENTICATED}
-)
+_RESERVED_USERS = frozenset({RESERVED_USER_LOCAL, RESERVED_USER_PUBLIC})
 _TRUTHY_STRINGS = ("1", "true", "yes")
-
-
-def is_authenticated_user(user_id: str | None) -> bool:
-    """Whether an identity represents a signed-in user rather than a sentinel."""
-    return bool(user_id) and user_id not in _RESERVED_USERS
-
 
 # Path prefixes a restricted (device-grant or machine client-credential)
 # access token may reach.
@@ -779,6 +770,15 @@ class UnifiedAuthProvider(AuthProvider):
         if self._local_single_user:
             return RESERVED_USER_LOCAL
         return None
+
+
+def authentication_requires_identity(provider: AuthProvider | None) -> bool:
+    """Whether missing credentials are denied rather than mapped to the local user."""
+    return provider is not None and not (
+        isinstance(provider, UnifiedAuthProvider)
+        and provider._source == "header"
+        and provider._local_single_user
+    )
 
 
 def auth_mode(provider: AuthProvider | None) -> str:

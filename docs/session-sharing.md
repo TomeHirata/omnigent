@@ -1,58 +1,57 @@
 # Session sharing
 
-Owners and managers can grant session access with
-`PUT /v1/sessions/{id}/permissions`. Named users may receive read (1),
-edit (2), or manage (3). Owners retain their separate owner grant.
+Session access requires a user identity on a multi-user server. Public access
+does not bypass authentication: a `__public__` grant lets anyone who can sign in
+and has the link access a session without an individual invitation.
+The server's authentication boundary defines the audience, including built-in
+accounts, OIDC, and trusted-header SSO deployments.
+Configured client-credential machine principals are also part of this audience.
 
-Two group grantees are supported:
+Admins choose **Settings > Sharing > Maximum public permission**. The default
+is **Read**; **Edit** is available only with authenticated multi-user access.
+The setting can also be changed with:
 
-- `__public__`: read-only access for anyone with the link, subject to the
-  deployment's authentication requirements and `public_sharing` setting.
-- `__authenticated__`: read or edit access for all signed-in users on this
-  server. It does not match anonymous requests or the local single-user
-  identity, and cannot grant manage or owner access.
+```http
+PUT /v1/sharing
+Content-Type: application/json
 
-For a shared company server, an automation can create a session and then grant
-signed-in users edit access without enumerating accounts:
+{"public_sharing_max_level": "edit"}
+```
+
+This permits public Edit grants, but does not upgrade existing Read grants.
+Owners and managers choose **Share > General access > No access / Read / Edit**,
+or grant access through the permissions API:
 
 ```http
 PUT /v1/sessions/{id}/permissions
 Content-Type: application/json
 
-{"user_id": "__authenticated__", "level": 2}
+{"user_id": "__public__", "level": 2}
 ```
 
-The requester must be authenticated and already have manage access. Future
-users receive the same access when they sign in. The server's authentication
-boundary defines the group: this is not an email-domain filter. Only enable
-the grant on a server whose allowed sign-ins match the intended audience.
-Edit access lets collaborators send follow-ups and use the session's shared
-workspace; it does not authorize permission management or owner-only actions.
+Edit lets collaborators send follow-ups and use the session's shared workspace.
+Public grants cannot confer Manage or Owner, even if a stored grant contains a
+higher level. Direct Manage/Owner grants remain effective; public Edit elevates
+an individual Read grant. Future signed-in users receive the same link access.
+Public-only sessions do not automatically appear in everyone's sidebar.
 
-The Share dialog offers **All signed-in users** with **No access**, **Read**,
-and **Edit**. Choosing **No access** revokes the group grant. The
-`authenticated_sharing_enabled` capability on `/v1/info` advertises support;
-older servers omit it and the control stays hidden.
-The agent sharing tool also requires this capability to be explicitly true
-before sending a signed-in-user grant.
+Lowering the ceiling to Read immediately limits existing public Edit grants,
+including cached access and ongoing streams. The stored grants are not changed:
+raising the ceiling again restores their Edit access. Invalid configuration and
+servers without authenticated multi-user access fall back to Read.
 
-When upgrading, a legacy individual identity or orphaned permission named
-`__authenticated__` is not converted into a group. Such grants remain inactive,
-and new group grants return a conflict until an operator resolves the legacy
-identity and its grants. The store marks only a newly created group principal
-using its existing account-generation field; no schema migration is required.
+`sharing_mode` and `public_sharing` continue to gate new grants. Existing grants
+remain readable and revocable after those policies change; the public permission
+ceiling applies during authorization as well. Default-public session creation
+still grants Read, even when Edit is permitted.
 
-`sharing_mode` applies to both named and group grants. Read-only modes reject
-new edit grants, restricted read-only also blocks sharing home/root workspaces,
-and off rejects all new grants. The `public_sharing` switch applies only to
-`__public__`. Existing grants remain usable and revocable after a policy change.
+The file-backed setting defaults from `OMNIGENT_PUBLIC_SHARING_MAX_LEVEL`
+(`read` / `edit`) and persists to `<data_dir>/public_sharing_max_level`.
+Deployments can inject a static value or a callable through
+`create_app(public_sharing_max_level=...)`; such settings are not admin-editable.
+`GET /v1/info` advertises the effective ceiling. Clients treat older servers or
+missing/invalid capability values as Read-only.
 
-A signed-in-user grant raises a user's effective level to at least the group
-level, even if they have an individual read grant. Individual manage/owner
-grants remain effective. Child sessions inherit access from their parent.
-Group-only sessions are reached by link, not automatically listed in every
-user's sidebar. Revoking an individual grant does not remove group access.
-
-Agents with `agent_session_sharing: non-public` or `public` can use
-`sys_session_share` with `user_id: "__authenticated__"` and `level: "edit"`.
-The server enforces the same authorization and policy limits as the UI/API.
+Agents need `agent_session_sharing: public` to use `sys_session_share` with
+`user_id: "__public__"` and `level: "edit"`. The server enforces the same limits
+as the UI; the `non-public` policy permits named-user grants only.

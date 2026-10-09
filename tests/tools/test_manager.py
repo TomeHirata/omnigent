@@ -606,7 +606,6 @@ def test_share_non_public_registers_share_tool_without_public() -> None:
         "description"
     ]
     assert "__public__" not in user_id_desc
-    assert "__authenticated__" in user_id_desc
 
 
 def test_share_public_registers_share_tool_advertising_public() -> None:
@@ -625,7 +624,6 @@ def test_share_public_registers_share_tool_advertising_public() -> None:
         "description"
     ]
     assert "__public__" in user_id_desc
-    assert "__authenticated__" in user_id_desc
 
 
 def test_both_grants_compose() -> None:
