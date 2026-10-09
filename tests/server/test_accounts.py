@@ -1474,21 +1474,7 @@ def test_admin_list_excludes_legacy_local_and_public_sentinels(
     accounts_app: TestClient,
     tmp_path: Path,
 ) -> None:
-    """The Members page hides ``"local"`` and ``"__public__"``.
-
-    Both rows exist in the ``users`` table — ``"local"`` is
-    backfilled by the original session-permissions migration so
-    pre-accounts deploys had a default owner row for existing
-    conversations, and ``"__public__"`` is the anonymous-grant
-    sentinel. Neither is actionable in accounts mode (reserved
-    names can't authenticate, can't be reset, can't be promoted),
-    so listing them on the Members page is dead weight.
-
-    We seed both rows directly (bypassing the accounts API, which
-    rejects reserved names) into the same sqlite file the
-    ``accounts_app`` fixture wired up, then confirm the admin
-    list filter drops them.
-    """
+    """Reserved identities are not actionable members, even when stored rows exist."""
     from omnigent.db.db_models import SqlUser
     from omnigent.db.utils import get_or_create_engine, make_managed_session_maker
 
@@ -1496,7 +1482,7 @@ def test_admin_list_excludes_legacy_local_and_public_sentinels(
     engine = get_or_create_engine(db_url)
     session_maker = make_managed_session_maker(engine)
     with session_maker() as session:
-        for sentinel in ("local", "__public__"):
+        for sentinel in ("local", "__public__", "__authenticated__"):
             if session.get(SqlUser, (0, sentinel)) is None:
                 session.add(SqlUser(id=sentinel, is_admin=False))
         session.commit()
@@ -1512,6 +1498,7 @@ def test_admin_list_excludes_legacy_local_and_public_sentinels(
     assert "__public__" not in user_ids, (
         "list_users() must hide the '__public__' anonymous-grant sentinel"
     )
+    assert "__authenticated__" not in user_ids
 
 
 def test_admin_cannot_delete_self(accounts_app: TestClient) -> None:

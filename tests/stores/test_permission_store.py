@@ -13,7 +13,9 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import event
 
+from omnigent.db.db_models import SqlSessionPermission, SqlUser
 from omnigent.entities import SessionPermission
+from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.auth import RESERVED_USER_AUTHENTICATED, RESERVED_USER_PUBLIC
 from omnigent.server.permissions import resolved_allows, resolved_level
 from omnigent.stores.conversation_store.sqlalchemy_store import (
@@ -486,7 +488,7 @@ def test_list_users_returns_real_users_with_admin_flag(
 def test_list_users_excludes_reserved_sentinels(
     store: SqlAlchemyPermissionStore,
 ) -> None:
-    """``list_users`` hides the ``local`` and ``__public__`` sentinels.
+    """``list_users`` hides reserved identities.
 
     They aren't real, actionable actors, matching
     ``account_store.list_users()`` so the admin list is identical
@@ -494,6 +496,7 @@ def test_list_users_excludes_reserved_sentinels(
     """
     store.ensure_user("local", is_admin=True)
     store.ensure_user("__public__")
+    store.ensure_user(RESERVED_USER_AUTHENTICATED)
     store.ensure_user("real@test.com")
 
     ids = {u.id for u in store.list_users()}
@@ -902,16 +905,69 @@ def test_authenticated_grant_cannot_confer_management_even_with_invalid_stored_l
     assert not resolved_allows(access, 3)
 
 
-def test_authenticated_grantee_is_hidden_from_member_lists(
-    store: SqlAlchemyPermissionStore,
+@pytest.mark.parametrize("level", [1, 2, 3, 4])
+@pytest.mark.parametrize("generation", [None, "a" * 32])
+def test_legacy_authenticated_identity_does_not_become_a_group_on_upgrade(
+    store: SqlAlchemyPermissionStore, db_uri: str, level: int, generation: str | None
 ) -> None:
-    from omnigent.server.accounts_store import SqlAlchemyAccountStore
+    conv_id = _create_conversation(db_uri)
+    with store._session("seed_legacy_identity") as session:
+        session.add(
+            SqlUser(
+                id=RESERVED_USER_AUTHENTICATED,
+                is_admin=False,
+                account_generation=generation,
+            )
+        )
+        session.add(
+            SqlSessionPermission(
+                user_id=RESERVED_USER_AUTHENTICATED, conversation_id=conv_id, level=level
+            )
+        )
+        session.commit()
 
-    store.ensure_user(RESERVED_USER_AUTHENTICATED)
-    store.ensure_user("alice")
-    assert {user.id for user in store.list_users()} == {"alice"}
-    accounts = SqlAlchemyAccountStore(store.storage_location)
-    assert {user.id for user in accounts.list_users()} == {"alice"}
+    upgraded = SqlAlchemyPermissionStore(db_uri)
+    upgraded.ensure_user("reader")
+    upgraded.grant("reader", conv_id, 1)
+    assert upgraded.get_permission_level("reader", conv_id) == 1
+    assert resolved_level(upgraded.resolve_access("reader", conv_id)) == 1
+    assert not upgraded.check_access("unrelated", conv_id, 1)
+    assert resolved_level(upgraded.resolve_access("unrelated", conv_id)) is None
+    assert upgraded.get(RESERVED_USER_AUTHENTICATED, conv_id) is None
+    assert upgraded.list_for_sessions([conv_id])[conv_id] == [
+        SessionPermission("reader", conv_id, 1)
+    ]
+    assert upgraded.list_for_session(conv_id) == ([SessionPermission("reader", conv_id, 1)], None)
+    assert upgraded.list_for_user(RESERVED_USER_AUTHENTICATED) == []
+    for operation in (
+        lambda: upgraded.ensure_user(RESERVED_USER_AUTHENTICATED),
+        lambda: upgraded.grant(RESERVED_USER_AUTHENTICATED, conv_id, 2),
+    ):
+        with pytest.raises(OmnigentError) as error:
+            operation()
+        assert error.value.code == ErrorCode.CONFLICT
+    with upgraded._session("read_legacy_permission") as session:
+        row = session.get(SqlSessionPermission, (0, RESERVED_USER_AUTHENTICATED, conv_id))
+        assert row is not None and row.level == level
+
+
+def test_orphaned_legacy_authenticated_grant_blocks_group_creation(
+    store: SqlAlchemyPermissionStore, db_uri: str
+) -> None:
+    conv_id = _create_conversation(db_uri)
+    with store._session("seed_orphaned_legacy_permission") as session:
+        session.add(
+            SqlSessionPermission(
+                user_id=RESERVED_USER_AUTHENTICATED, conversation_id=conv_id, level=2
+            )
+        )
+        session.commit()
+    with pytest.raises(OmnigentError) as error:
+        store.ensure_user(RESERVED_USER_AUTHENTICATED)
+    assert error.value.code == ErrorCode.CONFLICT
+    assert not store.check_access("unrelated", conv_id, 1)
+    assert resolved_level(store.resolve_access("unrelated", conv_id)) is None
+    assert not store.user_exists(RESERVED_USER_AUTHENTICATED)
 
 
 @pytest.mark.parametrize("level", [1, 2, 4])

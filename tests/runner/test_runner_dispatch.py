@@ -8576,6 +8576,109 @@ async def test_sys_session_get_info_maps_error_statuses(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "capabilities",
+    [
+        {},
+        {"authenticated_sharing_enabled": False},
+        {"authenticated_sharing_enabled": "true"},
+        {"authenticated_sharing_enabled": 1},
+        [],
+    ],
+)
+async def test_sys_session_share_rejects_unsupported_authenticated_group(
+    capabilities: Any,
+) -> None:
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    requests: list[tuple[str, str]] = []
+
+    async def server(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        return httpx.Response(200, json=capabilities)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(server), base_url="http://server"
+    ) as client:
+        output = await execute_tool(
+            tool_name="sys_session_share",
+            arguments=json.dumps({"user_id": "__authenticated__", "level": "edit"}),
+            server_client=client,
+            conversation_id="conv_caller",
+            agent_spec=AgentSpec(spec_version=1, agent_session_sharing=SharePolicy.NON_PUBLIC),
+        )
+
+    assert requests == [("GET", "/v1/info")]
+    assert json.loads(output) == {
+        "error": "unsupported_server: signed-in user sharing is not supported",
+        "session_id": "conv_caller",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_response", ["http-error", "non-json"])
+async def test_sys_session_share_fails_closed_when_group_capability_cannot_be_read(
+    invalid_response: str,
+) -> None:
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    requests: list[tuple[str, str]] = []
+
+    async def server(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if invalid_response == "http-error":
+            return httpx.Response(503)
+        return httpx.Response(200, text="not-json")
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(server), base_url="http://server"
+    ) as client:
+        output = await execute_tool(
+            tool_name="sys_session_share",
+            arguments=json.dumps({"user_id": "__authenticated__", "level": "edit"}),
+            server_client=client,
+            conversation_id="conv_caller",
+            agent_spec=AgentSpec(spec_version=1, agent_session_sharing=SharePolicy.NON_PUBLIC),
+        )
+
+    assert requests == [("GET", "/v1/info")]
+    assert json.loads(output)["error"].startswith("sys_session_share failed:")
+
+
+@pytest.mark.asyncio
+async def test_sys_session_share_authenticated_group_requires_explicit_support() -> None:
+    from omnigent.runner.tool_dispatch import execute_tool
+
+    requests: list[tuple[str, str]] = []
+
+    async def server(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path))
+        if request.method == "GET":
+            return httpx.Response(200, json={"authenticated_sharing_enabled": True})
+        assert json.loads(request.content) == {"user_id": "__authenticated__", "level": 2}
+        return httpx.Response(200, json={})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(server), base_url="http://server"
+    ) as client:
+        output = await execute_tool(
+            tool_name="sys_session_share",
+            arguments=json.dumps({"user_id": "__authenticated__", "level": "edit"}),
+            server_client=client,
+            conversation_id="conv_caller",
+            agent_spec=AgentSpec(spec_version=1, agent_session_sharing=SharePolicy.NON_PUBLIC),
+        )
+
+    assert requests == [("GET", "/v1/info"), ("PUT", "/v1/sessions/conv_caller/permissions")]
+    assert json.loads(output) == {
+        "shared": True,
+        "session_id": "conv_caller",
+        "user_id": "__authenticated__",
+        "level": "edit",
+    }
+
+
+@pytest.mark.asyncio
 async def test_sys_session_share_defaults_to_caller_and_puts_grant() -> None:
     """
     Omitting ``session_id`` shares the caller's own session: the runner

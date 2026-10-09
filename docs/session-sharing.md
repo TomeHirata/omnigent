@@ -33,6 +33,14 @@ The Share dialog offers **All signed-in users** with **No access**, **Read**,
 and **Edit**. Choosing **No access** revokes the group grant. The
 `authenticated_sharing_enabled` capability on `/v1/info` advertises support;
 older servers omit it and the control stays hidden.
+The agent sharing tool also requires this capability to be explicitly true
+before sending a signed-in-user grant.
+
+When upgrading, a legacy individual identity or orphaned permission named
+`__authenticated__` is not converted into a group. Such grants remain inactive,
+and new group grants return a conflict until an operator resolves the legacy
+identity and its grants. The store marks only a newly created group principal
+using its existing account-generation field; no schema migration is required.
 
 `sharing_mode` applies to both named and group grants. Read-only modes reject
 new edit grants, restricted read-only also blocks sharing home/root workspaces,

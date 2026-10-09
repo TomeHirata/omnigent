@@ -28,6 +28,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from omnigent.db.db_models import SqlSessionPermission, SqlUser
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server import sharing_settings
 from omnigent.server.app import create_app
@@ -106,6 +107,33 @@ def _client(app: FastAPI, email: str | None = None) -> httpx.AsyncClient:
         base_url="http://test",
         headers=headers,
     )
+
+
+async def test_legacy_authenticated_permission_remains_private_and_rejects_group_grant(
+    db_uri: str, tmp_path: Path
+) -> None:
+    app, session_id = _seed_owned_session(db_uri, tmp_path)
+    permissions = SqlAlchemyPermissionStore(db_uri)
+    with permissions._session("seed_legacy_identity") as session:
+        session.add(SqlUser(id=RESERVED_USER_AUTHENTICATED, is_admin=False))
+        session.add(
+            SqlSessionPermission(
+                user_id=RESERVED_USER_AUTHENTICATED, conversation_id=session_id, level=2
+            )
+        )
+        session.commit()
+
+    async with _client(app, _GRANTEE) as member:
+        assert (await member.get(f"/v1/sessions/{session_id}")).status_code == 404
+    async with _client(app, _OWNER) as owner:
+        response = await owner.put(
+            f"/v1/sessions/{session_id}/permissions",
+            json={"user_id": RESERVED_USER_AUTHENTICATED, "level": 2},
+        )
+        assert response.status_code == 409, response.text
+        assert "legacy" in response.json()["error"]["message"]
+    async with _client(app, _GRANTEE) as member:
+        assert (await member.get(f"/v1/sessions/{session_id}")).status_code == 404
 
 
 def _seed_owned_session(
@@ -227,10 +255,15 @@ async def test_local_manager_cannot_grant_signed_in_user_access(
 @pytest.mark.parametrize("policy", [SharePolicy.NON_PUBLIC, SharePolicy.PUBLIC])
 @pytest.mark.parametrize("level", ["read", "edit", "manage"])
 async def test_agent_sharing_tool_uses_signed_in_group_with_server_limits(
-    db_uri: str, tmp_path: Path, policy: SharePolicy, level: str
+    db_uri: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    policy: SharePolicy,
+    level: str,
 ) -> None:
     from omnigent.runner.tool_dispatch import execute_tool
 
+    monkeypatch.setenv("OMNIGENT_LOCAL_SINGLE_USER", "")
     app, session_id = _seed_owned_session(db_uri, tmp_path, public_sharing=False)
     async with _client(app, _OWNER) as client:
         result = json.loads(

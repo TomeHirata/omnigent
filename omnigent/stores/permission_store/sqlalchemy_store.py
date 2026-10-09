@@ -17,7 +17,7 @@ from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 from sqlalchemy.sql.dml import Insert
 
-from omnigent.db.account_authority import account_generation, require_active_account
+from omnigent.db.account_authority import account_generation, lock_account, require_active_account
 from omnigent.db.db_models import SqlSessionPermission, SqlUser, current_workspace_id
 from omnigent.db.utils import (
     get_or_create_engine,
@@ -25,6 +25,7 @@ from omnigent.db.utils import (
     run_write_transaction,
 )
 from omnigent.entities import Account, ResolvedAccess, SessionPermission
+from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.auth import (
     LEVEL_EDIT,
     LEVEL_OWNER,
@@ -41,6 +42,8 @@ from omnigent.stores.permission_store import PermissionStore
 _HIDDEN_LIST_USERS = frozenset(
     {RESERVED_USER_PUBLIC, RESERVED_USER_LOCAL, RESERVED_USER_AUTHENTICATED}
 )
+# Ordinary account generations are UUID hex strings; legacy identities cannot carry this marker.
+_AUTHENTICATED_GROUP_GENERATION = "authenticated-sharing-v1"
 
 # Short-lived cache of resolve_access() results. The per-event access-control
 # check on a busy session otherwise re-reads session_permissions + users on
@@ -186,6 +189,8 @@ class SqlAlchemyPermissionStore(PermissionStore):
 
         def write(session: Session) -> None:
             require_active_account(session, user_id)
+            if user_id == RESERVED_USER_AUTHENTICATED:
+                self._require_authenticated_group(session)
             dialect = self._engine.dialect.name
             values = {
                 "user_id": user_id,
@@ -262,6 +267,10 @@ class SqlAlchemyPermissionStore(PermissionStore):
     def get(self, user_id: str, conversation_id: str) -> SessionPermission | None:
         """Look up a single grant. See base class for contract."""
         with self._session("select_permission") as session:
+            if user_id == RESERVED_USER_AUTHENTICATED and not self._authenticated_group_active(
+                session
+            ):
+                return None
             row = session.get(
                 SqlSessionPermission, (current_workspace_id(), user_id, conversation_id)
             )
@@ -373,6 +382,8 @@ class SqlAlchemyPermissionStore(PermissionStore):
             )
             if after_user_id is not None:
                 stmt = stmt.where(SqlSessionPermission.user_id > after_user_id)
+            if not self._authenticated_group_active(session):
+                stmt = stmt.where(SqlSessionPermission.user_id != RESERVED_USER_AUTHENTICATED)
             rows = session.execute(stmt).scalars().all()
         if len(rows) > limit:
             rows = rows[:limit]
@@ -388,19 +399,15 @@ class SqlAlchemyPermissionStore(PermissionStore):
         if not conversation_ids:
             return {}
         with self._session("list_permissions_for_sessions") as session:
+            stmt = select(SqlSessionPermission).where(
+                SqlSessionPermission.workspace_id == current_workspace_id(),
+                SqlSessionPermission.conversation_id.in_(conversation_ids),
+            )
+            if not self._authenticated_group_active(session):
+                stmt = stmt.where(SqlSessionPermission.user_id != RESERVED_USER_AUTHENTICATED)
             # Convert to entities inside the session so ORM attributes are
             # accessed while the session is still open (avoids DetachedInstanceError).
-            entities = [
-                _to_entity(r)
-                for r in session.execute(
-                    select(SqlSessionPermission).where(
-                        SqlSessionPermission.workspace_id == current_workspace_id(),
-                        SqlSessionPermission.conversation_id.in_(conversation_ids),
-                    )
-                )
-                .scalars()
-                .all()
-            ]
+            entities = [_to_entity(r) for r in session.execute(stmt).scalars().all()]
         result: dict[str, list[SessionPermission]] = {cid: [] for cid in conversation_ids}
         for entity in entities:
             result[entity.conversation_id].append(entity)
@@ -409,6 +416,10 @@ class SqlAlchemyPermissionStore(PermissionStore):
     def list_for_user(self, user_id: str, *, limit: int = 1000) -> list[SessionPermission]:
         """Return all grants for a user. See base class for contract."""
         with self._session("list_user_permissions") as session:
+            if user_id == RESERVED_USER_AUTHENTICATED and not self._authenticated_group_active(
+                session
+            ):
+                return []
             rows = (
                 session.execute(
                     select(SqlSessionPermission)
@@ -430,6 +441,22 @@ class SqlAlchemyPermissionStore(PermissionStore):
             require_active_account(session, user_id)
             dialect = self._engine.dialect.name
             values = {"id": user_id, "is_admin": is_admin}
+            if user_id == RESERVED_USER_AUTHENTICATED:
+                row = lock_account(session, user_id)
+                if row is not None:
+                    self._require_authenticated_group(session)
+                    return
+                # Orphaned legacy grants must not become active when the principal is created.
+                if session.execute(
+                    select(
+                        exists().where(
+                            SqlSessionPermission.workspace_id == current_workspace_id(),
+                            SqlSessionPermission.user_id == user_id,
+                        )
+                    )
+                ).scalar_one():
+                    self._authenticated_group_collision()
+                values["account_generation"] = _AUTHENTICATED_GROUP_GENERATION
             stmt: Insert
             if dialect == "sqlite":
                 stmt = (
@@ -451,8 +478,34 @@ class SqlAlchemyPermissionStore(PermissionStore):
                     .on_conflict_do_nothing(index_elements=["workspace_id", "id"])
                 )
             session.execute(stmt)
+            if user_id == RESERVED_USER_AUTHENTICATED:
+                self._require_authenticated_group(session)
 
         run_write_transaction(self._session_immediate, "ensure_user", write)
+
+    def _authenticated_group_active(self, session: Session) -> bool:
+        row = session.get(
+            SqlUser,
+            (current_workspace_id(), RESERVED_USER_AUTHENTICATED),
+            populate_existing=True,
+        )
+        return (
+            row is not None
+            and row.deleted_at is None
+            and row.account_generation == _AUTHENTICATED_GROUP_GENERATION
+        )
+
+    def _require_authenticated_group(self, session: Session) -> None:
+        if not self._authenticated_group_active(session):
+            self._authenticated_group_collision()
+
+    @staticmethod
+    def _authenticated_group_collision() -> None:
+        raise OmnigentError(
+            "Signed-in user sharing conflicts with a legacy __authenticated__ identity "
+            "or permission. An operator must resolve the legacy identity and grants first.",
+            code=ErrorCode.CONFLICT,
+        )
 
     def get_user(self, user_id: str) -> Account | None:
         """Read the target identity without creating it. See base class."""
@@ -660,7 +713,7 @@ class SqlAlchemyPermissionStore(PermissionStore):
                     SqlSessionPermission,
                     (workspace_id, RESERVED_USER_AUTHENTICATED, conversation_id),
                 )
-                if is_authenticated_user(user_id)
+                if is_authenticated_user(user_id) and self._authenticated_group_active(session)
                 else None
             )
             access = ResolvedAccess(

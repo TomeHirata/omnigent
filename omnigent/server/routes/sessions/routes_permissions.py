@@ -184,6 +184,8 @@ def register_permissions_routes(
                     "Signed-in user access is limited to edit (level 2)",
                     code=ErrorCode.INVALID_INPUT,
                 )
+            # Pin the newly marked group generation, not the pre-creation absence.
+            await asyncio.to_thread(permission_store.ensure_user, body.user_id)
         target = await asyncio.to_thread(permission_store.get_user, body.user_id)
         with target_account_scope(body.user_id, target.account_generation if target else None):
             existing = await asyncio.to_thread(permission_store.get, body.user_id, session_id)
@@ -192,7 +194,8 @@ def register_permissions_routes(
                     "Cannot modify owner permissions",
                     code=ErrorCode.FORBIDDEN,
                 )
-            await asyncio.to_thread(permission_store.ensure_user, body.user_id)
+            if body.user_id != RESERVED_USER_AUTHENTICATED:
+                await asyncio.to_thread(permission_store.ensure_user, body.user_id)
             perm = await asyncio.to_thread(
                 permission_store.grant, body.user_id, session_id, body.level
             )
