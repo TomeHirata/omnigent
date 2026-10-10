@@ -1012,6 +1012,59 @@ describe("useWorkspaceFileExists", () => {
     );
   });
 
+  it("finds a file on a later page of a large parent directory", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({
+          object: "list",
+          data: [dirEntry("docs/first.md")],
+          last_id: "docs/first.md",
+          has_more: true,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          object: "list",
+          data: [dirEntry("docs/target.md")],
+          last_id: "docs/target.md",
+          has_more: false,
+        }),
+      );
+    const results: { exists: boolean; settled: boolean }[] = [];
+    render(
+      <Wrap>
+        <FileExistenceProbe id="conv_1" path="docs/target.md" onResult={(r) => results.push(r)} />
+      </Wrap>,
+    );
+
+    await waitFor(() => expect(results.at(-1)).toEqual({ exists: true, settled: true }));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1][0]).toContain("after=docs%2Ffirst.md");
+  });
+
+  it("leaves absence unverified after scanning 10,000 entries", async () => {
+    let pageIndex = 0;
+    fetchMock.mockImplementation(() => {
+      const index = pageIndex++;
+      const data = Array.from({ length: 1000 }, (_, i) =>
+        dirEntry(`docs/${String(index * 1000 + i).padStart(5, "0")}.md`),
+      );
+      return Promise.resolve(
+        jsonResponse({ object: "list", data, last_id: data.at(-1)?.id, has_more: true }),
+      );
+    });
+    const results: { exists: boolean; settled: boolean }[] = [];
+    render(
+      <Wrap>
+        <FileExistenceProbe id="conv_1" path="docs/target.md" onResult={(r) => results.push(r)} />
+      </Wrap>,
+    );
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(10));
+    await flushMicrotasks();
+    expect(results.at(-1)).toEqual({ exists: false, settled: false });
+  });
+
   it("reports false when the file is absent from the parent listing", async () => {
     // Sibling exists, target does not → must not be treated as present.
     fetchMock.mockResolvedValue(
