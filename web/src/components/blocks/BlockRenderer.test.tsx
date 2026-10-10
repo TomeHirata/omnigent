@@ -464,9 +464,8 @@ describe("BlockRenderer dispatch", () => {
   });
 
   it("does not add adjacent-text spacing across tool items", () => {
-    // Rendered as a live turn ("running") so the whole trace stays
-    // expanded — a settled turn would fold "Before tool." behind the
-    // Worked row and unmount it.
+    // Keep the tool run expanded so both adjacent text sections can be
+    // inspected together.
     const items: RenderItem[] = [
       { kind: "text", itemId: "t1", text: "Before tool.", final: true },
       {
@@ -604,7 +603,7 @@ describe("BlockRenderer dispatch", () => {
         { kind: "reasoning", itemId: "r0", text: "Considering the request.", duration: 4 },
         tool(1, "Bash"),
         { kind: "text", itemId: "m0", text: "Here is the substantive answer.", final: true },
-        tool(2, "Bash"),
+        tool(2, "Agent"),
         { kind: "text", itemId: "m1", text: "Quick tick: the check passed.", final: true },
       ];
       render(<BlockRenderer items={items} sessionStatus="idle" workedForS={128} />);
@@ -613,6 +612,8 @@ describe("BlockRenderer dispatch", () => {
       const answer = screen.getByText("Here is the substantive answer.");
       const followUp = screen.getByText("Quick tick: the check passed.");
       expect(folds).toHaveLength(2);
+      expect(folds[0]).toHaveAttribute("aria-expanded", "false");
+      expect(folds[1]).toHaveAttribute("aria-expanded", "false");
       expect(
         folds[0]!.compareDocumentPosition(answer) & Node.DOCUMENT_POSITION_FOLLOWING,
       ).toBeTruthy();
@@ -624,8 +625,15 @@ describe("BlockRenderer dispatch", () => {
       ).toBeTruthy();
       expect(screen.queryByText("Considering the request.")).toBeNull();
       fireEvent.click(folds[0]!);
+      expect(folds[0]).toHaveAttribute("aria-expanded", "true");
+      expect(folds[1]).toHaveAttribute("aria-expanded", "false");
+      expect(screen.getByText("Ran 1 shell command")).toBeDefined();
       fireEvent.click(screen.getByText(/Thought for/));
       expect(screen.getByText("Considering the request.")).toBeDefined();
+      fireEvent.click(folds[1]!);
+      expect(folds[0]).toHaveAttribute("aria-expanded", "true");
+      expect(folds[1]).toHaveAttribute("aria-expanded", "true");
+      expect(screen.getByText("Called 1 tool")).toBeDefined();
       expect(answer).toBeVisible();
       expect(followUp).toBeVisible();
     });
@@ -640,14 +648,18 @@ describe("BlockRenderer dispatch", () => {
       ];
       render(<BlockRenderer items={items} sessionStatus="idle" defaultExpanded />);
 
-      const fold = screen.getAllByRole("button", { name: "Worked" })[0]!;
-      expect(fold).toHaveAttribute("aria-expanded", "true");
+      const folds = screen.getAllByRole("button", { name: "Worked" });
+      expect(folds).toHaveLength(2);
+      for (const fold of folds) expect(fold).toHaveAttribute("aria-expanded", "true");
       expect(screen.getByText("Checking.")).toBeDefined();
       expect(screen.getByText("No conflict.")).toBeDefined();
       expect(screen.getByText("Merged.")).toBeDefined();
 
-      fireEvent.click(fold);
-      expect(fold).toHaveAttribute("aria-expanded", "false");
+      fireEvent.click(folds[0]!);
+      expect(folds[0]).toHaveAttribute("aria-expanded", "false");
+      expect(folds[1]).toHaveAttribute("aria-expanded", "true");
+      fireEvent.click(folds[1]!);
+      expect(folds[1]).toHaveAttribute("aria-expanded", "false");
       expect(screen.getByText("No conflict.")).toBeDefined();
       expect(screen.getByText("Merged.")).toBeDefined();
     });
@@ -661,16 +673,19 @@ describe("BlockRenderer dispatch", () => {
         { kind: "text", itemId: "m2", text: "Merged.", final: true },
       ];
       const view = render(<BlockRenderer items={items} sessionStatus="idle" />);
-      const fold = screen.getAllByRole("button", { name: "Worked" })[0]!;
-      expect(fold).toHaveAttribute("aria-expanded", "false");
+      const folds = screen.getAllByRole("button", { name: "Worked" });
+      expect(folds).toHaveLength(2);
+      for (const fold of folds) expect(fold).toHaveAttribute("aria-expanded", "false");
 
       view.rerender(<BlockRenderer items={items} sessionStatus="idle" defaultExpanded />);
-      expect(fold).toHaveAttribute("aria-expanded", "true");
+      for (const fold of folds) expect(fold).toHaveAttribute("aria-expanded", "true");
 
-      fireEvent.click(fold);
-      expect(fold).toHaveAttribute("aria-expanded", "false");
+      fireEvent.click(folds[0]!);
+      expect(folds[0]).toHaveAttribute("aria-expanded", "false");
+      expect(folds[1]).toHaveAttribute("aria-expanded", "true");
       view.rerender(<BlockRenderer items={items} sessionStatus="idle" defaultExpanded />);
-      expect(fold).toHaveAttribute("aria-expanded", "false");
+      expect(folds[0]).toHaveAttribute("aria-expanded", "false");
+      expect(folds[1]).toHaveAttribute("aria-expanded", "true");
     });
 
     it("labels the Worked row with the turn duration when provided", () => {
@@ -867,7 +882,12 @@ describe("BlockRenderer dispatch", () => {
       );
       await waitFor(() => expect(screen.getByTestId("turn-worked-fold")).toBeDefined());
       // The trace collapses a frame later (it mounts open to animate away).
-      await waitFor(() => expect(screen.queryByText(/tool_1/)).toBeNull());
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Worked" })).toHaveAttribute(
+          "aria-expanded",
+          "false",
+        ),
+      );
       expect(screen.getByText("Looking around.")).toBeDefined();
       expect(screen.getByText("Answer text.")).toBeDefined();
     });
@@ -1080,7 +1100,12 @@ describe("BlockRenderer dispatch", () => {
       // settle debounce).
       rerender(view("idle"));
       await waitFor(() => expect(screen.getByTestId("turn-worked-fold")).toBeDefined());
-      await waitFor(() => expect(screen.queryByText(/Bash/)).toBeNull());
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Worked" })).toHaveAttribute(
+          "aria-expanded",
+          "false",
+        ),
+      );
       expect(screen.getByText("Checking the CLI.")).toBeDefined();
     });
 
@@ -1108,12 +1133,22 @@ describe("BlockRenderer dispatch", () => {
       );
       const { rerender } = render(view("idle"));
       await waitFor(() => expect(screen.getByTestId("turn-worked-fold")).toBeDefined());
+      expect(screen.getByRole("button", { name: "Worked" })).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
 
       rerender(view("running"));
-      expect(screen.getByTestId("turn-worked-fold")).toBeDefined();
+      expect(screen.getByRole("button", { name: "Worked" })).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
       // Structural, not timing: the fold stays across further renders.
       rerender(view("running"));
-      expect(screen.getByTestId("turn-worked-fold")).toBeDefined();
+      expect(screen.getByRole("button", { name: "Worked" })).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
       expect(screen.getByText("Polling CI.")).toBeDefined();
     });
 
@@ -1238,6 +1273,10 @@ describe("BlockRenderer dispatch", () => {
         </FileViewerContext.Provider>,
       );
       expect(screen.getByTestId("turn-worked-fold")).toBeDefined();
+      expect(screen.getByRole("button", { name: "Worked" })).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
       expect(screen.getByText("Narration.")).toBeDefined();
     });
 
@@ -1303,7 +1342,7 @@ describe("BlockRenderer dispatch", () => {
         { kind: "text", itemId: "m0", text: "Checking the CLI.", final: true },
         tool(1, "Bash"),
         { kind: "text", itemId: "m1", text: "Server started on 8838.", final: true },
-        { kind: "reasoning", itemId: null, text: "", duration: undefined },
+        { kind: "reasoning", itemId: null, text: "Finishing checks.", duration: undefined },
       ];
       render(
         <FileViewerContext.Provider value={FILE_VIEWER_NOOP}>
@@ -1314,6 +1353,10 @@ describe("BlockRenderer dispatch", () => {
       // Both messages stay visible while the tool and trailing reasoning fold.
       expect(screen.getByText("Server started on 8838.")).toBeDefined();
       expect(screen.getByText("Checking the CLI.")).toBeDefined();
+      expect(screen.queryByText("Finishing checks.")).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Worked" }));
+      fireEvent.click(screen.getByText(/Thought/));
+      expect(screen.getByText("Finishing checks.")).toBeDefined();
     });
 
     it("never folds a bubble made only of streaming artifacts", () => {
@@ -1387,7 +1430,12 @@ describe("BlockRenderer dispatch", () => {
       expect(screen.queryByTestId("turn-worked-fold")).toBeNull();
       expect(screen.getByText("Looking around.")).toBeDefined();
       await waitFor(() => expect(screen.getByTestId("turn-worked-fold")).toBeDefined());
-      await waitFor(() => expect(screen.queryByText(/tool_1/)).toBeNull());
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "Worked" })).toHaveAttribute(
+          "aria-expanded",
+          "false",
+        ),
+      );
       expect(screen.getByText("Looking around.")).toBeDefined();
       expect(screen.getByText("All done.")).toBeDefined();
     });
@@ -1404,6 +1452,10 @@ describe("BlockRenderer dispatch", () => {
         </FileViewerContext.Provider>,
       );
       expect(screen.getByTestId("turn-worked-fold")).toBeDefined();
+      expect(screen.getByRole("button", { name: "Worked" })).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
       expect(screen.getByText("Looking around.")).toBeDefined();
     });
 

@@ -154,6 +154,15 @@ function hasFoldableShape(
   { segments }: TurnPartition,
   continued = false,
 ): boolean {
+  const lastItem = items.findLast((item) => !isTrailingWrapup(item));
+  // A terminal failure or denial must stay visible beside the assistant text.
+  if (
+    lastItem?.kind === "error" ||
+    lastItem?.kind === "retry" ||
+    lastItem?.kind === "policy_denied"
+  ) {
+    return false;
+  }
   return (
     !isProvisionalTrace(items) &&
     segments.some((segment) => segment.kind === "work") &&
