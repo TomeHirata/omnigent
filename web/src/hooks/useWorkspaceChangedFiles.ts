@@ -790,18 +790,26 @@ async function fetchDirEntriesTolerant(
   while (files.length < FILE_EXISTENCE_SCAN_LIMIT) {
     params.set("limit", String(Math.min(1000, FILE_EXISTENCE_SCAN_LIMIT - files.length)));
     if (after) params.set("after", after);
-    const res = await authenticatedFetch(
-      segment === "" ? `${base}?${params}` : `${base}/${segment}?${params}`,
-    );
-    // A missing or inaccessible parent proves absence only before a listing
-    // begins. If it changes between pages, the result is inconclusive.
-    if (res.status === 404 || res.status === 403) {
-      return files.length ? { files, truncated: true } : { files: [], truncated: false };
+    let body: FilesystemListResponse;
+    let page: WorkspaceFile[];
+    try {
+      const res = await authenticatedFetch(
+        segment === "" ? `${base}?${params}` : `${base}/${segment}?${params}`,
+      );
+      // A missing or inaccessible parent proves absence only before a listing
+      // begins. If it changes between pages, the result is inconclusive.
+      if (res.status === 404 || res.status === 403) {
+        return files.length ? { files, truncated: true } : { files: [], truncated: false };
+      }
+      if (await isRunnerUnavailable503(res))
+        return files.length ? { files, truncated: true } : null;
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      body = (await res.json()) as FilesystemListResponse;
+      page = mapFilesystemEntries(body, "", hostBase ? dirPath : "");
+    } catch (error) {
+      if (files.length) return { files, truncated: true };
+      throw error;
     }
-    if (await isRunnerUnavailable503(res)) return files.length ? { files, truncated: true } : null;
-    if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
-    const body = (await res.json()) as FilesystemListResponse;
-    const page = mapFilesystemEntries(body, "", hostBase ? dirPath : "");
     files.push(...page);
     if (!body.has_more) return { files, truncated: false };
     if (!page.length || !body.last_id || body.last_id === after) {

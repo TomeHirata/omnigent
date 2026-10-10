@@ -166,6 +166,29 @@ async def test_directory_listing_before_cursor_keeps_nearest_entries(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_directory_listing_descending_after_cursor(tmp_path: Path) -> None:
+    for name in ("a.txt", "b.txt", "c.txt", "d.txt", "e.txt"):
+        (tmp_path / name).touch()
+    os_env = create_os_environment(
+        OSEnvSpec(type="caller_process", cwd=str(tmp_path), sandbox=OSEnvSandboxSpec(type="none"))
+    )
+    assert os_env is not None
+    fs = CallerProcessFilesystem(os_env)
+
+    first = await fs.list_dir(limit=2, order="desc")
+    assert [entry.name for entry in first.data] == ["e.txt", "d.txt"]
+    assert first.has_more is True
+
+    second = await fs.list_dir(limit=2, after=first.last_id, order="desc")
+    assert [entry.name for entry in second.data] == ["c.txt", "b.txt"]
+    assert second.has_more is True
+
+    last = await fs.list_dir(limit=2, after=second.last_id, order="desc")
+    assert [entry.name for entry in last.data] == ["a.txt"]
+    assert last.has_more is False
+
+
+@pytest.mark.asyncio
 async def test_directory_listing_rejects_truncated_helper_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
