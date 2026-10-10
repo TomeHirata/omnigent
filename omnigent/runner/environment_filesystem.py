@@ -850,7 +850,7 @@ class CallerProcessFilesystem:
             f"python3 -c {_shell_quote(_script)}",
         )
         if "error" in result or result.get("exit_code") != 0:
-            raise RuntimeError(f"Failed to list directory {path!r}")
+            raise FilesystemPathNotFound(f"Directory {path!r} not found or not accessible")
 
         entries: list[FilesystemEntry] = []
         try:

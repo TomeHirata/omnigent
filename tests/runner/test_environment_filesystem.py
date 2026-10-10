@@ -98,10 +98,33 @@ async def test_list_environment_root(
 
 
 @pytest.mark.asyncio
-async def test_large_directory_listing_pages_beyond_shell_output_limit(tmp_path: Path) -> None:
+async def test_list_directory_enumeration_failure_returns_404(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def failed_enumeration(*args: object, **kwargs: object) -> dict[str, object]:
+        return {"error": "Directory disappeared", "exit_code": 1}
+
+    monkeypatch.setattr(
+        "omnigent.runner.environment_filesystem._run_os_env_async", failed_enumeration
+    )
+    resp = await client.get(
+        f"/v1/sessions/conv_test/resources/environments/{DEFAULT_ENVIRONMENT_ID}/filesystem/src"
+    )
+    assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "path_not_found"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name_character", "name_length", "entry_count"),
+    [("x", 180, 500), ("é", 100, 200)],
+)
+async def test_large_directory_listing_pages_beyond_shell_output_limit(
+    tmp_path: Path, name_character: str, name_length: int, entry_count: int
+) -> None:
     large = tmp_path / "large"
     large.mkdir()
-    names = [f"{i:04d}-" + "x" * 180 + ".txt" for i in range(500)]
+    names = [f"{i:04d}-" + name_character * name_length + ".txt" for i in range(entry_count)]
     for name in names:
         (large / name).touch()
 
