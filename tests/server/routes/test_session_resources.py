@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -3759,6 +3760,65 @@ async def test_filesystem_forwards_a_literal_percent_still_encoded(
             await client.get(url, params={"download": "true"} if operation == "download" else None)
 
     assert seen == ["%2Fetc/passwd"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "resource",
+    [
+        "environments/default/filesystem",
+        "environments/default/diff",
+        "github/diff",
+        "environments/default/search",
+    ],
+)
+@pytest.mark.parametrize("name", ["docs/release #1?.md", "notes/%2Fdata.txt"])
+async def test_resource_reads_preserve_literal_paths(
+    client: httpx.AsyncClient, resource: str, name: str
+) -> None:
+    runner = FastAPI()
+    seen: list[tuple[str, str]] = []
+
+    @runner.get(f"/v1/sessions/{{session_id}}/resources/{resource}/{{relative_path:path}}")
+    async def serve(request: Request, session_id: str, relative_path: str) -> JSONResponse:
+        del session_id
+        seen.append((relative_path, request.query_params.get("q", "")))
+        return JSONResponse({"path": relative_path})
+
+    base = "/v1/sessions/79b22ebd2309e48fdeb450c65611d51b/resources"
+    async with _runner_app_client(runner):
+        response = await client.get(f"{base}/{resource}/{quote(name)}", params={"q": "notes"})
+    assert response.status_code == 200, response.text
+    assert seen == [(name, "notes" if resource.endswith("search") else "")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "method,resource",
+    [
+        ("GET", "environments/default/filesystem"),
+        ("PUT", "environments/default/filesystem"),
+        ("PATCH", "environments/default/filesystem"),
+        ("DELETE", "environments/default/filesystem"),
+        ("GET", "environments/default/diff"),
+        ("GET", "github/diff"),
+        ("GET", "environments/default/search"),
+    ],
+)
+async def test_resource_paths_reject_parent_segments_before_forwarding(
+    client: httpx.AsyncClient, method: str, resource: str
+) -> None:
+    runner = _FakeRunnerClient(payload={})
+    set_runner_router(_FakeRunnerRouter(runner))  # type: ignore[arg-type]
+    base = "/v1/sessions/79b22ebd2309e48fdeb450c65611d51b/resources"
+    response = await client.request(
+        method,
+        f"{base}/{resource}/folder/%2E%2E/notes.txt",
+        params={"q": "notes"},
+        json={"content": "notes", "encoding": "utf-8", "old_text": "old", "new_text": "new"},
+    )
+    assert response.status_code == 400, response.text
+    assert runner.calls == []
 
 
 @pytest.mark.asyncio

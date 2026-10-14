@@ -631,6 +631,11 @@ def register_resources_routes(
         :param absolute: Whether the path is host-absolute.
         :returns: The encoded segment.
         """
+        if ".." in relative_path.split("/"):
+            raise OmnigentError(
+                "Parent path segments are not permitted",
+                code=ErrorCode.INVALID_INPUT,
+            )
         quoted = urllib.parse.quote(relative_path.lstrip("/"))
         return "%2F" + quoted if absolute else quoted
 
@@ -2498,7 +2503,7 @@ def register_resources_routes(
         qs = urllib.parse.urlencode(params)
         suffix = ""
         if path:
-            suffix = "/" + ("%2F" + urllib.parse.quote(path.lstrip("/")) if absolute else path)
+            suffix = "/" + _runner_path_segment(path, absolute=absolute)
         runner_path = (
             f"/v1/sessions/{session_id}/resources/environments"
             f"/{environment_id}/search{suffix}?{qs}"
@@ -2575,10 +2580,8 @@ def register_resources_routes(
         :param relative_path: Path relative to environment root.
         :returns: JSON with ``before`` and ``after`` content strings.
         """
-        path = (
-            f"/v1/sessions/{session_id}/resources/environments"
-            f"/{environment_id}/diff/{relative_path}"
-        )
+        encoded = _runner_path_segment(relative_path, absolute=relative_path.startswith("/"))
+        path = f"/v1/sessions/{session_id}/resources/environments/{environment_id}/diff/{encoded}"
         conv = await _authorize_browse_read(session_id, request, relative_path)
         return await _fs_get_with_host_fallback(
             session_id,
@@ -2660,12 +2663,13 @@ def register_resources_routes(
             }.items()
             if value is not None
         }
+        encoded = _runner_path_segment(relative_path, absolute=relative_path.startswith("/"))
         return await _fs_get_with_host_fallback(
             session_id,
             conv,
             op="github_diff",
             host_params={"base": base, "path": relative_path, **params},
-            runner_path=f"/v1/sessions/{session_id}/resources/github/diff/{relative_path}",
+            runner_path=f"/v1/sessions/{session_id}/resources/github/diff/{encoded}",
             runner_params=params or None,
         )
 
