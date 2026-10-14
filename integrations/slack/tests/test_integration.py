@@ -21,7 +21,13 @@ from pathlib import Path
 
 import respx
 from cryptography.fernet import Fernet
-from fakes import FakeOmnigentServer, RecordingSlackClient, sse_delta, sse_status
+from fakes import (
+    FakeOmnigentServer,
+    RecordingSlackClient,
+    resolve_test_auth,
+    sse_delta,
+    sse_status,
+)
 from omnigent_slack.auth_manager import AuthManager
 from omnigent_slack.models import UserConfig
 from omnigent_slack.omnigent import OmnigentClientPool
@@ -115,8 +121,8 @@ async def _wait_for_stream_stop(
 
 @respx.mock
 async def test_omnigent_command_auth_wall_shows_login_link(tmp_path: Path) -> None:
-    """``/omnigent`` on an auth-enabled server: the bot probes the server, hits the
-    auth wall on the agent listing, starts the device grant, and shows the
+    """``/omnigent`` without a token: the bot discovers the server's login mode,
+    starts the device grant, and shows the
     verification link in the setup modal — no DM."""
     server = FakeOmnigentServer(_SERVER)
     server.auth_required = True
@@ -124,7 +130,7 @@ async def test_omnigent_command_auth_wall_shows_login_link(tmp_path: Path) -> No
 
     store = await _store(tmp_path)
     token_store = await _token_store(tmp_path)
-    pool = OmnigentClientPool()
+    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
     auth = AuthManager(token_store)
     pool.set_auth_resolver(auth.resolve_auth)
     setup = SetupFlow(store=store, pool=pool, server_url=_SERVER, auth_manager=auth)
@@ -140,10 +146,9 @@ async def test_omnigent_command_auth_wall_shows_login_link(tmp_path: Path) -> No
         await auth.shutdown()
         await pool.aclose_all()
 
-    # Server side: the bot probed /health and the auth-gated /v1/agents, then
-    # started the device grant when that 401'd.
-    assert "/health" in server.paths("GET")
-    server.assert_request("GET", "/v1/agents")
+    # Login discovery precedes access to any per-user catalog.
+    assert "/v1/me" in server.paths("GET")
+    assert "/v1/agents" not in server.paths("GET")
     server.assert_request("POST", "/oauth/device/authorize")
 
     # Slack side: a modal opened, then updated to the login-waiting screen
@@ -168,7 +173,7 @@ async def test_omnigent_command_happy_path_shows_picker(tmp_path: Path) -> None:
     store = await _store(tmp_path)
     token_store = await _token_store(tmp_path)
     await token_store.put("T1", "U1", _SERVER, access_token="tok-abc", refresh_token="ref-abc")
-    pool = OmnigentClientPool()
+    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
     auth = AuthManager(token_store)
     pool.set_auth_resolver(auth.resolve_auth)
     setup = SetupFlow(store=store, pool=pool, server_url=_SERVER, auth_manager=auth)
@@ -205,7 +210,7 @@ async def test_app_mention_runs_full_turn_and_streams_answer(tmp_path: Path) -> 
 
     store = await _store(tmp_path)
     await _configure_user(store, "T1", "U1")
-    pool = OmnigentClientPool()
+    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
     service = SlackOmnigentService(store=store, pool=pool, setup=_NoopSetup(), server_url=_SERVER)
     client = RecordingSlackClient()
 
@@ -248,7 +253,7 @@ async def test_managed_session_turn_never_posts_a_runner_launch(tmp_path: Path) 
 
     store = await _store(tmp_path)
     await _configure_managed_user(store, "T1", "U1")
-    pool = OmnigentClientPool()
+    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
     service = SlackOmnigentService(store=store, pool=pool, setup=_NoopSetup(), server_url=_SERVER)
     client = RecordingSlackClient()
 
@@ -302,7 +307,7 @@ async def test_auth_wall_mid_turn_prompts_relogin(tmp_path: Path) -> None:
     await store.upsert_session(
         key, "conv_1", "Slack: t", owner_user_id="U1", host_id="h1", workspace="/home/bot/work"
     )
-    pool = OmnigentClientPool()
+    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
     setup = _RecordingSetup()
     service = SlackOmnigentService(store=store, pool=pool, setup=setup, server_url=_SERVER)
     client = RecordingSlackClient()
@@ -347,7 +352,7 @@ async def test_runner_unavailable_triggers_launch_and_retry(tmp_path: Path) -> N
     await store.upsert_session(
         key, "conv_1", "t", owner_user_id="U1", host_id="h1", workspace="/home/bot/work"
     )
-    pool = OmnigentClientPool()
+    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
     service = SlackOmnigentService(store=store, pool=pool, setup=_NoopSetup(), server_url=_SERVER)
     client = RecordingSlackClient()
 
@@ -383,7 +388,7 @@ async def test_host_unavailable_on_launch_shows_guidance(tmp_path: Path) -> None
 
     store = await _store(tmp_path)
     await _configure_user(store, "T1", "U1")
-    pool = OmnigentClientPool()
+    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
     service = SlackOmnigentService(store=store, pool=pool, setup=_NoopSetup(), server_url=_SERVER)
     client = RecordingSlackClient()
 
@@ -430,7 +435,7 @@ async def test_harness_not_configured_surfaces_curated_message(tmp_path: Path) -
     await store.upsert_session(
         key, "conv_1", "t", owner_user_id="U1", host_id="h1", workspace="/home/bot/work"
     )
-    pool = OmnigentClientPool()
+    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
     service = SlackOmnigentService(store=store, pool=pool, setup=_NoopSetup(), server_url=_SERVER)
     client = RecordingSlackClient()
 
@@ -481,7 +486,7 @@ async def test_mid_stream_drop_reconnects_without_double_render(tmp_path: Path) 
     await store.upsert_session(
         key, "conv_1", "t", owner_user_id="U1", host_id="h1", workspace="/home/bot/work"
     )
-    pool = OmnigentClientPool()
+    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
     service = SlackOmnigentService(store=store, pool=pool, setup=_NoopSetup(), server_url=_SERVER)
     client = RecordingSlackClient()
 
@@ -534,7 +539,7 @@ async def test_no_delta_turn_recovers_committed_answer(tmp_path: Path) -> None:
     await store.upsert_session(
         key, "conv_1", "t", owner_user_id="U1", host_id="h1", workspace="/home/bot/work"
     )
-    pool = OmnigentClientPool()
+    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
     service = SlackOmnigentService(store=store, pool=pool, setup=_NoopSetup(), server_url=_SERVER)
     client = RecordingSlackClient()
 

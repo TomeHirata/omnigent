@@ -198,7 +198,10 @@ unauthenticated deployments is not one worth shipping.)
 
 ## Authentication
 
-For Omnigent servers with authentication enabled, each Slack user logs in with
+The Slack integration requires an Omnigent server with authentication enabled.
+Anonymous server access is unsupported: user operations require an individual
+delegated token even if the target server would accept them without one.
+Each Slack user logs in with
 their own Omnigent identity — no Omnigent credential ever passes through Slack.
 Login happens inside the single `/omnigent` configuration modal, not a separate
 command.
