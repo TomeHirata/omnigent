@@ -611,7 +611,7 @@ against its local Chromium, and the result is posted back.
 - `src/browserIpc.js` — the whole `ipcMain.handle('omnigent:browser-*')` surface,
   extracted out of `main.js` so that file stays bounded:
   `open-or-navigate`, `set-active`, `resize`, `screenshot`
-  (`capturePage().toPNG()` → base64), `execute`, `has-view`, `close`, plus the
+  (`capturePage().toPNG()` → base64), `perform-action`, `has-view`, `close`, plus the
   toolbar handlers `go-back`, `go-forward`, `reload`, and `open-devtools`
   (toggle, docked bottom), plus the design-mode handlers
   `enable-design-mode` / `disable-design-mode` / `signal-design-result`
@@ -685,16 +685,13 @@ console listener is stored on the registry entry
 `close()` detaches it on teardown. Electron-only (needs `executeJavaScript` +
 the native view); no server flag.
 
-**JS trust boundary (important):** `omnigent:browser-execute` runs
-arbitrary JS in the child view via `executeJavaScript(js, true)`. It is exposed
-to the SPA **only for the relay's own fixed templates** (the DOM-snapshot walk,
-and the click / type element resolvers) — there is deliberately **no
-agent-facing generic `evaluate`**. This keeps the _agent_ boundary: the agent
-picks elements by `ref`/`selector` and supplies text, but never ships a raw JS
-string that main will run. (It does not, and is not intended to, defend against
-XSS _within_ the visited page — that page runs its own scripts in its own
-sandboxed view regardless.) Preserve this when extending the bridge: add typed,
-argument-shaped actions, not a passthrough JS channel.
+**JS trust boundary:** `omnigent:browser-perform-action` accepts only snapshot,
+click and type requests. Main validates their arguments and builds the fixed
+scripts. The renderer cannot supply JavaScript, and action execution does not
+grant a synthetic user gesture. Clipboard, popup and other gesture-gated page
+APIs still require native user interaction. An older UI using `browserExecute`
+reports browser actions as unsupported until updated; the raw script bridge is
+no longer exposed.
 
 **Availability.** The pane is always on in this build — this shell machinery
 activates the moment a `browser.action_request` arrives (the agent-side

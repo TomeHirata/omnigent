@@ -20,6 +20,7 @@ const path = require("node:path");
 
 const {
   desktopDepsAvailable,
+  execInBrowserView,
   spawnServer,
   launchDesktop,
   saveRecording,
@@ -42,13 +43,6 @@ async function openView(window, conversationId, url) {
   );
 }
 
-async function execInView(window, conversationId, js) {
-  return window.evaluate(
-    ([cid, code]) => window.omnigentDesktop.browserExecute(cid, code),
-    [conversationId, js],
-  );
-}
-
 async function setActive(window, conversationId) {
   const result = await window.evaluate(
     (cid) => window.omnigentDesktop.browserSetActive(cid),
@@ -59,17 +53,18 @@ async function setActive(window, conversationId) {
 
 // Cookie updates can reach sibling renderers after the writer returns.
 async function waitForIdentityCookie(window, conversationId, expected) {
-  await window.waitForFunction(
-    async ({ id, cookie }) => {
-      const result = await window.omnigentDesktop.browserExecute(id, "document.cookie");
-      const identity = String(result.result)
-        .split(/;\s*/)
-        .find((value) => value.startsWith("agent_identity="));
-      return result.ok && (identity ?? null) === cookie;
-    },
-    { id: conversationId, cookie: expected },
-    { timeout: 10_000 },
-  );
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    // oxlint-disable-next-line no-await-in-loop -- Wait for cookie propagation.
+    const result = await execInBrowserView(window, conversationId, "document.cookie");
+    const identity = String(result.result)
+      .split(/;\s*/)
+      .find((value) => value.startsWith("agent_identity="));
+    if (result.ok && (identity ?? null) === expected) return;
+    // oxlint-disable-next-line no-await-in-loop -- Wait for cookie propagation.
+    await window.waitForTimeout(100);
+  }
+  throw new Error("Identity cookie did not propagate");
 }
 
 // Poll until the view has actually LANDED on the target origin — an execute
@@ -83,7 +78,7 @@ async function waitForViewOnOrigin(window, conversationId, origin, timeoutMs = 3
   for (;;) {
     // oxlint-disable-next-line no-await-in-loop -- Poll each navigation probe sequentially.
     const r = await Promise.race([
-      execInView(window, conversationId, "location.origin"),
+      execInBrowserView(window, conversationId, "location.origin"),
       new Promise((resolve) => {
         setTimeout(() => resolve(null), 3_000);
       }),
@@ -164,7 +159,7 @@ describe(
           assert.equal(openedA.ok, true, `conv_A open failed: ${openedA.error}`);
           await setActive(window, "conv_A");
           await waitForViewOnOrigin(window, "conv_A", server.serverUrl);
-          const signIn = await execInView(
+          const signIn = await execInBrowserView(
             window,
             "conv_A",
             `document.cookie = "agent_identity=alice; path=/";` +
@@ -186,7 +181,7 @@ describe(
             await waitForIdentityCookie(window, tab, "agent_identity=alice");
           }
           await setActive(window, secondTab);
-          const changed = await execInView(
+          const changed = await execInBrowserView(
             window,
             secondTab,
             'document.cookie = "agent_identity=bob; path=/"; document.cookie',
@@ -208,7 +203,7 @@ describe(
           assert.equal(openedB.ok, true, `conv_B open failed: ${openedB.error}`);
           await setActive(window, "conv_B");
           await waitForViewOnOrigin(window, "conv_B", server.serverUrl);
-          const readB = await execInView(
+          const readB = await execInBrowserView(
             window,
             "conv_B",
             bannerJs(
@@ -225,7 +220,7 @@ describe(
             !String(readB.result).includes("agent_identity"),
             `conv_B inherited conv_A's cookie — jars are shared: "${readB.result}"`,
           );
-          const loggedOut = await execInView(
+          const loggedOut = await execInBrowserView(
             window,
             secondTab,
             'document.cookie = "agent_identity=; max-age=0; path=/"; document.cookie',

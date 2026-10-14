@@ -8,6 +8,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const { buildBrowserActionScript } = require("./browserActionScript");
 const { buildDesignModeScript } = require("./designModeScript");
 
 // Max age of a real native input event for a design-mode submit marker to be
@@ -419,20 +420,16 @@ function registerBrowserIpc({
     }
   });
 
-  // Run relay-template JS in the conversation's view. PRIVATE to the relay's
-  // fixed templates (snapshot / click / type) — NOT an agent-facing generic
-  // `evaluate` (trust boundary; see README).
-  ipcMain.handle("omnigent:browser-execute", async (event, args) => {
+  // Build fixed scripts in main; the renderer supplies only action data.
+  ipcMain.handle("omnigent:browser-perform-action", async (event, args) => {
     const g = gateRegistry(event);
     if (g.error) return { ok: false, error: g.error };
-    const { conversationId, js } = args ?? {};
-    if (typeof js !== "string") return { ok: false, error: "js must be a string" };
+    const { conversationId, action, params } = args ?? {};
     const entry = g.registry.get(conversationId);
     if (!entry) return { ok: false, error: "No browser view" };
     try {
-      // `true` = user gesture, so the page can call gesture-gated APIs.
-      const result = await entry.view.webContents.executeJavaScript(js, true);
-      // Normalize to a string — the relay JSON.parses snapshot/upload results.
+      const js = buildBrowserActionScript(action, params);
+      const result = await entry.view.webContents.executeJavaScript(js, false);
       return { ok: true, result: typeof result === "string" ? result : JSON.stringify(result) };
     } catch (e) {
       return { ok: false, error: e && e.message ? e.message : String(e) };
