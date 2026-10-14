@@ -11047,6 +11047,8 @@ def _print_config_defaults() -> None:
         for k, v in raw_local_cfg.items()
         if local_is_global or k not in _USER_LEVEL_ONLY_CONFIG_KEYS
     }
+    if not local_is_global:
+        local_cfg = _merge_effective_config({}, local_cfg)
     if not global_cfg and not local_cfg and not ignored_local_keys:
         click.echo(
             f"  (none set — `{cli_invocation()} config set key=value` for project,\n"

@@ -19,7 +19,7 @@ from omnigent.config import (
 )
 
 
-def test_effective_config_deep_merges_harness_mapping(
+def test_effective_config_keeps_user_harness_launch_settings(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     config_home = tmp_path / "home"
@@ -31,27 +31,35 @@ def test_effective_config_deep_merges_harness_mapping(
         "  codex:\n    args: [--config, k=v]\n"
     )
     (project / ".omnigent" / "config.yaml").write_text(
-        "harness:\n  codex:\n    command: /local/codex\n"
+        "harness:\n  default: codex\n  codex:\n    command: /local/codex\n"
+        "    args: [--project-option]\n  pi:\n    command: /local/pi\n"
     )
     monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
     monkeypatch.chdir(project)
 
     cfg = load_effective_config()
     harness = cfg["harness"]
-    assert harness["default"] == "claude-sdk"
+    assert harness["default"] == "codex"
     # Global-only entry preserved (a flat merge would have dropped it).
     assert harness["claude-sdk"] == {"command": "/global/claude"}
-    # Local per-harness entry augments the global one: local command wins,
-    # global args preserved (per-field, not whole-entry replace).
-    assert harness["codex"] == {"args": ["--config", "k=v"], "command": "/local/codex"}
+    assert harness["codex"] == {"args": ["--config", "k=v"]}
+    assert "pi" not in harness
+    from omnigent.harness_startup_config import resolve_harness_args, resolve_harness_command
+
+    assert resolve_harness_command("codex", default="codex", cfg=cfg) == "codex"
+    assert resolve_harness_args("codex", ["--verbose"], cfg=cfg) == [
+        "--config",
+        "k=v",
+        "--verbose",
+    ]
 
 
-def test_merge_effective_config_scalar_local_overrides_mapping_global() -> None:
-    # A scalar on either side is an explicit whole-value override: the
-    # shallow {**global, **local} result holds (no deep-merge).
+def test_merge_effective_config_scalar_local_preserves_user_overrides() -> None:
     g = {"harness": {"default": "claude-sdk", "codex": {"args": ["x"]}}}
     loc = {"harness": "codex"}
-    assert _merge_effective_config(g, loc) == {"harness": "codex"}
+    assert _merge_effective_config(g, loc) == {
+        "harness": {"default": "codex", "codex": {"args": ["x"]}}
+    }
 
 
 def test_merge_effective_config_scalar_global_no_deep_merge() -> None:
@@ -120,7 +128,7 @@ def test_effective_config_uses_explicit_workspace(
 
     assert load_effective_config(workspace=workspace) == {
         "profile": "global",
-        "harness": {"claude-native": {"command": "project-claude", "args": ["--verbose"]}},
+        "harness": {"claude-native": {"command": "global-claude", "args": ["--verbose"]}},
     }
 
 
