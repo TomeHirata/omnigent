@@ -178,6 +178,9 @@ def test_min_interval_constant() -> None:
     [
         "FREQ=DAILY;INTERVAL=367",
         "FREQ=DAILY;INTERVAL=0",
+        "FREQ=DAILY;COUNT=-1",
+        "FREQ=DAILY;COUNT=0",
+        "FREQ=DAILY;COUNT=2147483648",
         "FREQ=MINUTELY;INTERVAL=60",
         "FREQ=DAILY;FREQ=WEEKLY",
         "FREQ=DAILY\nRRULE:FREQ=WEEKLY",

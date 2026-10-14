@@ -172,6 +172,8 @@ def _parse(rule_str: str, dtstart: datetime) -> _ParsedRRule:
             raise ValueError("Use HOURLY or a coarser frequency")
         if not 1 <= int(fields.get("INTERVAL", "1")) <= 366:
             raise ValueError("INTERVAL must be between 1 and 366")
+        if "COUNT" in fields and not 1 <= int(fields["COUNT"]) <= 2**31 - 1:
+            raise ValueError("COUNT must be a positive 32-bit integer")
         combinations = 1
         for key in ("BYHOUR", "BYMINUTE", "BYSECOND"):
             combinations *= len(fields.get(key, "0").split(","))
