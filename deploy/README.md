@@ -634,3 +634,17 @@ Run service.yaml, a Helm chart, an HF Spaces config) plus a README
 that explains how to point that platform at `docker/Dockerfile`.
 
 Update this top-level README with a row in the table above.
+
+
+### Delegated runner credentials
+
+New runner bearer tokens are bound to their runner and its session tree. They
+cannot access account administration, other runners' sessions, host management,
+or scheduled-task APIs. Session creation stays on the creating runner; native
+session rotations and sub-agents retain that binding. Interactive user clients
+continue using their own credentials for account-wide operations. Runner
+credentials still follow account password rotation and deletion.
+
+Previously issued unscoped runner bearers remain valid until their original
+expiry. Restart runners after upgrading to obtain scoped credentials; use
+password rotation to revoke earlier account credentials immediately when needed.
