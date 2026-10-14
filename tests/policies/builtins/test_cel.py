@@ -112,6 +112,19 @@ def test_allow_explicit() -> None:
     assert result == {"result": "ALLOW"}
 
 
+@pytest.mark.parametrize("action", ["set", "increment", "delete", "append"])
+def test_state_updates_reject_runtime_namespace(action: str) -> None:
+    evaluate = cel_policy(
+        expression=(
+            '{"result": "ALLOW", "state_updates": ['
+            '{"key": "counter", "action": "increment", "value": 1},'
+            '{"key": event.data.key, "action": "' + action + '", "value": 1}]}'
+        )
+    )
+    with pytest.raises(ValueError, match="reserved keys"):
+        evaluate({"type": "tool_call", "data": {"key": "_policy_test"}})
+
+
 def test_state_updates_pass_through_as_plain_python_values() -> None:
     """CEL maps may return canonical state_updates for conversation state."""
     evaluate = cel_policy(

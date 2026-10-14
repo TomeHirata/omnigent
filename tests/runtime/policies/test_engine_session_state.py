@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 
 from omnigent.llms.context_window import ModelPricing
+from omnigent.policies.builtins.cel import cel_policy
 from omnigent.policies.function import FunctionPolicy
 from omnigent.policies.types import EvaluationContext
 from omnigent.runtime.policies.engine import PolicyEngine
@@ -140,6 +141,39 @@ def _build_engine(
 
 
 # ── Reading session_state from the event ──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_cel_reserved_state_update_denies_without_partial_writes(
+    conversation_store: SqlAlchemyConversationStore,
+) -> None:
+    policy = FunctionPolicy(
+        FunctionPolicySpec(name="cel_state", on=[PhaseSelector(phase=Phase.REQUEST)]),
+        cel_policy(
+            expression=(
+                '{"result": "ALLOW", "state_updates": ['
+                '{"key": "counter", "action": "increment", "value": 1},'
+                '{"key": "_policy_test", "action": "set", "value": 1}]}'
+            )
+        ),
+    )
+    conv = conversation_store.create_conversation()
+    conversation_store.set_session_state(conv.id, {"counter": 2})
+    engine = PolicyEngine(
+        policies=[policy],
+        label_defs={},
+        ask_timeout=30,
+        conversation_id=conv.id,
+        initial_labels={},
+        initial_session_state={"counter": 2},
+        conversation_store=conversation_store,
+    )
+    result = await engine.evaluate(EvaluationContext(phase=Phase.REQUEST, content="hello"))
+    assert result.action is PolicyAction.DENY
+    assert not result.state_updates
+    stored = conversation_store.get_conversation(conv.id)
+    assert stored is not None
+    assert stored.session_state == {"counter": 2}
 
 
 @pytest.mark.asyncio
