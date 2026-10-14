@@ -698,9 +698,7 @@ def register_events_routes(
 
     event_router = APIRouter(route_class=_SessionEventBodyLimitRoute)
 
-    def _has_runner_created_by_authority(
-        request: Request | _RunnerEventContext, conv: Any
-    ) -> bool:
+    def _has_runner_event_authority(request: Request | _RunnerEventContext, conv: Any) -> bool:
         if isinstance(request, _RunnerEventContext):
             return conv.runner_id == request.runner_id
         token = (request.headers.get(RUNNER_TUNNEL_TOKEN_HEADER) or "").strip()
@@ -974,6 +972,14 @@ def register_events_routes(
         :raises OmnigentError: 404 if no session exists.
         """
         user_id, conv = await _authorized_conversation(request, session_id)
+        if (
+            body.type == _EXTERNAL_CODEX_APPROVAL_MODE_CHANGE_TYPE
+            and not _has_runner_event_authority(request, conv)
+        ):
+            # Owner-authenticated local forwarders also report native settings.
+            await _require_access_and_level(
+                user_id, session_id, LEVEL_OWNER, permission_store, conversation_store
+            )
         if in_flight is not None:
             # Marked only after authorization, so an unauthorized caller
             # cannot flip a session to "running" even transiently.
@@ -981,7 +987,7 @@ def register_events_routes(
         created_by = _attribution_user(user_id)
         body_created_by = _attribution_user(body.created_by)
         if body_created_by is not None:
-            if not _has_runner_created_by_authority(request, conv):
+            if not _has_runner_event_authority(request, conv):
                 raise OmnigentError(
                     "created_by is reserved for runner-originated session events",
                     code=ErrorCode.FORBIDDEN,
