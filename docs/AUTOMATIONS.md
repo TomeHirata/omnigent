@@ -34,6 +34,13 @@ To provision a fresh sandbox per firing, set `execution_target: "managed_sandbox
 
 ## Schedules are RRULEs, not cron
 
+Use a single RRULE with `HOURLY`, `DAILY`, `WEEKLY`, `MONTHLY`, or `YEARLY`
+frequency. Rules are limited to 4096 characters, an `INTERVAL` of 1–366 periods,
+and 24 combinations of `BYHOUR`, `BYMINUTE`, and `BYSECOND` per day. Use
+`FREQ=HOURLY` instead of `FREQ=MINUTELY;INTERVAL=60`. Validation and next-fire
+lookup search at most eight calendar years; schedules with no occurrence in
+that window are not armed. Validation requires at least two occurrences.
+
 A schedule is an [RFC 5545](https://datatracker.ietf.org/doc/html/rfc5545) recurrence rule evaluated in the task's IANA timezone.
 
 | Intent | `rrule` |

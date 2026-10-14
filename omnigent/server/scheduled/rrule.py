@@ -12,6 +12,11 @@ hour, a daily rule at its ``BYHOUR``/``BYMINUTE``. :func:`validate_rrule`
 additionally enforces a minimum interval (:data:`MIN_INTERVAL_SECONDS`) and
 rejects rules that never fire or fire only once within the search window — each
 fire spawns a real agent session, so a runaway cadence is expensive.
+
+Schedules use a single HOURLY-or-coarser rule, at most 24 time combinations
+per day, and intervals of at most 366 periods. Both validation and next-fire
+lookup search at most eight calendar years. Use HOURLY instead of a MINUTELY
+or SECONDLY rule with a large interval.
 """
 
 from __future__ import annotations
@@ -19,10 +24,11 @@ from __future__ import annotations
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from itertools import islice
 from typing import Protocol, cast
 from zoneinfo import ZoneInfo
 
-from dateutil.rrule import rrulestr  # type: ignore[import-untyped]
+from dateutil.rrule import rrule, rrulestr  # type: ignore[import-untyped]
 
 # Reject anything more frequent than this. Each fire spawns a real agent
 # session, so a tight cadence gets expensive fast. One hour is the tightest
@@ -49,6 +55,8 @@ _INTERVAL_WINDOW = timedelta(hours=25)
 # normally stops the walk first; this backstops the minute-cadence case, where
 # 25 hours is ~1500 occurrences, against an unbounded pull.
 _MAX_SAMPLE_OCCURRENCES = 2000
+_MAX_RULE_LENGTH = 4096
+_SEARCH_YEARS = 8
 
 
 class RRuleValidationError(ValueError):
@@ -61,6 +69,23 @@ class _ParsedRRule(Protocol):
 
     def __iter__(self) -> Iterator[datetime]:
         raise NotImplementedError
+
+
+class _RRuleLimits(Protocol):
+    _until: datetime | None
+    _count: int | None
+
+
+@dataclass(frozen=True)
+class _BoundedRRule:
+    rule: _ParsedRRule
+    count: int | None
+
+    def __iter__(self) -> Iterator[datetime]:
+        return islice(self.rule, self.count)
+
+    def after(self, dt: datetime, inc: bool = False) -> datetime | None:
+        return next((occ for occ in self if occ > dt or (inc and occ == dt)), None)
 
 
 def _anchor_dtstart(after: datetime, tz: ZoneInfo) -> datetime:
@@ -134,7 +159,41 @@ def _parse(rule_str: str, dtstart: datetime) -> _ParsedRRule:
     :raises RRuleValidationError: On any malformed input ``dateutil`` rejects.
     """
     try:
-        return cast(_ParsedRRule, rrulestr(rule_str, dtstart=dtstart))
+        if len(rule_str) > _MAX_RULE_LENGTH or "\n" in rule_str or "\r" in rule_str:
+            raise ValueError("Use one RRULE of at most 4096 characters")
+        text = rule_str.strip().upper().removeprefix("RRULE:")
+        fields: dict[str, str] = {}
+        for part in text.split(";"):
+            key, value = part.split("=", 1)
+            if key in fields or not value:
+                raise ValueError("RRULE fields must be unique and non-empty")
+            fields[key] = value
+        if fields.get("FREQ") not in {"HOURLY", "DAILY", "WEEKLY", "MONTHLY", "YEARLY"}:
+            raise ValueError("Use HOURLY or a coarser frequency")
+        if not 1 <= int(fields.get("INTERVAL", "1")) <= 366:
+            raise ValueError("INTERVAL must be between 1 and 366")
+        combinations = 1
+        for key in ("BYHOUR", "BYMINUTE", "BYSECOND"):
+            combinations *= len(fields.get(key, "0").split(","))
+        if combinations > 24:
+            raise ValueError("At most 24 time combinations per day are supported")
+        parsed = rrulestr(text, dtstart=dtstart)
+        if not isinstance(parsed, rrule):
+            raise ValueError("Use a single recurrence rule")
+        # Bound the iterator itself: counting yielded occurrences cannot bound
+        # the work spent searching for the first matching date.
+        horizon_year = min(dtstart.year + _SEARCH_YEARS, 9999)
+        try:
+            horizon = dtstart.replace(year=horizon_year)
+        except ValueError:
+            horizon = dtstart.replace(year=horizon_year, day=28)
+        limits = cast(_RRuleLimits, parsed)
+        original_until = limits._until
+        until = min(original_until, horizon) if original_until is not None else horizon
+        # Apply COUNT outside dateutil so the bounded rule does not combine
+        # COUNT and UNTIL, which RFC 5545 disallows.
+        bounded = cast(_ParsedRRule, parsed.replace(count=None, until=until))
+        return _BoundedRRule(bounded, limits._count)
     except (ValueError, TypeError) as exc:
         raise RRuleValidationError(f"Invalid RRULE {rule_str!r}: {exc}") from exc
 

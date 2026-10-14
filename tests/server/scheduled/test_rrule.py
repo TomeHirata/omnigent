@@ -171,3 +171,32 @@ def test_validate_floor_is_deterministic() -> None:
 
 def test_min_interval_constant() -> None:
     assert MIN_INTERVAL_SECONDS == 3600
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "FREQ=DAILY;INTERVAL=367",
+        "FREQ=DAILY;INTERVAL=0",
+        "FREQ=MINUTELY;INTERVAL=60",
+        "FREQ=DAILY;FREQ=WEEKLY",
+        "FREQ=DAILY\nRRULE:FREQ=WEEKLY",
+        "FREQ=DAILY;BYHOUR=0,1,2,3,4;BYMINUTE=0,1,2,3,4",
+        "FREQ=DAILY;" + "X" * 4096,
+    ],
+)
+def test_rule_limits_apply_to_validation_and_next_fire(rule: str) -> None:
+    with pytest.raises(RRuleValidationError):
+        validate_rrule(rule)
+    with pytest.raises(RRuleValidationError):
+        get_next_fire_time(rule, _dt(2026, 1, 1), UTC)
+
+
+def test_yearly_leap_day_rule_is_supported() -> None:
+    rule = "FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=29"
+    validate_rrule(rule)
+    assert get_next_fire_time(rule, _dt(2026, 1, 1), UTC) == _dt(2028, 2, 29)
+
+
+def test_next_fire_search_has_a_finite_horizon() -> None:
+    assert get_next_fire_time("FREQ=YEARLY;INTERVAL=10", _dt(2026, 1, 1), UTC) is None
