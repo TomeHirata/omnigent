@@ -28,7 +28,7 @@ from sqlalchemy import (
     true,
 )
 from sqlalchemy.dialects.mysql import BINARY as MySQLBinary
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.orm import DeclarativeBase, Mapped, MappedColumn, mapped_column
 
 from omnigent.db.compression import CompressedText
 from omnigent.util.uuid import InvalidUuidError as InvalidUuidError
@@ -101,6 +101,19 @@ class Uuid16(TypeDecorator[str]):
         if isinstance(value, str):
             return value
         return bytes(value).hex()
+
+
+def _credential_epoch_column(table: str) -> MappedColumn[str | None]:
+    """Map a nullable 32-character credential epoch bounded on every engine.
+
+    SQLite ignores ``VARCHAR`` lengths, so a named CHECK enforces the bound;
+    migration ``nn1a2b3c4d5e`` adds the same column and constraint.
+    """
+    return mapped_column(
+        String(32),
+        CheckConstraint("length(credential_epoch) <= 32", name=f"ck_{table}_credential_epoch"),
+        nullable=True,
+    )
 
 
 class OmnigentBase(DeclarativeBase):
@@ -341,6 +354,9 @@ class SqlUser(OmnigentBase):
 
     __tablename__ = "users"
     account_generation: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Current sign-in credential epoch; NULL until first rotated. Unlike the
+    # generation, rotating it leaves owned hosts and scheduled tasks untouched.
+    credential_epoch: Mapped[str | None] = _credential_epoch_column("users")
 
     # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
     workspace_id: Mapped[int] = mapped_column(
@@ -410,6 +426,8 @@ class SqlAccountToken(OmnigentBase):
 
     __tablename__ = "account_tokens"
     account_generation: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The user's credential epoch when the token was minted.
+    credential_epoch: Mapped[str | None] = _credential_epoch_column("account_tokens")
 
     # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
     workspace_id: Mapped[int] = mapped_column(
@@ -540,6 +558,8 @@ class SqlDeviceGrant(OmnigentBase):
 
     __tablename__ = "device_grants"
     account_generation: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # The user's credential epoch when the grant was approved.
+    credential_epoch: Mapped[str | None] = _credential_epoch_column("device_grants")
 
     # Tenant partition key: Databricks workspace id owning this row (0 = default). Part of the PK.
     workspace_id: Mapped[int] = mapped_column(
