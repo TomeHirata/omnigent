@@ -642,7 +642,7 @@ _GLOBAL_CONFIG_KEYS: frozenset[str] = frozenset(
         _AUTO_OPEN_CONVERSATION_CONFIG_KEY,
     }
 )
-_USER_LEVEL_ONLY_CONFIG_KEYS: frozenset[str] = frozenset({"session_title_instructions"})
+_USER_LEVEL_ONLY_CONFIG_KEYS: frozenset[str] = frozenset({"server", "session_title_instructions"})
 _BOOLEAN_CONFIG_KEYS: frozenset[str] = frozenset({_AUTO_OPEN_CONVERSATION_CONFIG_KEY})
 _CONFIG_TRUE_VALUES: frozenset[str] = frozenset({"1", "true", "yes", "on"})
 _CONFIG_FALSE_VALUES: frozenset[str] = frozenset({"0", "false", "no", "off"})
@@ -10933,7 +10933,7 @@ def _validate_config_set_scope(settings: Mapping[str, object], *, is_global: boo
         names = ", ".join(repr(key) for key in user_only)
         raise click.ClickException(
             f"Config key(s) {names} can only be set with --global because they "
-            "configure the shared local server."
+            "configure user-level server behavior."
         )
 
 
@@ -11369,8 +11369,9 @@ def config_set(is_global: bool, settings: tuple[str, ...]) -> None:
     ``~/.gitconfig``). Project values take precedence.
 
     Supported keys: auto_open_conversation, default_agent, harness,
-    model, server, session_title_instructions. Session title instructions
-    configure the shared local server and require ``--global``.
+    model, server, session_title_instructions. Server selection and session
+    title instructions require ``--global``. A project-local ``server`` is
+    ignored; use ``--server`` for a per-invocation destination.
 
     :param is_global: When ``True``, write to ``~/.omnigent/config.yaml``;
         when ``False``, to ``.omnigent/config.yaml`` in cwd.
