@@ -154,6 +154,13 @@ def _string_object_dict(value: object) -> _JsonObject | None:
     return cast("_JsonObject", value)
 
 
+def _session_url(session_id: object) -> str:
+    """Build a session URL from one identifier, retaining legacy prefixed ids."""
+    if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", session_id):
+        raise ValueError("Session id must contain only letters, digits, underscores or hyphens")
+    return f"/v1/sessions/{session_id}"
+
+
 def _optional_string(value: object) -> str | None:
     """Return *value* when it is a string, otherwise ``None``."""
     return value if isinstance(value, str) else None
@@ -1358,7 +1365,7 @@ async def _list_child_sessions(
         params["tool"] = tool
         params["session_name"] = session_name
     resp = await server_client.get(
-        f"/v1/sessions/{conversation_id}/child_sessions",
+        f"{_session_url(conversation_id)}/child_sessions",
         params=params,
         timeout=30.0,
     )
@@ -1448,7 +1455,7 @@ async def _session_turn_actor(
 ) -> str | None:
     """Return the parent turn actor label for runner-originated callbacks."""
     try:
-        resp = await server_client.get(f"/v1/sessions/{conversation_id}", timeout=10.0)
+        resp = await server_client.get(f"{_session_url(conversation_id)}", timeout=10.0)
     except (httpx.HTTPError, RuntimeError):
         return None
     if resp.status_code != 200:
@@ -1476,7 +1483,7 @@ async def _patch_subagent_label(
     """
     try:
         resp = await server_client.patch(
-            f"/v1/sessions/{child_session_id}",
+            f"{_session_url(child_session_id)}",
             json={"labels": {key: value}},
             timeout=30.0,
         )
@@ -1536,7 +1543,7 @@ async def _post_child_message_event(
         }
 
     resp = await server_client.post(
-        f"/v1/sessions/{session_id}/events",
+        f"{_session_url(session_id)}/events",
         json=_payload(created_by),
         # This message is gated at the recipient's REQUEST phase, which can
         # PARK on a human ASK (e.g. session_cost_budget) up to the policy's
@@ -1553,7 +1560,7 @@ async def _post_child_message_event(
         session_id,
     )
     return await server_client.post(
-        f"/v1/sessions/{session_id}/events",
+        f"{_session_url(session_id)}/events",
         json=_payload(None),
         timeout=_ASK_GATE_DELIVERY_TIMEOUT,
     )
@@ -1781,7 +1788,7 @@ async def _inherited_parent_model(
     if not harness_supports_model_override(child_harness):
         return None
     try:
-        resp = await server_client.get(f"/v1/sessions/{conversation_id}", timeout=10.0)
+        resp = await server_client.get(f"{_session_url(conversation_id)}", timeout=10.0)
     except (httpx.HTTPError, RuntimeError):
         return None
     if resp.status_code != 200:
@@ -1946,7 +1953,7 @@ async def _teardown_failed_child(
     for attempt in range(2):
         try:
             resp = await server_client.delete(
-                f"/v1/sessions/{child_session_id}",
+                f"{_session_url(child_session_id)}",
                 timeout=30.0,
             )
         except httpx.HTTPError as exc:
@@ -2029,7 +2036,7 @@ async def _build_subagent_message_content(
 
     try:
         copy_resp = await server_client.post(
-            f"/v1/sessions/{child_session_id}/resources/files:copy",
+            f"{_session_url(child_session_id)}/resources/files:copy",
             json={"source_session_id": parent_session_id, "file_ids": file_ids},
             timeout=30.0,
         )
@@ -2605,7 +2612,7 @@ async def _execute_subagent_tool(
     if parent_agent_id is None:
         try:
             sess_resp = await server_client.get(
-                f"/v1/sessions/{conversation_id}",
+                f"{_session_url(conversation_id)}",
                 timeout=10.0,
             )
             if sess_resp.status_code == 200:
@@ -2969,7 +2976,7 @@ async def _execute_subagent_tool(
             }
             try:
                 pol_resp = await server_client.post(
-                    f"/v1/sessions/{child_session_id}/policies",
+                    f"{_session_url(child_session_id)}/policies",
                     json=policy_body,
                     timeout=10.0,
                 )
@@ -3171,7 +3178,7 @@ async def _send_to_existing_session(
     from omnigent.runner import subagent_work as _subagent_work
 
     try:
-        snap = await server_client.get(f"/v1/sessions/{target_session_id}", timeout=30.0)
+        snap = await server_client.get(f"{_session_url(target_session_id)}", timeout=30.0)
     except Exception as exc:  # noqa: BLE001
         return f"Error: sys_session_send failed to look up session: {exc}"
     if snap.status_code == 404:
@@ -3602,7 +3609,7 @@ async def _post_child_first_message(
     """
     try:
         msg_resp = await server_client.post(
-            f"/v1/sessions/{child_session_id}/events",
+            f"{_session_url(child_session_id)}/events",
             json={
                 "type": "message",
                 "data": {
@@ -4270,7 +4277,7 @@ async def _timer_loop(
                 text += f"\nnote: {note!r}"
             try:
                 resp = await server_client.post(
-                    f"/v1/sessions/{conversation_id}/events",
+                    f"{_session_url(conversation_id)}/events",
                     json={
                         "type": "message",
                         "data": {
@@ -4356,7 +4363,7 @@ async def _execute_comment_tool(
         args: _JsonObject = json.loads(arguments) if arguments.strip() else {}
     except json.JSONDecodeError:
         return json.dumps({"error": f"{tool_name}: malformed JSON arguments"})
-    base = f"/v1/sessions/{conversation_id}/comments"
+    base = f"{_session_url(conversation_id)}/comments"
 
     if tool_name == ListCommentsTool.name():
         params: dict[str, str] = {}
@@ -4449,7 +4456,7 @@ async def _execute_browser_tool(
     action = tool_name[len("browser_") :]
     try:
         resp = await server_client.post(
-            f"/v1/sessions/{conversation_id}/browser/action_request",
+            f"{_session_url(conversation_id)}/browser/action_request",
             json={"action": action, "args": args},
             timeout=_BROWSER_ACTION_TIMEOUT,
         )
@@ -4593,7 +4600,7 @@ async def _execute_add_policy(
 
     try:
         resp = await server_client.post(
-            f"/v1/sessions/{conversation_id}/policies",
+            f"{_session_url(conversation_id)}/policies",
             json=payload,
             timeout=30.0,
         )
@@ -5029,7 +5036,7 @@ async def _session_get_info_via_rest(
         )
     try:
         resp = await server_client.get(
-            f"/v1/sessions/{raw_target}",
+            f"{_session_url(raw_target)}",
             params={"include_items": "false", "include_liveness": "false"},
             timeout=30.0,
         )
@@ -5205,7 +5212,7 @@ async def _session_share_via_rest(
         )
     try:
         resp = await server_client.put(
-            f"/v1/sessions/{target}/permissions",
+            f"{_session_url(target)}/permissions",
             json={"user_id": user_id, "level": level_by_name[level_name]},
             timeout=30.0,
         )
@@ -5324,7 +5331,7 @@ async def _agent_get_via_rest(
     :returns: JSON agent-metadata object, or a JSON error object.
     """
     try:
-        resp = await server_client.get(f"/v1/sessions/{session_id}/agent", timeout=30.0)
+        resp = await server_client.get(f"{_session_url(session_id)}/agent", timeout=30.0)
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"sys_agent_get failed: {exc}"})
     if resp.status_code == 404:
@@ -5421,7 +5428,7 @@ async def _agent_download_via_rest(
         or a JSON error object.
     """
     try:
-        resp = await server_client.get(f"/v1/sessions/{session_id}/agent/contents", timeout=60.0)
+        resp = await server_client.get(f"{_session_url(session_id)}/agent/contents", timeout=60.0)
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"sys_agent_download failed: {exc}"})
     if resp.status_code == 404:
@@ -5601,7 +5608,7 @@ async def _spawn_family(
         return _spawn_family_cache[conversation_id]
     try:
         resp = await server_client.get(
-            f"/v1/sessions/{conversation_id}",
+            f"{_session_url(conversation_id)}",
             # Only the routing fields are read, so skip the history and
             # runner-liveness work the full snapshot would do.
             params={"include_items": "false", "include_liveness": "false"},
@@ -5681,7 +5688,7 @@ async def _agent_list_host_readiness(
                     return None
                 seen.add(conversation_id)
                 response = await server_client.get(
-                    f"/v1/sessions/{conversation_id}",
+                    f"{_session_url(conversation_id)}",
                     params={"include_items": "false", "include_liveness": "false"},
                     timeout=_AGENT_READINESS_TIMEOUT_S,
                 )
@@ -5939,7 +5946,7 @@ async def _rename_current_session_via_rest(
     # the old seed-gated endpoint's response for child sessions.
     try:
         info_response = await server_client.get(
-            f"/v1/sessions/{conversation_id}",
+            f"{_session_url(conversation_id)}",
             # Skip the transcript and the runner/host liveness lookup — the
             # probe only needs parent_session_id.
             params={"include_items": "false", "include_liveness": "false"},
@@ -5976,7 +5983,7 @@ async def _rename_current_session_via_rest(
         )
     try:
         response = await server_client.post(
-            f"/v1/sessions/{conversation_id}/agent-title",
+            f"{_session_url(conversation_id)}/agent-title",
             json={"title": normalized_title},
             timeout=90.0,
         )
@@ -6024,7 +6031,7 @@ async def _collect_sub_agents(
     """
     try:
         resp = await server_client.get(
-            f"/v1/sessions/{conversation_id}/child_sessions",
+            f"{_session_url(conversation_id)}/child_sessions",
             params={"limit": 100},
             timeout=30.0,
         )
@@ -6040,7 +6047,7 @@ async def _collect_sub_agents(
         result.append({"agent": "main", "title": None, "conversation_id": parent_id})
         try:
             sib_resp = await server_client.get(
-                f"/v1/sessions/{parent_id}/child_sessions",
+                f"{_session_url(parent_id)}/child_sessions",
                 params={"limit": 100},
                 timeout=30.0,
             )
@@ -6203,7 +6210,7 @@ async def _session_parent_id(
     :returns: The parent session id, or ``None``.
     """
     try:
-        snap = await server_client.get(f"/v1/sessions/{conversation_id}", timeout=30.0)
+        snap = await server_client.get(f"{_session_url(conversation_id)}", timeout=30.0)
     except Exception:  # noqa: BLE001
         return None
     if snap.status_code != 200:
@@ -6255,7 +6262,7 @@ async def _session_get_history_via_rest(
         return content_offset_chars
     try:
         resp = await server_client.get(
-            f"/v1/sessions/{target_id}/items",
+            f"{_session_url(target_id)}/items",
             params={"limit": tail_items, "order": "desc"},
             timeout=30.0,
         )
@@ -6310,7 +6317,7 @@ async def _fetch_close_target(
         otherwise) suitable for returning verbatim to the LLM.
     """
     try:
-        snap = await server_client.get(f"/v1/sessions/{target_id}", timeout=30.0)
+        snap = await server_client.get(f"{_session_url(target_id)}", timeout=30.0)
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"sys_session_close failed: {exc}"})
     if snap.status_code == 404:
@@ -6356,7 +6363,7 @@ async def _close_tree_scope_error(
     """
     try:
         caller_snap = await server_client.get(
-            f"/v1/sessions/{caller_conversation_id}", timeout=30.0
+            f"{_session_url(caller_conversation_id)}", timeout=30.0
         )
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"sys_session_close failed: {exc}"})
@@ -6430,7 +6437,7 @@ async def _session_close_via_rest(
     new_title = f"{parsed.agent}:{parsed.title}{_CLOSED_TITLE_INFIX}{target_id}"
     try:
         patch = await server_client.patch(
-            f"/v1/sessions/{target_id}",
+            f"{_session_url(target_id)}",
             json={
                 "title": new_title,
                 "labels": {CLOSED_LABEL_KEY: CLOSED_LABEL_VALUE},
@@ -6495,7 +6502,7 @@ async def _fetch_peek_meta(
         payloads (all empty/``None`` on any miss).
     """
     try:
-        snap = await server_client.get(f"/v1/sessions/{target_id}", timeout=30.0)
+        snap = await server_client.get(f"{_session_url(target_id)}", timeout=30.0)
     except Exception:  # noqa: BLE001
         return _PeekMeta(agent=None, title=None, pending_elicitations=[])
     if snap.status_code != 200:
@@ -6993,7 +7000,7 @@ async def dispatch_tool_locally(
     for attempt in range(2):
         try:
             resp = await harness_client.post(
-                f"/v1/sessions/{conversation_id}/events",
+                f"{_session_url(conversation_id)}/events",
                 json={"type": "tool_result", "call_id": call_id, "output": output},
                 timeout=30.0,
             )
@@ -7348,14 +7355,14 @@ async def _execute_rest_tool(
             if conversation_id is not None:
                 try:
                     parent_resp = await server_client.get(
-                        f"/v1/sessions/{conversation_id}",
+                        f"{_session_url(conversation_id)}",
                         timeout=10.0,
                     )
                     if parent_resp.status_code == 200:
                         parent_runner = parent_resp.json().get("runner_id")
                         if parent_runner:
                             await server_client.patch(
-                                f"/v1/sessions/{session_id}",
+                                f"{_session_url(session_id)}",
                                 json={"runner_id": parent_runner},
                                 timeout=10.0,
                             )
@@ -7378,7 +7385,7 @@ async def _execute_rest_tool(
                 },
             }
             event_resp = await server_client.post(
-                f"/v1/sessions/{session_id}/events",
+                f"{_session_url(session_id)}/events",
                 json=event_body,
                 timeout=30.0,
             )
@@ -7403,7 +7410,7 @@ async def _execute_rest_tool(
         handle_id = args.get("handle_id") or args.get("task_id", "")
         try:
             resp = await server_client.post(
-                f"/v1/sessions/{handle_id}/events",
+                f"{_session_url(handle_id)}/events",
                 json={"type": "interrupt", "data": {}},
                 timeout=30.0,
             )
@@ -7450,7 +7457,7 @@ async def _execute_file_tool(
         return f"Error: {tool_name} requires server access"
     if conversation_id is None:
         return f"Error: {tool_name} requires a session id"
-    files_path = f"/v1/sessions/{conversation_id}/resources/files"
+    files_path = f"{_session_url(conversation_id)}/resources/files"
 
     if tool_name == UploadFileTool.name():
         path = args.get("path")
@@ -8074,7 +8081,7 @@ async def _post_subagent_policy_verdict(
     """
     try:
         resp = await server_client.post(
-            f"/v1/sessions/{conversation_id}/policies/evaluate",
+            f"{_session_url(conversation_id)}/policies/evaluate",
             json=_subagent_tool_result_policy_request(payload, output),
             timeout=30.0,
         )
@@ -8326,7 +8333,7 @@ async def _evaluate_async_tool_call_policy(
         except (json.JSONDecodeError, ValueError):
             arguments_dict = {}
         resp = await server_client.post(
-            f"/v1/sessions/{conversation_id}/policies/evaluate",
+            f"{_session_url(conversation_id)}/policies/evaluate",
             json={
                 "event": {"type": phase, "data": {"name": tool_name, "arguments": arguments_dict}}
             },
@@ -8737,7 +8744,7 @@ async def _post_session_stop(
     """
     try:
         resp = await server_client.post(
-            f"/v1/sessions/{task_id}/events",
+            f"{_session_url(task_id)}/events",
             json={"type": "stop_session", "data": {}},
             timeout=30.0,
         )
@@ -8768,7 +8775,7 @@ async def _cancel_evicted_native_subagent(
     if server_client is None:
         return "Error: sys_cancel_task requires server access for sub-agent tasks"
     try:
-        resp = await server_client.get(f"/v1/sessions/{task_id}", timeout=10.0)
+        resp = await server_client.get(f"{_session_url(task_id)}", timeout=10.0)
     except httpx.HTTPError as exc:
         return f"Error: sys_cancel_task lookup failed: {type(exc).__name__}: {exc}"
     if resp.status_code != 200:
@@ -8866,7 +8873,7 @@ async def _cancel_subagent_task(
 
     try:
         resp = await server_client.post(
-            f"/v1/sessions/{task_id}/events",
+            f"{_session_url(task_id)}/events",
             # Bare control events 422 on servers that require body.data.
             json={"type": event_type, "data": {}},
             timeout=30.0,
