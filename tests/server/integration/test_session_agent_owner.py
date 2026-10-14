@@ -18,7 +18,7 @@ from fastapi import FastAPI
 
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
-from omnigent.server.auth import LEVEL_EDIT
+from omnigent.server.auth import LEVEL_EDIT, LEVEL_READ
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
@@ -137,6 +137,33 @@ async def test_shared_editor_cannot_edit_mcp_servers(auth_client: httpx.AsyncCli
         headers={"X-Forwarded-Email": BOB},
     )
     assert resp.status_code == 403, resp.text
+
+
+@pytest.mark.parametrize(
+    "hook",
+    [
+        "permission-request",
+        "codex-elicitation-request",
+        "antigravity-elicitation-request",
+        "cursor-permission-request",
+        "native-permission-request",
+    ],
+)
+async def test_read_only_collaborator_cannot_publish_native_hooks(
+    auth_client: httpx.AsyncClient, hook: str
+) -> None:
+    agent = await create_test_agent(auth_client, name="native-hooks", user=ALICE)
+    path = f"/v1/sessions/{agent['_session_id']}"
+    owner = {"X-Forwarded-Email": ALICE}
+    collaborator = {"X-Forwarded-Email": BOB}
+    for level, expected in [(LEVEL_READ, 403), (LEVEL_EDIT, 400)]:
+        response = await auth_client.put(
+            f"{path}/permissions", json={"user_id": BOB, "level": level}, headers=owner
+        )
+        assert response.status_code in (200, 204), response.text
+        # An empty body reaches validation only after mutation authority is checked.
+        response = await auth_client.post(f"{path}/hooks/{hook}", json={}, headers=collaborator)
+        assert response.status_code == expected, response.text
 
 
 async def test_reuse_then_patch_never_reaches_the_owners_agent(
