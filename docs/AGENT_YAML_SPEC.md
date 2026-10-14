@@ -681,6 +681,10 @@ tools:
 
 For client-provided tools, use `runtime: client` and do not set `callable`.
 
+For trusted local function tools, install the callable's package in Omnigent's
+Python environment. The CLI does not automatically add the working directory
+to Python's import path.
+
 ### Linux desktop keyrings
 
 The host and runner inherit `DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR`

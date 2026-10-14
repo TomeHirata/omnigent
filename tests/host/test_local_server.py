@@ -486,10 +486,11 @@ def test_ensure_local_omnigent_server_spawns_when_none_healthy(
     assert env["DATABRICKS_CONFIG_PROFILE"] == "ambient"
 
 
+@pytest.mark.parametrize("entrypoint", ["module", "console"])
 def test_spawn_local_server_preserves_runtime_and_workspace(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, entrypoint: str
 ) -> None:
-    """Keep the selected runtime and workspace tools, cwd, and state paths."""
+    """Keep the selected runtime, cwd, and state paths without workspace imports."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "workspace_tool_module.py").write_text("def echo(message):\n    return message\n")
@@ -521,7 +522,7 @@ def test_spawn_local_server_preserves_runtime_and_workspace(
     }
     probe_env.update(HOME=str(tmp_path), USERPROFILE=str(tmp_path))
     probe = textwrap.dedent("""\
-        import contextlib, io, json, os, runpy, sys
+        import contextlib, importlib.util, io, json, os, runpy, sys
 
         startup_path = list(sys.path)
         import omnigent
@@ -532,14 +533,17 @@ def test_spawn_local_server_preserves_runtime_and_workspace(
         with contextlib.redirect_stdout(io.StringIO()):
             try:
                 sys.argv = ["omnigent.cli", "--help"]
-                runpy.run_module("omnigent.cli", run_name="__main__")
+                if os.environ["OMNIGENT_TEST_ENTRYPOINT"] == "module":
+                    runpy.run_module("omnigent.cli", run_name="__main__")
+                else:
+                    from omnigent.cli import main
+                    main()
             except SystemExit as exc:
                 assert exc.code == 0, exc.code
 
-        import workspace_tool_module
-
         print(json.dumps(dict(
-            tool=workspace_tool_module.echo("ok"),
+            workspace_module_found=importlib.util.find_spec("workspace_tool_module") is not None,
+            dispatch_path=list(sys.path),
             safe_path=sys.flags.safe_path,
             startup_path=startup_path,
             cwd=os.getcwd(),
@@ -551,7 +555,7 @@ def test_spawn_local_server_preserves_runtime_and_workspace(
     result = subprocess.run(
         [*args[:module_index], "-c", probe],
         cwd=kwargs.get("cwd"),
-        env=probe_env,
+        env={**probe_env, "OMNIGENT_TEST_ENTRYPOINT": entrypoint},
         capture_output=True,
         text=True,
         check=True,
@@ -561,7 +565,11 @@ def test_spawn_local_server_preserves_runtime_and_workspace(
     assert "" not in observed["startup_path"]
     assert workspace.resolve() not in {Path(entry).resolve() for entry in observed["startup_path"]}
     assert observed["safe_path"] is True
-    assert observed["tool"] == "ok"
+    assert not observed["workspace_module_found"]
+    assert "" not in observed["dispatch_path"]
+    assert workspace.resolve() not in {
+        Path(entry).resolve() for entry in observed["dispatch_path"]
+    }
     assert Path(observed["runtime"]).resolve() == Path(omnigent.__file__).resolve()
     assert Path(observed["cwd"]) == workspace.resolve()
     assert Path(observed["config"]) == local_server.global_config_path()
