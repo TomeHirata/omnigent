@@ -18,7 +18,7 @@ from fastapi import FastAPI
 
 from omnigent.runtime.agent_cache import AgentCache
 from omnigent.server.app import create_app
-from omnigent.server.auth import LEVEL_EDIT
+from omnigent.server.auth import LEVEL_EDIT, LEVEL_MANAGE, LEVEL_READ
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
 from omnigent.stores.conversation_store.sqlalchemy_store import SqlAlchemyConversationStore
@@ -103,6 +103,35 @@ async def test_owner_can_update_bundle_and_mcp(auth_client: httpx.AsyncClient) -
         headers=headers,
     )
     assert mcp.status_code == 200, mcp.text
+
+
+@pytest.mark.parametrize("level", [LEVEL_READ, LEVEL_EDIT, LEVEL_MANAGE])
+async def test_only_owner_can_update_terminal_launch_args(
+    auth_client: httpx.AsyncClient, level: int
+) -> None:
+    agent = await create_test_agent(auth_client, name="owned-terminal", user=ALICE)
+    session_id = agent["_session_id"]
+    path = f"/v1/sessions/{session_id}"
+    owner = {"X-Forwarded-Email": ALICE}
+    shared = {"X-Forwarded-Email": BOB}
+    response = await auth_client.put(
+        f"{path}/permissions", json={"user_id": BOB, "level": level}, headers=owner
+    )
+    assert response.status_code in (200, 204), response.text
+    response = await auth_client.patch(
+        path, json={"terminal_launch_args": ["--verbose"], "title": "Owner title"}, headers=owner
+    )
+    assert response.status_code == 200, response.text
+    response = await auth_client.patch(
+        path, json={"terminal_launch_args": [], "title": "Changed title"}, headers=shared
+    )
+    assert response.status_code == 403, response.text
+    response = await auth_client.get(path, headers=owner)
+    assert response.status_code == 200, response.text
+    assert response.json()["terminal_launch_args"] == ["--verbose"]
+    assert response.json()["title"] == "Owner title"
+    response = await auth_client.patch(path, json={"title": "Changed title"}, headers=shared)
+    assert response.status_code == (403 if level == LEVEL_READ else 200), response.text
 
 
 async def test_shared_editor_cannot_update_bundle(auth_client: httpx.AsyncClient) -> None:
