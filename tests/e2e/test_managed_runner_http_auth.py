@@ -402,6 +402,12 @@ def test_managed_runner_callback_authenticates_end_to_end(
     assert authed.headers.get("X-Agent-Name")
     assert authed.content[:2] == b"\x1f\x8b", "expected a gzip agent bundle body"
 
+    # The same minted bearer is confined to this runner's sessions: account
+    # and host routes refuse it even after the client's re-mint retry.
+    for path in ("/v1/me", "/v1/hosts"):
+        refused = asyncio.run(_get_agent_contents(base_url, path, _RunnerDatabricksAuth(factory)))
+        assert refused.status_code == 401, (path, refused.status_code, refused.text)
+
 
 def test_managed_runner_survives_mint_403_after_token_expiry(
     accounts_server: tuple[str, str],

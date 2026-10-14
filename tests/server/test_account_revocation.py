@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 
@@ -969,7 +970,9 @@ def test_runner_token_uses_saved_account_authority(
     issued = mint()
     assert issued.status_code == 200, issued.text
     runner.headers["Authorization"] = f"Bearer {issued.json()['token']}"
-    assert runner.get("/auth/me").status_code == 200
+    # The runner's own status route requires an authenticated caller.
+    status_path = f"/v1/runners/{runner_id}/status"
+    assert runner.get(status_path).status_code == 200
     # A separate administrator can delete either the host or session owner.
     stores["account_store"].set_admin("alice", True)
     deleter = alice if revoked_owner == "admin" else admin
@@ -1006,8 +1009,106 @@ def test_runner_token_uses_saved_account_authority(
             resume.set()
         if pending is not None:
             assert pending.result(timeout=15).status_code == 401
-    assert runner.get("/auth/me").status_code == (401 if revoked_owner == "alice" else 200)
+    assert runner.get(status_path).status_code == (401 if revoked_owner == "alice" else 200)
     assert mint().status_code == 401
+
+
+@pytest.mark.parametrize("owner", ["alice", "admin"])
+def test_runner_token_is_confined_to_its_runner_sessions(setup_app, owner):
+    import uuid
+
+    from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_runner_id
+    from omnigent.server.auth import RUNNER_CREATOR_LABEL_KEY
+
+    admin, alice, stores, _ = setup_app
+    owner_client, other_client = (alice, admin) if owner == "alice" else (admin, alice)
+    bound, own_elsewhere = (create_session(owner_client).json()["session_id"] for _ in range(2))
+    foreign = create_session(other_client).json()["session_id"]
+    binding = "confined-runner-binding"
+    runner_id = token_bound_runner_id(binding)
+    other_runner_id = token_bound_runner_id("other-runner-binding")
+    host_id = uuid.uuid4().hex
+    stores["host_store"].upsert_on_connect(host_id, "runner-host", owner)
+    conversations = stores["conversation_store"]
+    conversations.set_host_id(bound, host_id, workspace="/tmp/review-workspace")
+    conversations.replace_runner_id(bound, runner_id)
+    conversations.replace_runner_id(own_elsewhere, other_runner_id)
+    runner = TestClient(admin.app)
+    issued = runner.post(
+        f"/v1/runners/{runner_id}/token", headers={RUNNER_TUNNEL_TOKEN_HEADER: binding}
+    )
+    assert issued.status_code == 200, issued.text
+    runner.headers["Authorization"] = f"Bearer {issued.json()['token']}"
+
+    snapshot = runner.get(f"/v1/sessions/{bound}")
+    assert snapshot.status_code == 200, snapshot.text
+    assert runner.get(f"/v1/runners/{runner_id}/status").status_code == 200
+    for path in (
+        "/v1/me",
+        f"/v1/sessions/{own_elsewhere}",
+        f"/v1/sessions/{foreign}",
+        "/v1/sessions",
+        "/v1/hosts",
+        f"/v1/hosts/{host_id}",
+        "/v1/scheduled-tasks",
+        "/auth/users",
+        f"/v1/runners/{other_runner_id}/status",
+    ):
+        assert runner.get(path).status_code in (401, 403), path
+
+    agent_id = snapshot.json()["agent_id"]
+    child = runner.post("/v1/sessions", json={"agent_id": agent_id, "parent_session_id": bound})
+    assert child.status_code == 201, child.text
+    assert runner.get(f"/v1/sessions/{child.json()['id']}").status_code == 200
+    for escape in (
+        {"agent_id": agent_id, "host_id": host_id},
+        {"agent_id": agent_id, "host_type": "managed"},
+        {"agent_id": agent_id, "parent_session_id": own_elsewhere},
+        {"agent_id": other_client.get(f"/v1/sessions/{foreign}").json()["agent_id"]},
+    ):
+        assert runner.post("/v1/sessions", json=escape).status_code == 403, escape
+    assert create_session(runner).status_code == 403
+    sub_agent = runner.post(
+        "/v1/sessions",
+        data={"metadata": json.dumps({"parent_session_id": bound})},
+        files={"bundle": ("agent.tar.gz", build_agent_bundle(name="helper"), "application/gzip")},
+    )
+    assert sub_agent.status_code == 201, sub_agent.text
+
+    # A native /clear rotation creates an unbound session, then binds it here.
+    rotated = runner.post(
+        "/v1/sessions",
+        json={"agent_id": agent_id, "labels": {RUNNER_CREATOR_LABEL_KEY: other_runner_id}},
+    )
+    assert rotated.status_code == 201, rotated.text
+    rotated_id = rotated.json()["id"]
+    created = conversations.get_conversation(rotated_id)
+    assert created.labels[RUNNER_CREATOR_LABEL_KEY] == runner_id
+    for caller in (runner, owner_client):
+        rejected = caller.patch(
+            f"/v1/sessions/{rotated_id}",
+            json={"labels": {RUNNER_CREATOR_LABEL_KEY: other_runner_id}},
+        )
+        assert rejected.status_code == 403, rejected.text
+        assert (
+            conversations.get_conversation(rotated_id).labels[RUNNER_CREATOR_LABEL_KEY]
+            == runner_id
+        )
+    assert runner.patch(f"/v1/sessions/{rotated_id}", json={"title": "next"}).status_code == 200
+    rebind = runner.patch(f"/v1/sessions/{bound}", json={"runner_id": other_runner_id})
+    assert rebind.status_code == 403
+    assert conversations.get_conversation(bound).runner_id == runner_id
+    transfer = runner.post(
+        f"/v1/sessions/{bound}/resources/terminals/terminal_claude_main/transfer",
+        json={"target_session_id": own_elsewhere},
+    )
+    assert transfer.status_code == 403, transfer.text
+    managed_fork = runner.post(f"/v1/sessions/{bound}/fork", json={"host_type": "managed"})
+    assert managed_fork.status_code == 403, managed_fork.text
+    forked = runner.post(f"/v1/sessions/{bound}/fork", json={})
+    assert forked.status_code == 201, forked.text
+    fork_labels = conversations.get_conversation(forked.json()["id"]).labels
+    assert fork_labels[RUNNER_CREATOR_LABEL_KEY] == runner_id
 
 
 def test_oauth_connection_state_cannot_cross_username_reuse(setup_app):
@@ -1349,10 +1450,11 @@ async def test_existing_session_transfers_between_hosts(setup_app, workflow):
                 )
                 assert issued.status_code == 200, issued.text
                 authenticated = await runner.get(
-                    "/auth/me", headers={"Authorization": f"Bearer {issued.json()['token']}"}
+                    f"/v1/sessions/{session_id}/owner",
+                    headers={"Authorization": f"Bearer {issued.json()['token']}"},
                 )
                 assert authenticated.status_code == 200, authenticated.text
-                assert authenticated.json()["id"] == "alice"
+                assert authenticated.json()["owner"] == "alice"
         finally:
             for comm in reversed(comms):
                 with contextlib.suppress(Exception):
