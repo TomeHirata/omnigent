@@ -205,6 +205,12 @@ creation, service principal permissions) lives in
 that as canonical for the deploy details. The rest of this page covers
 the integration knobs you set on top of that deploy.
 
+Before connecting the CLI to a remote server, run `omnigent login <server-url>`.
+The saved login binds that server to its workspace credentials. Remote requests
+do not fall back to an ambient Databricks profile when no login exists. For
+automation, `OMNIGENT_REMOTE_AUTH_TOKEN` remains an explicit credential choice.
+This does not change Databricks credentials used by model providers.
+
 ### What you get on Databricks vs DIY
 
 Self-hosting the omnigent server (e.g., on a VM or in a container)

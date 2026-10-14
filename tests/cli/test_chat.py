@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import click
 import httpx
@@ -41,7 +42,6 @@ from omnigent.chat import (
     run_chat,
 )
 from omnigent.cli import _build_resume_parts
-from omnigent.inner.databricks_executor import DatabricksCredentials
 from omnigent.models.model_resolver import ModelResolutionError
 from omnigent.spec import load as load_spec
 from omnigent.spec import validate as validate_spec
@@ -2666,49 +2666,31 @@ def test_apply_overrides_keeps_explicit_openai_auth(
 
 
 def test_remote_headers_prefers_explicit_remote_token_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Explicit remote bearer env var wins over ambient Databricks credentials."""
+    """Explicit remote bearer env var is accepted for the selected server."""
     monkeypatch.setenv("OMNIGENT_REMOTE_AUTH_TOKEN", "env-token")
-    monkeypatch.setattr(
-        chat_module,
-        "_read_databrickscfg",
-        lambda _profile: DatabricksCredentials(host="https://x", token="ambient-token"),
-    )
 
     assert _remote_headers(server_url="https://srv.example.com", host_id=None) == {
         "Authorization": "Bearer env-token"
     }
 
 
-def test_remote_headers_falls_back_to_ambient_databricks_creds(
+@pytest.mark.parametrize("server_url", [None, "http://localhost:6767", "https://srv.example.com"])
+def test_remote_auth_requires_a_server_login(
     monkeypatch: pytest.MonkeyPatch,
+    server_url: str | None,
 ) -> None:
-    """No env token + no stored login record → ambient Databricks credentials.
-
-    Bottom of the resolution chain: with ``OMNIGENT_REMOTE_AUTH_TOKEN``
-    unset, no stored OIDC token, and no stored Databricks Apps pointer
-    record for the server, ``_remote_headers`` must fall back to
-    ``_read_databrickscfg(None)`` (the SDK's ambient resolution — no
-    profile is threaded anymore) and put its token in the bearer header.
-    """
+    """Ambient credentials cannot authenticate an unregistered destination."""
     monkeypatch.delenv("OMNIGENT_REMOTE_AUTH_TOKEN", raising=False)
     monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url: None)
-    monkeypatch.setattr(chat_module, "_stored_databricks_record_token", lambda _url: None)
-    read_calls: list[object] = []
-
-    def _fake_read(profile: object) -> DatabricksCredentials:
-        """Record the profile argument and return ambient creds."""
-        read_calls.append(profile)
-        return DatabricksCredentials(host="https://workspace", token="ambient-token")
-
-    monkeypatch.setattr(chat_module, "_read_databrickscfg", _fake_read)
-
-    headers = _remote_headers(server_url="https://srv.example.com", host_id=None)
-
-    # The ambient token reached the Authorization header.
-    assert headers == {"Authorization": "Bearer ambient-token"}
-    # Ambient resolution: exactly one lookup, with no profile threaded
-    # (None) — a non-None value here means profile plumbing came back.
-    assert read_calls == [None]
+    monkeypatch.setattr("omnigent.cli_auth.load_databricks_workspace_host", lambda _url: None)
+    # Credential resolution would contact the local SDK/CLI; it must stay unused.
+    resolve = Mock(side_effect=AssertionError("unexpected credential lookup"))
+    monkeypatch.setattr("omnigent.inner.databricks_executor._resolve_databricks_auth", resolve)
+    assert _remote_headers(server_url=server_url, host_id=None) == {}
+    assert chat_module._server_auth(server_url, session_id=None) is None
+    auth = chat_module._DatabricksTokenAuth(server_url=server_url)
+    assert _first_auth_header(auth, "https://srv.example.com/v1/me") is None
+    resolve.assert_not_called()
 
 
 def test_remote_headers_adds_org_id_header(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3278,18 +3260,16 @@ def test_databricks_token_auth_resolves_sdk_once(
     ) -> tuple[object, str]:
         """Stand in for _resolve_databricks_auth; counts resolutions."""
         resolve_calls["n"] += 1
-        # No stored pointer record (load_databricks_workspace_host → None)
-        # means ambient SDK resolution: neither a profile nor a host is
-        # threaded into the resolver anymore.
-        assert profile is None and host is None, (profile, host)
+        assert profile is None and host == "https://ex.databricks.com", (profile, host)
         return dbx._DatabricksBearerAuth(cfg, profile_name=None), "https://ex.databricks.com"
 
     monkeypatch.setattr(dbx, "_resolve_databricks_auth", _fake_resolve)
     monkeypatch.delenv(chat_module._REMOTE_AUTH_TOKEN_ENV, raising=False)  # skip static path
     monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url: None)  # skip OIDC path
-    # No Databricks Apps pointer record stored for this server → the auth
-    # falls through to ambient SDK resolution rather than host-keyed lookup.
-    monkeypatch.setattr("omnigent.cli_auth.load_databricks_workspace_host", lambda _url: None)
+    monkeypatch.setattr(
+        "omnigent.cli_auth.load_databricks_workspace_host",
+        lambda _url: "https://ex.databricks.com",
+    )
 
     auth = chat_module._DatabricksTokenAuth(server_url="https://ex.databricks.com")
 
@@ -3306,6 +3286,11 @@ def test_databricks_token_auth_resolves_sdk_once(
     )
     # authenticate() runs per request (4) — cheap in-memory SDK cache hits,
     # NOT CLI shell-outs. That's the behavior the fix preserves.
+    assert cfg.authenticate_calls == 4
+
+    # Logging out must stop an existing long-lived client using cached SDK auth.
+    monkeypatch.setattr("omnigent.cli_auth.load_databricks_workspace_host", lambda _url: None)
+    assert _first_auth_header(auth, "https://ex.databricks.com/v1/x") is None
     assert cfg.authenticate_calls == 4
 
 
@@ -3336,7 +3321,10 @@ def test_databricks_token_auth_re_resolves_when_reused_sdk_auth_goes_stale(
     monkeypatch.setattr(dbx, "_resolve_databricks_auth", _fake_resolve)
     monkeypatch.delenv(chat_module._REMOTE_AUTH_TOKEN_ENV, raising=False)  # skip static path
     monkeypatch.setattr("omnigent.cli_auth.load_token", lambda _url: None)  # skip OIDC path
-    monkeypatch.setattr("omnigent.cli_auth.load_databricks_workspace_host", lambda _url: None)
+    monkeypatch.setattr(
+        "omnigent.cli_auth.load_databricks_workspace_host",
+        lambda _url: "https://ex.databricks.com",
+    )
 
     auth = chat_module._DatabricksTokenAuth(server_url="https://ex.databricks.com")
 

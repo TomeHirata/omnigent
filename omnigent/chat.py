@@ -55,7 +55,6 @@ from omnigent.errors import OmnigentError
 from omnigent.harness_aliases import canonicalize_harness
 from omnigent.inner import _proc
 from omnigent.inner.databricks_executor import (
-    _read_databrickscfg,
     _ReusedDatabricksTokenSource,
 )
 from omnigent.models.model_catalog import resolve_catalog_model
@@ -701,8 +700,6 @@ def _remote_headers(
       3. stored Databricks Apps pointer record for ``server_url``
          (populated by ``omnigent login <apps-url>``) — mints a
          fresh workspace OAuth token via the SDK
-      4. ambient Databricks CLI / ``~/.databrickscfg`` credentials
-         (the SDK's default resolution; no profile is threaded)
 
     This lets ``omnigent run --server <apps-url>`` work against
     Databricks Apps after a one-time ``omnigent login <apps-url>``,
@@ -738,11 +735,6 @@ def _remote_headers(
             record_token = _stored_databricks_record_token(server_url)
             if record_token:
                 headers["Authorization"] = f"Bearer {record_token}"
-    if "Authorization" not in headers:
-        # 4. Ambient ~/.databrickscfg credentials.
-        creds = _read_databrickscfg(None)
-        if creds is not None and creds.token:
-            headers["Authorization"] = f"Bearer {creds.token}"
     # Workspace routing: when a ?o= selector was recorded at login, name the
     # workspace or the request routes to the account. Merged onto the result
     # because these ad-hoc requests carry no httpx Auth. ``host_id`` pins a
@@ -794,7 +786,7 @@ class _DatabricksTokenAuth(httpx.Auth):
     Resolution order:
       1. static env-var token (``OMNIGENT_REMOTE_AUTH_TOKEN``)
       2. stored OIDC token (from ``omnigent login``)
-      3. Databricks SDK credentials — resolved ONCE and reused, so the
+      3. a server-bound Databricks login record — resolved ONCE and reused, so the
          SDK serves the cached token from memory and only re-runs the
          Databricks CLI near expiry (not on every request).
     """
@@ -820,7 +812,8 @@ class _DatabricksTokenAuth(httpx.Auth):
         # cache). Resolving per request rebuilt Config and shelled out to
         # the Databricks CLI (~0.5s) every time — a heavy tax on the
         # long-lived transcript-forwarder client that posts reply items.
-        self._sdk_token_source = _ReusedDatabricksTokenSource(server_url)
+        self._sdk_token_source: _ReusedDatabricksTokenSource | None = None
+        self._sdk_workspace_host: str | None = None
 
     def pin_session(self, session_id: str | None) -> None:
         """Repoint this auth at a different session's host.
@@ -843,13 +836,24 @@ class _DatabricksTokenAuth(httpx.Auth):
         repeat requests hit the SDK's in-memory token cache instead of
         re-shelling to the Databricks CLI. A stored Databricks Apps
         pointer record for the server (from ``omnigent login
-        <apps-url>``) takes precedence over profile/ambient resolution
-        — the record names the exact workspace the Apps edge accepts
-        tokens from.
+        <apps-url>``) is required: it binds the destination to the
+        workspace whose credentials may be sent there.
 
         :returns: Bearer token string, or ``None`` when no Databricks
             credentials resolve.
         """
+        from omnigent.cli_auth import load_databricks_workspace_host
+
+        workspace_host = (
+            load_databricks_workspace_host(self._server_url) if self._server_url else None
+        )
+        if workspace_host is None:
+            self._sdk_token_source = None
+            self._sdk_workspace_host = None
+            return None
+        if self._sdk_token_source is None or self._sdk_workspace_host != workspace_host:
+            self._sdk_token_source = _ReusedDatabricksTokenSource(host=workspace_host)
+            self._sdk_workspace_host = workspace_host
         return self._sdk_token_source.current_token()
 
     def auth_flow(self, request: httpx.Request) -> Generator[httpx.Request, httpx.Response, None]:
@@ -928,8 +932,8 @@ def _server_auth(
     Build an httpx Auth for a remote Omnigent server client.
 
     Returns a :class:`_DatabricksTokenAuth` when any credential
-    source is available (env var, stored ``omnigent login`` record,
-    or ambient Databricks credentials). Returns ``None`` for local
+    source is available (env var or stored ``omnigent login`` record).
+    Returns ``None`` for local
     servers that don't need auth, so the caller can pass it straight
     to ``OmnigentClient(auth=...)``.
 
@@ -955,9 +959,6 @@ def _server_auth(
 
         if load_token(server_url) or load_databricks_workspace_host(server_url):
             return _DatabricksTokenAuth(server_url=server_url, session_id=session_id)
-    creds = _read_databrickscfg(None)
-    if creds is not None and creds.token:
-        return _DatabricksTokenAuth(server_url=server_url, session_id=session_id)
     return None
 
 
