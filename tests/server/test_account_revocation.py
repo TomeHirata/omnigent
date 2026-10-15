@@ -1015,32 +1015,41 @@ def test_runner_token_uses_saved_account_authority(
     assert mint().status_code == 401
 
 
-@pytest.mark.parametrize("owner", ["alice", "admin"])
-def test_runner_token_is_confined_to_its_runner_sessions(setup_app, owner):
+def _runner_for_session(owner_client, stores, owner):
     import uuid
 
     from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_runner_id
-    from omnigent.server.auth import RUNNER_CREATOR_LABEL_KEY
 
-    admin, alice, stores, _ = setup_app
-    owner_client, other_client = (alice, admin) if owner == "alice" else (admin, alice)
-    bound, own_elsewhere = (create_session(owner_client).json()["session_id"] for _ in range(2))
-    foreign = create_session(other_client).json()["session_id"]
+    bound = create_session(owner_client).json()["session_id"]
     binding = "confined-runner-binding"
     runner_id = token_bound_runner_id(binding)
-    other_runner_id = token_bound_runner_id("other-runner-binding")
     host_id = uuid.uuid4().hex
     stores["host_store"].upsert_on_connect(host_id, "runner-host", owner)
     conversations = stores["conversation_store"]
     conversations.set_host_id(bound, host_id, workspace="/tmp/review-workspace")
     conversations.replace_runner_id(bound, runner_id)
-    conversations.replace_runner_id(own_elsewhere, other_runner_id)
-    runner = TestClient(admin.app)
+    runner = TestClient(owner_client.app)
     issued = runner.post(
         f"/v1/runners/{runner_id}/token", headers={RUNNER_TUNNEL_TOKEN_HEADER: binding}
     )
     assert issued.status_code == 200, issued.text
     runner.headers["Authorization"] = f"Bearer {issued.json()['token']}"
+    return runner, bound, runner_id
+
+
+@pytest.mark.parametrize("owner", ["alice", "admin"])
+def test_runner_token_is_confined_to_its_runner_sessions(setup_app, owner):
+    from omnigent.runner.identity import token_bound_runner_id
+
+    admin, alice, stores, _ = setup_app
+    owner_client, other_client = (alice, admin) if owner == "alice" else (admin, alice)
+    runner, bound, runner_id = _runner_for_session(owner_client, stores, owner)
+    own_elsewhere = create_session(owner_client).json()["session_id"]
+    foreign = create_session(other_client).json()["session_id"]
+    other_runner_id = token_bound_runner_id("other-runner-binding")
+    conversations = stores["conversation_store"]
+    conversations.replace_runner_id(own_elsewhere, other_runner_id)
+    host_id = conversations.get_conversation(bound).host_id
 
     snapshot = runner.get(f"/v1/sessions/{bound}")
     assert snapshot.status_code == 200, snapshot.text
@@ -1062,29 +1071,6 @@ def test_runner_token_is_confined_to_its_runner_sessions(setup_app, owner):
     child = runner.post("/v1/sessions", json={"agent_id": agent_id, "parent_session_id": bound})
     assert child.status_code == 201, child.text
     assert runner.get(f"/v1/sessions/{child.json()['id']}").status_code == 200
-    grandchild = runner.post(
-        "/v1/sessions", json={"agent_id": agent_id, "parent_session_id": child.json()["id"]}
-    )
-    assert grandchild.status_code == 201, grandchild.text
-    destination = grandchild.json()["id"]
-    uploaded = owner_client.post(
-        f"/v1/sessions/{bound}/resources/files",
-        files={"file": ("root.txt", b"grandparent", "text/plain")},
-    )
-    assert uploaded.status_code == 201, uploaded.text
-    source_file = uploaded.json()["id"]
-    copy_path = f"/v1/sessions/{destination}/resources/files:copy"
-    copy_body = {"source_session_id": bound, "file_ids": [source_file]}
-    copied = runner.post(copy_path, json=copy_body)
-    assert copied.status_code == 200, copied.text
-    before = stores["file_store"].list(session_id=destination).data
-    assert len(before) == 1
-    # Lineage remains valid after the ancestor moves to another runner.
-    conversations.replace_runner_id(bound, other_runner_id)
-    denied = runner.post(copy_path, json=copy_body)
-    assert denied.status_code == 403, denied.text
-    assert stores["file_store"].list(session_id=destination).data == before
-    conversations.replace_runner_id(bound, runner_id)
     # Agent definitions uploaded by the same owner remain reusable; transcripts
     # of sessions on other runners are still outside this credential's scope.
     reusable_agent = owner_client.get(f"/v1/sessions/{own_elsewhere}").json()["agent_id"]
@@ -1105,6 +1091,162 @@ def test_runner_token_is_confined_to_its_runner_sessions(setup_app, owner):
     )
     assert sub_agent.status_code == 201, sub_agent.text
 
+
+@pytest.mark.asyncio
+async def test_runner_clear_finalizes_before_detaching(setup_app, monkeypatch):
+    import httpx
+
+    from omnigent.harnesses.claude_native.forwarder import _post_clear_supersession
+    from omnigent.runtime import session_stream
+
+    _, alice, stores, _ = setup_app
+    runner, old_id, runner_id = _runner_for_session(alice, stores, "alice")
+    agent_id = stores["conversation_store"].get_conversation(old_id).agent_id
+    created = runner.post("/v1/sessions", json={"agent_id": agent_id})
+    assert created.status_code == 201, created.text
+    new_id = created.json()["id"]
+    stores["conversation_store"].replace_runner_id(new_id, runner_id)
+    published = []
+    monkeypatch.setattr(
+        session_stream, "publish", lambda sid, event: published.append((sid, event))
+    )
+    responses = []
+
+    async def record(response):
+        responses.append((response.request.method, response.status_code))
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=alice.app),
+        base_url="http://testserver",
+        headers={"Authorization": runner.headers["Authorization"]},
+        event_hooks={"response": [record]},
+    ) as client:
+        await _post_clear_supersession(
+            client, old_session_id=old_id, new_session_id=new_id, agent_name="review-agent"
+        )
+    assert responses == [("POST", 202), ("POST", 202), ("POST", 202), ("PATCH", 200)]
+    assert runner.get(f"/v1/sessions/{old_id}").status_code == 401
+    assert runner.get(f"/v1/sessions/{new_id}").status_code == 200
+    assert stores["conversation_store"].get_conversation(old_id).runner_id is None
+    items = alice.get(f"/v1/sessions/{old_id}/items")
+    assert items.status_code == 200, items.text
+    assert f"/c/{new_id}" in items.text
+    assert any(
+        sid == old_id
+        and event.get("type") == "session.superseded"
+        and event["target_conversation_id"] == new_id
+        for sid, event in published
+    )
+    assert any(sid == old_id and event.get("status") == "idle" for sid, event in published)
+
+
+def test_runner_events_check_parent_scope(setup_app, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    import httpx
+
+    from omnigent.runtime import session_stream
+    from omnigent.server.routes import sessions
+
+    _, alice, stores, _ = setup_app
+    runner, parent_id, runner_id = _runner_for_session(alice, stores, "alice")
+    response = alice.post(
+        f"/v1/sessions/{parent_id}/events",
+        json={
+            "type": "external_codex_subagent_start",
+            "data": {"thread_id": "test-thread", "agent_nickname": "Helper"},
+        },
+    )
+    assert response.status_code == 202, response.text
+    child_id = response.json()["child_session_id"]
+    conversations = stores["conversation_store"]
+    conversations.replace_runner_id(child_id, runner_id)
+    conversations.replace_runner_id(parent_id, "other-runner")
+    published = []
+    monkeypatch.setattr(
+        session_stream, "publish", lambda sid, event: published.append((sid, event))
+    )
+    # The runner transport is external to the event-route authorization boundary.
+    transport = AsyncMock()
+    transport.post.return_value = httpx.Response(204)
+    get_runner = AsyncMock(return_value=transport)
+    monkeypatch.setattr(sessions, "_get_runner_client", get_runner)
+    for same_runner in (False, True):
+        if same_runner:
+            conversations.replace_runner_id(parent_id, runner_id)
+        interrupt = runner.post(
+            f"/v1/sessions/{child_id}/events",
+            json={"type": "interrupt", "data": {"response_id": "codex_test-turn"}},
+        )
+        assert interrupt.status_code == (202 if same_runner else 403), interrupt.text
+        assert get_runner.call_count == (1 if same_runner else 0)
+        published.clear()
+        prompt = runner.post(
+            f"/v1/sessions/{child_id}/events",
+            json={
+                "type": "mcp_elicitation",
+                "data": {
+                    "message": "Choose a display preference",
+                    "requestedSchema": {"type": "object", "properties": {}},
+                },
+            },
+        )
+        assert prompt.status_code == 202, prompt.text
+        destinations = {
+            sid for sid, event in published if event.get("type") == "response.elicitation_request"
+        }
+        assert destinations == ({child_id, parent_id} if same_runner else {child_id})
+
+
+def test_runner_resource_copy_checks_ancestor_scope(setup_app):
+    _, alice, stores, _ = setup_app
+    runner, bound, runner_id = _runner_for_session(alice, stores, "alice")
+    conversations = stores["conversation_store"]
+    agent_id = conversations.get_conversation(bound).agent_id
+    other_runner_id = "other-runner"
+    child = runner.post("/v1/sessions", json={"agent_id": agent_id, "parent_session_id": bound})
+    assert child.status_code == 201, child.text
+    grandchild = runner.post(
+        "/v1/sessions", json={"agent_id": agent_id, "parent_session_id": child.json()["id"]}
+    )
+    assert grandchild.status_code == 201, grandchild.text
+    destination = grandchild.json()["id"]
+    uploaded = alice.post(
+        f"/v1/sessions/{bound}/resources/files",
+        files={"file": ("root.txt", b"grandparent", "text/plain")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    source_file = uploaded.json()["id"]
+    copy_path = f"/v1/sessions/{destination}/resources/files:copy"
+    copy_body = {"source_session_id": bound, "file_ids": [source_file]}
+    copied = runner.post(copy_path, json=copy_body)
+    assert copied.status_code == 200, copied.text
+    before = stores["file_store"].list(session_id=destination).data
+    assert len(before) == 1
+    # Lineage remains valid after the ancestor moves to another runner.
+    conversations.replace_runner_id(bound, other_runner_id)
+    denied = runner.post(copy_path, json=copy_body)
+    assert denied.status_code == 403, denied.text
+    assert stores["file_store"].list(session_id=destination).data == before
+    conversations.replace_runner_id(bound, runner_id)
+    elsewhere = create_session(alice).json()["session_id"]
+    conversations.replace_runner_id(elsewhere, other_runner_id)
+    transfer = runner.post(
+        f"/v1/sessions/{bound}/resources/terminals/terminal_claude_main/transfer",
+        json={"target_session_id": elsewhere},
+    )
+    assert transfer.status_code == 403, transfer.text
+
+
+def test_runner_binding_lifecycle_consumes_bootstrap_scope(setup_app):
+    from omnigent.server.auth import RUNNER_CREATOR_LABEL_KEY
+
+    _, alice, stores, _ = setup_app
+    runner, bound, runner_id = _runner_for_session(alice, stores, "alice")
+    conversations = stores["conversation_store"]
+    agent_id = conversations.get_conversation(bound).agent_id
+    owner_client = alice
+    other_runner_id = "other-runner"
     # A native /clear rotation creates an unbound session, then binds it here.
     rotated = runner.post(
         "/v1/sessions",
@@ -1128,11 +1270,6 @@ def test_runner_token_is_confined_to_its_runner_sessions(setup_app, owner):
     rebind = runner.patch(f"/v1/sessions/{bound}", json={"runner_id": other_runner_id})
     assert rebind.status_code == 403
     assert conversations.get_conversation(bound).runner_id == runner_id
-    transfer = runner.post(
-        f"/v1/sessions/{bound}/resources/terminals/terminal_claude_main/transfer",
-        json={"target_session_id": own_elsewhere},
-    )
-    assert transfer.status_code == 403, transfer.text
     managed_fork = runner.post(f"/v1/sessions/{bound}/fork", json={"host_type": "managed"})
     assert managed_fork.status_code == 403, managed_fork.text
     forked = runner.post(f"/v1/sessions/{bound}/fork", json={})
@@ -1149,20 +1286,24 @@ def test_runner_token_is_confined_to_its_runner_sessions(setup_app, owner):
     assert detached.status_code == 200, detached.text
     assert runner.get(f"/v1/sessions/{rotated_id}").status_code == 401
 
-    # Owner-created children of a detached session have no direct binding.
+
+def test_runner_scope_depth_boundary_can_be_repaired_by_owner(setup_app):
+    _, alice, stores, _ = setup_app
+    runner, bound, runner_id = _runner_for_session(alice, stores, "alice")
+    conversations = stores["conversation_store"]
+    agent_id = conversations.get_conversation(bound).agent_id
+    child = alice.post("/v1/sessions", json={"agent_id": agent_id, "parent_session_id": bound})
+    assert child.status_code == 201, child.text
     descendant = child.json()["id"]
-    detached_child = owner_client.patch(f"/v1/sessions/{descendant}", json={"runner_id": ""})
-    assert detached_child.status_code == 200, detached_child.text
-    for depth in range(1, 34):
-        if depth > 1:
-            created_child = owner_client.post(
-                "/v1/sessions", json={"agent_id": agent_id, "parent_session_id": descendant}
-            )
-            assert created_child.status_code == 201, created_child.text
-            descendant = created_child.json()["id"]
-        if depth in (31, 32, 33):
-            response = runner.get(f"/v1/sessions/{descendant}")
-            assert response.status_code == (200 if depth <= 32 else 401), response.text
+    detached = alice.patch(f"/v1/sessions/{descendant}", json={"runner_id": ""})
+    assert detached.status_code == 200, detached.text
+    for _ in range(32):
+        created_child = alice.post(
+            "/v1/sessions", json={"agent_id": agent_id, "parent_session_id": descendant}
+        )
+        assert created_child.status_code == 201, created_child.text
+        descendant = created_child.json()["id"]
+    assert runner.get(f"/v1/sessions/{descendant}").status_code == 401
     conversations.replace_runner_id(descendant, runner_id)
     assert runner.get(f"/v1/sessions/{descendant}").status_code == 200
 
