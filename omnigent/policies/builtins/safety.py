@@ -357,10 +357,9 @@ def ask_on_add_policy(event: PolicyEvent) -> PolicyResponse:
 
 def ask_on_scheduled_task_change(event: PolicyEvent) -> PolicyResponse:
     """Require approval before an agent persists or changes unattended work."""
-    data = event.get("data")
-    if event.get("type") != "tool_call" or not isinstance(data, dict):
+    if event.get("type") != "tool_call":
         return _ALLOW
-    if data.get("name") not in {"sys_scheduled_task_create", "sys_scheduled_task_update"}:
+    if event.get("target") not in {"sys_scheduled_task_create", "sys_scheduled_task_update"}:
         return _ALLOW
     return {
         "result": "ASK",
