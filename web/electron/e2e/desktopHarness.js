@@ -542,8 +542,28 @@ async function execInBrowserView(window, conversationId, js) {
   );
 }
 
+/** Create a local fixture through main's test driver, outside renderer IPC. */
+async function openBrowserFixture(window, conversationId, url) {
+  const application = applicationsByWindow.get(window);
+  if (!application) throw new Error("Unknown desktop test window");
+  return application.evaluate(
+    (_electron, { conversationId: viewId, url: target }) => {
+      const registry = global.omnigentTestBrowserRegistries[0];
+      const { ok, error } = registry.openOrNavigate(viewId, target, {
+        x: 40,
+        y: 80,
+        width: 900,
+        height: 520,
+      });
+      return { ok, error };
+    },
+    { conversationId, url },
+  );
+}
+
 module.exports = {
   execInBrowserView,
+  openBrowserFixture,
   APP_ROOT,
   REPO_ROOT,
   WEB_UI_DIST,
