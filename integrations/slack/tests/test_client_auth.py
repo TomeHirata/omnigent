@@ -226,7 +226,11 @@ async def test_cached_pool_client_fails_closed_after_token_is_cleared(
         auth.access_token = None
         with pytest.raises(AuthRequiredError):
             await client.list_agents()
+        with pytest.raises(AuthRequiredError):
+            async with client.stream_session_events("session-1"):
+                pytest.fail("A cleared cached token must not open a stream")
         assert route.call_count == 1
+        assert respx_mock.calls.call_count == 1
     finally:
         await pool.aclose_all()
 
