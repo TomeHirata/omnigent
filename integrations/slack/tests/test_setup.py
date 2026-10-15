@@ -438,7 +438,7 @@ async def test_setup_auth_required_but_login_disabled(tmp_path: Path) -> None:
     """With no auth manager, an auth-enabled server shows a plain failure screen."""
     respx.get(_SERVER + "/health").mock(return_value=httpx.Response(200, json={"status": "ok"}))
     respx.get(_SERVER + "/v1/agents").mock(return_value=httpx.Response(401))
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _flow(await _store(tmp_path), pool)  # no auth_manager
     client = FakeSetupClient()
 
@@ -453,20 +453,24 @@ async def test_setup_auth_required_but_login_disabled(tmp_path: Path) -> None:
     assert client.posts == []
 
 
+@pytest.mark.parametrize("anonymous", [False, True])
 @respx.mock
-async def test_setup_reports_device_grant_disabled(tmp_path: Path) -> None:
-    """Accounts server with the device grant OFF (/oauth/* unmounted → 405):
-    the modal must tell the user to contact the admin, not "try again shortly"."""
+async def test_setup_reports_unavailable_login(tmp_path: Path, anonymous: bool) -> None:
+    """A permanent server-auth configuration problem needs administrator action."""
     from cryptography.fernet import Fernet
     from omnigent_slack.auth_manager import AuthManager
     from omnigent_slack.tokens import EncryptedTokenStore
 
     respx.get(_SERVER + "/health").mock(return_value=httpx.Response(200, json={"status": "ok"}))
-    # /v1/me → accounts mode; the pre-login agents probe 401s so login starts.
+    # Login discovery stays available before the user has delegated credentials.
     respx.get(_SERVER + "/v1/me").mock(
-        return_value=httpx.Response(401, json={"login_url": "/login"})
+        return_value=(
+            httpx.Response(200, json={"user_id": "local", "is_admin": False})
+            if anonymous
+            else httpx.Response(401, json={"login_url": "/login"})
+        )
     )
-    respx.get(_SERVER + "/v1/agents").mock(return_value=httpx.Response(401))
+    agents = respx.get(_SERVER + "/v1/agents")
     # Device grant disabled → authorize falls through to the SPA catch-all (405).
     respx.post(_SERVER + "/oauth/device/authorize").mock(return_value=httpx.Response(405))
 
@@ -484,9 +488,12 @@ async def test_setup_reports_device_grant_disabled(tmp_path: Path) -> None:
         await pool.aclose_all()
 
     body = _last_update(client)["blocks"][0]["text"]["text"].lower()
-    assert "device authorization grant" in body
+    assert (
+        "enable accounts or oidc authentication" if anonymous else "device authorization grant"
+    ) in body
     assert "administrator" in body
     assert "try again shortly" not in body
+    assert not agents.called
 
 
 @respx.mock
@@ -534,7 +541,7 @@ async def test_logout_revokes_all_and_clears_settings(tmp_path: Path) -> None:
     await store.upsert_session(ThreadKey("T1", "C1", "100.1"), "conv_1", "t", owner_user_id="U1")
 
     auth = FakeAuth()
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _flow(store, pool, auth)
     client = FakeSetupClient()
     command = {"team_id": "T1", "user_id": "U1", "text": "logout"}
@@ -583,7 +590,7 @@ async def test_databricks_enrollment_shows_link_bound_to_slack_email(tmp_path: P
         return f"https://bot.example.com/auth/callback?state=signed-{email}"
 
     auth = _EnrollAuth()
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _enroll_flow(await _store(tmp_path), pool, auth, _url)
     client = FakeSetupClient()
     try:
@@ -680,7 +687,7 @@ async def test_databricks_enrollment_fails_closed_without_email(tmp_path: Path) 
         raise AssertionError("enrollment_url must not be called without an email")
 
     auth = _EnrollAuth()
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _enroll_flow(await _store(tmp_path), pool, auth, _url)
     client = NoEmailClient()
     try:
@@ -755,7 +762,7 @@ async def test_setup_reports_unreachable(tmp_path: Path) -> None:
 
 async def test_select_submit_persists_config(tmp_path: Path) -> None:
     store = await _store(tmp_path)
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _flow(store, pool)
     ack = FakeAck()
     client = FakeSetupClient()
@@ -805,7 +812,7 @@ async def test_select_submit_persists_managed_choice_without_a_workspace(tmp_pat
     # no workspace — the server chooses both. The stale path left in the (now
     # optional) workspace box must not be persisted or block the submit.
     store = await _store(tmp_path)
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _flow(store, pool)
     ack = FakeAck()
     client = FakeSetupClient()
@@ -853,7 +860,7 @@ async def test_select_submit_still_requires_a_path_for_a_real_host(tmp_path: Pat
     # Making the workspace input optional is for the managed sandbox only — an
     # external host still can't start a runner without an absolute path.
     store = await _store(tmp_path)
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _flow(store, pool)
     ack = FakeAck()
     client = FakeSetupClient()
@@ -895,7 +902,7 @@ async def test_select_submit_still_requires_a_path_for_a_real_host(tmp_path: Pat
 
 async def test_select_submit_requires_a_host(tmp_path: Path) -> None:
     store = await _store(tmp_path)
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _flow(store, pool)
     ack = FakeAck()
     client = FakeSetupClient()
@@ -943,7 +950,7 @@ async def test_select_submit_fails_closed_on_missing_team_or_user(
     # the modal must say so instead of closing like a save. Every field below
     # is valid: the identity, not the form, is what fails.
     store = await _store(tmp_path)
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _flow(store, pool)
     ack = FakeAck()
     client = FakeSetupClient()
@@ -1024,7 +1031,7 @@ def test_connecting_modal_is_info_only() -> None:
 
 
 async def test_prompt_unconfigured_dms_and_pings_channel(tmp_path: Path) -> None:
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _flow(await _store(tmp_path), pool)
     client = FakeSetupClient()
 
@@ -1043,7 +1050,7 @@ async def test_prompt_unconfigured_dms_and_pings_channel(tmp_path: Path) -> None
 async def test_prompt_unconfigured_handles_slack_response_object(tmp_path: Path) -> None:
     # The async web client returns a SlackResponse (not a dict); the DM channel
     # id must still be extracted so the setup button is actually delivered.
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _flow(await _store(tmp_path), pool)
     client = SlackResponseSetupClient()
 
@@ -1058,7 +1065,7 @@ async def test_prompt_unconfigured_handles_slack_response_object(tmp_path: Path)
 
 
 async def test_config_command_opens_connecting_modal(tmp_path: Path) -> None:
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _flow(await _store(tmp_path), pool)
     ack = FakeAck()
     client = FakeSetupClient()
@@ -1138,7 +1145,7 @@ async def test_setup_settles_modal_before_first_update(tmp_path: Path, monkeypat
 async def test_config_command_fails_closed_on_missing_team(tmp_path: Path) -> None:
     # An empty team_id would collapse token/config keys across workspaces, so the
     # slash-command path must fail closed (ack, then nothing) rather than proceed.
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _flow(await _store(tmp_path), pool)
     ack = FakeAck()
     client = FakeSetupClient()
@@ -1159,7 +1166,7 @@ async def test_config_command_fails_closed_on_missing_team(tmp_path: Path) -> No
 async def test_setup_start_button_fails_closed_on_missing_team(tmp_path: Path) -> None:
     # The button-driven setup path must apply the same empty-team/user fail-closed
     # guard as the slash-command path (keys collapse across workspaces otherwise).
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _flow(await _store(tmp_path), pool)
     ack = FakeAck()
     client = FakeSetupClient()
@@ -1180,7 +1187,7 @@ async def test_setup_start_button_fails_closed_on_missing_team(tmp_path: Path) -
 async def test_prompt_relogin_dms_setup_button(tmp_path: Path) -> None:
     # An expired-token user gets a DM carrying the re-login setup button — reliably
     # delivered and actionable — plus an in-channel ephemeral pointer to the DM.
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _flow(await _store(tmp_path), pool)
     client = FakeSetupClient()
 
@@ -1211,7 +1218,7 @@ async def test_prompt_relogin_reports_when_dm_cannot_open(tmp_path: Path) -> Non
         async def conversations_open(self, **kwargs: Any) -> dict[str, Any]:
             return {"channel": {}}  # no id
 
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _flow(await _store(tmp_path), pool)
     client = NoDmClient()
 
@@ -1587,7 +1594,7 @@ async def test_submitting_the_preselected_managed_default_stores_no_host_or_work
     # Accepting both defaults untouched must persist exactly what a hand-picked
     # managed sandbox does: no host id, no workspace (the server owns both).
     store = await _store(tmp_path)
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _flow(store, pool, default_agent_id="ag_1", default_host_type="managed")
     view = select_modal(
         _SERVER,
@@ -1625,7 +1632,7 @@ async def test_an_explicit_user_choice_wins_over_the_preselected_defaults(
     could not.
     """
     store = await _store(tmp_path)
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _flow(store, pool, default_agent_id="ag_1", default_host_type="managed")
     view = select_modal(
         _SERVER,
@@ -1673,7 +1680,7 @@ async def test_switching_off_the_managed_default_still_requires_a_workspace_path
     # Moving off the pre-selected sandbox to a real host re-imposes the absolute
     # path requirement; the defaults path must not loosen it.
     store = await _store(tmp_path)
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     flow = _flow(store, pool, default_agent_id="ag_1", default_host_type="managed")
     view = select_modal(
         _SERVER,
