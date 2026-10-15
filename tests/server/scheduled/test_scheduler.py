@@ -344,6 +344,21 @@ async def test_on_fire_exception_does_not_break_rearm() -> None:
     assert len(seam.live()) == 1  # re-armed despite the error
 
 
+async def test_rearm_work_limit_clears_next_run(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    scheduler, clock, seam, fired = _make([_task("a")])
+    await scheduler.start()
+    clock.advance(seam.live()[0].delay)
+    monkeypatch.setattr("omnigent.server.scheduled.rrule._MAX_SEARCH_STEPS", 0)
+    await seam.fire_latest()
+    assert fired.calls == [(0, "a")]
+    assert scheduler.next_run_at("a") is None
+    assert seam.live() == []
+    assert "task a stopped" in caplog.text
+    assert "work limit" in caplog.text
+
+
 async def test_inactive_fire_does_not_remove_a_replacement_timer() -> None:
     reached, resume = asyncio.Event(), asyncio.Event()
 

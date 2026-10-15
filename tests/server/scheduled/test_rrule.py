@@ -177,6 +177,8 @@ def test_min_interval_constant() -> None:
     "rule",
     [
         "FREQ=DAILY;INTERVAL=367",
+        "FREQ=MINUTELY;INTERVAL=21961",
+        "FREQ=SECONDLY;INTERVAL=1317601",
         "FREQ=DAILY;INTERVAL=0",
         "FREQ=DAILY;COUNT=-1",
         "FREQ=DAILY;COUNT=0",
@@ -212,6 +214,8 @@ def test_next_fire_search_has_a_finite_horizon() -> None:
         ("FREQ=MINUTELY;INTERVAL=60", _dt(2026, 1, 1, 1)),
         ("FREQ=MINUTELY;INTERVAL=90", _dt(2026, 1, 1, 1, 30)),
         ("FREQ=SECONDLY;INTERVAL=3600", _dt(2026, 1, 1, 1)),
+        ("FREQ=MINUTELY;INTERVAL=21960", _dt(2026, 1, 16, 6)),
+        ("FREQ=SECONDLY;INTERVAL=1317600", _dt(2026, 1, 16, 6)),
     ],
 )
 def test_supported_limits_and_persisted_frequencies(rule: str, expected: datetime) -> None:
@@ -267,14 +271,20 @@ def test_empty_periods_stop_at_horizon() -> None:
         "FREQ=HOURLY;INTERVAL=3;BYMINUTE=30",
         "FREQ=MINUTELY;INTERVAL=90;BYSECOND=15",
         "FREQ=SECONDLY;INTERVAL=3600",
+        "FREQ=DAILY;BYHOUR=0;UNTIL=20260101T120000Z",
     ],
 )
-def test_bounded_iterator_preserves_dateutil_occurrences(rule: str) -> None:
+@pytest.mark.parametrize("zone", ["UTC", "Pacific/Kiritimati"])
+def test_bounded_iterator_preserves_dateutil_occurrences(rule: str, zone: str) -> None:
     from itertools import islice
 
     from dateutil.rrule import rrulestr
 
     from omnigent.server.scheduled._bounded_rrule import iter_bounded
 
-    parsed = rrulestr(rule, dtstart=_dt(2026, 1, 1))
+    tz = ZoneInfo(zone)
+    start = datetime(2026, 1, 1, 23, tzinfo=tz)
+    parsed = rrulestr(rule, dtstart=start)
     assert list(islice(iter_bounded(parsed, max_steps=100_000), 5)) == list(islice(parsed, 5))
+    midnight = start.replace(hour=0)
+    assert get_next_fire_time(rule, start, tz) == rrulestr(rule, dtstart=midnight).after(start)

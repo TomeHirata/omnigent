@@ -34,14 +34,19 @@ To provision a fresh sandbox per firing, set `execution_target: "managed_sandbox
 
 ## Schedules are RRULEs, not cron
 
-Use a single RRULE of at most 4096 characters and at most 24 combinations of
+Persisted RRULEs have a 512-character storage limit. The parser also applies a
+4096-character safety ceiling; that ceiling does not increase storage capacity.
+Use a single RRULE with at most 24 combinations of
 `BYHOUR`, `BYMINUTE`, and `BYSECOND`. `INTERVAL` is limited to 1–366 periods;
 for minute and second frequencies the equivalent maximum is 366 hours.
 Hourly-equivalent rules such as `FREQ=MINUTELY;INTERVAL=60` and
 `FREQ=SECONDLY;INTERVAL=3600` remain valid, including when loaded from storage.
 Validation and next-fire lookup have an eight-year occurrence horizon and a
 100,000-step search budget that includes inner time-filter searches. Exhausting
-the budget raises a validation error. An empty search stops at the horizon even
+the budget raises a validation error. If this happens while re-arming a task,
+the scheduler logs the reason and clears its next-run time instead of leaving
+an expired timestamp. Update the rule to resume scheduling.
+An empty search stops at the horizon even
 when filters yield no candidates. Schedules with no occurrence in the window are
 not armed; validation requires at least two occurrences and an hourly minimum.
 

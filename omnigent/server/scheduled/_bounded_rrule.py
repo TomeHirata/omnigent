@@ -68,6 +68,7 @@ def iter_bounded(rule: rrule, *, max_steps: int) -> Iterator[datetime.datetime]:
     interval = state._interval
     wkst = state._wkst
     until = state._until
+    local_until = until.astimezone(state._dtstart.tzinfo) if until is not None else None
     bymonth = state._bymonth
     byweekno = state._byweekno
     byyearday = state._byyearday
@@ -116,7 +117,11 @@ def iter_bounded(rule: rrule, *, max_steps: int) -> Iterator[datetime.datetime]:
             raise ValueError("RRULE search exceeds the supported work limit")
         # UNTIL must also stop periods whose filters produce no candidates.
         period = (year, month if freq != YEARLY else 1, day if freq >= WEEKLY else 1)
-        if until is not None and period > (until.year, until.month, until.day):
+        if local_until is not None and period > (
+            local_until.year,
+            local_until.month,
+            local_until.day,
+        ):
             return
         # Get dayset with the right frequency
         dayset, start, end = getdayset(year, month, day)
