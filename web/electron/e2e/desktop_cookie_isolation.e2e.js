@@ -126,6 +126,72 @@ describe(
     });
 
     it(
+      "performs snapshot, click and type through the preload bridge",
+      { timeout: 180_000 },
+      async () => {
+        const { electronApp, window, userDataDir, stopDisplayCapture } = await launchDesktop({
+          serverUrl: server.serverUrl,
+          recordDir,
+        });
+        const conversationId = "browser-actions";
+        try {
+          await window
+            .getByText("What should we build?")
+            .waitFor({ state: "visible", timeout: 20_000 });
+          await window.waitForFunction(() => !!window.omnigentDesktop?.browserPerformAction);
+          const opened = await openView(window, conversationId, `${server.serverUrl}/health`);
+          assert.equal(opened.ok, true, opened.error);
+          await setActive(window, conversationId);
+          await waitForViewOnOrigin(window, conversationId, new URL(server.serverUrl).origin);
+          // Test setup and observation use main-process access; actions use the
+          // production renderer -> preload -> IPC -> child WebContents path.
+          const fixture = await execInBrowserView(
+            window,
+            conversationId,
+            `
+          document.body.innerHTML = '<button>Save</button><input aria-label="Name"><p id="saved"></p>';
+          document.querySelector('button').addEventListener('click', () => {
+            document.querySelector('#saved').textContent = document.querySelector('input').value;
+          });
+        `,
+          );
+          assert.equal(fixture.ok, true, fixture.error);
+          const perform = (action, params = {}) =>
+            window.evaluate(
+              ({ cid, action: requestedAction, params: requestedParams }) =>
+                window.omnigentDesktop.browserPerformAction(cid, requestedAction, requestedParams),
+              { cid: conversationId, action, params },
+            );
+          const snapshot = await perform("snapshot");
+          assert.equal(snapshot.ok, true, snapshot.error);
+          const { tree, snapshot_id: snapshotId } = JSON.parse(snapshot.result);
+          const buttonRef = Number(tree.match(/button "Save" \[ref=(\d+)\]/)[1]);
+          const inputRef = Number(tree.match(/textbox "Name" \[ref=(\d+)\]/)[1]);
+          const typed = await perform("type", {
+            ref: inputRef,
+            snapshot_id: snapshotId,
+            text: "Ada",
+          });
+          assert.equal(typed.ok, true, typed.error);
+          const clicked = await perform("click", { ref: buttonRef, snapshot_id: snapshotId });
+          assert.equal(clicked.ok, true, clicked.error);
+          const observed = await execInBrowserView(
+            window,
+            conversationId,
+            "document.querySelector('#saved').textContent",
+          );
+          assert.equal(observed.ok, true, observed.error);
+          assert.equal(observed.result, "Ada");
+        } finally {
+          await electronApp.close();
+          await stopDisplayCapture();
+          saveRecording(recordDir, "browser-typed-actions");
+          fs.rmSync(userDataDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it(
       "tabs share login changes within conversation A while conversation B stays signed out",
       { timeout: 180_000 },
       async (t) => {
