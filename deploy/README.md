@@ -645,6 +645,13 @@ session rotations and sub-agents retain that binding. Interactive user clients
 continue using their own credentials for account-wide operations. Runner
 credentials still follow account password rotation and deletion.
 
+Runner tools that require account-wide access are unavailable with these tokens:
+`sys_scheduled_task_create/list/update/delete` and tools listing all sessions.
+Use an interactive user client for those operations. Session-local operations
+and permitted child-session work continue with delegated credentials. Older
+runners may still advertise unavailable tools and receive authentication errors;
+this requires an approved compatibility transition before deployment.
+
 Previously issued unscoped runner bearers remain valid until their original
 expiry. Restart runners after upgrading to obtain scoped credentials; use
 password rotation to revoke earlier account credentials immediately when needed.
