@@ -713,17 +713,9 @@ describe("useBrowserAgentRelay — action dispatch", () => {
     );
   });
 
-  it("missing bridge method → 'does not support the browser pane'", async () => {
+  it.each(["snapshot", "click", "type"])("%s: missing browser action bridge", async (action) => {
     installBridge({ browserPerformAction: undefined });
-    await runAction(actionEvent("snapshot"));
-    expect((postedResult().result as { error: string }).error).toMatch(
-      /does not support the browser pane/,
-    );
-  });
-
-  it("type: missing execute bridge → 'does not support the browser pane'", async () => {
-    installBridge({ browserPerformAction: undefined });
-    await runAction(actionEvent("type", { ref: 1, text: "x" }));
+    await runAction(actionEvent(action, { ref: 1, text: "x" }));
     expect((postedResult().result as { error: string }).error).toMatch(
       /does not support the browser pane/,
     );

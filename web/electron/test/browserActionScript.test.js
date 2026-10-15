@@ -29,7 +29,7 @@ it("snapshots the DOM, resolves refs, types literal text and rejects superseded 
     for (const event of ["input", "change"])
       input.addEventListener(event, () => events.push(event));
     const text = 'hello "world"\n☀';
-    window.eval(buildBrowserActionScript("type", { selector: "input", text }));
+    window.eval(buildBrowserActionScript("type", { selector: 'input[aria-label="Name"]', text }));
     assert.equal(input.value, text.replace("\n", ""));
     assert.deepEqual(events, ["input", "change"]);
     window.eval(buildBrowserActionScript("snapshot"));
@@ -62,4 +62,19 @@ it("rejects unknown actions, non-data arguments and out-of-range references", ()
     ["click", { selector: "x".repeat(4097) }],
   ])
     assert.throws(() => buildBrowserActionScript(action, args));
+});
+
+it("accepts text and snapshot identifiers at their size limits", () => {
+  assert.doesNotThrow(() => buildBrowserActionScript("type", { ref: 1, text: "x".repeat(100000) }));
+  assert.throws(
+    () => buildBrowserActionScript("type", { ref: 1, text: "x".repeat(100001) }),
+    /text must/,
+  );
+  assert.doesNotThrow(() =>
+    buildBrowserActionScript("click", { ref: 1, snapshot_id: "x".repeat(128) }),
+  );
+  assert.throws(
+    () => buildBrowserActionScript("click", { ref: 1, snapshot_id: "x".repeat(129) }),
+    /snapshot_id must/,
+  );
 });

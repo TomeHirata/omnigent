@@ -45,6 +45,20 @@ function loadPreload() {
   };
 }
 
+describe("browser action bridge", () => {
+  it("forwards typed actions to main", async () => {
+    const h = loadPreload();
+    const params = { ref: 2, text: "hello" };
+    await h.desktop.browserPerformAction("conversation", "type", params);
+    const { channel, args } = h.invokes.at(-1);
+    assert.equal(channel, "omnigent:browser-perform-action");
+    assert.equal(args.conversationId, "conversation");
+    assert.equal(args.action, "type");
+    assert.deepEqual(args.params, params);
+    assert.equal(h.desktop.browserExecute, undefined);
+  });
+});
+
 describe("server-page update bridge", () => {
   it("hides every shell-owned update prompt state, including download progress", async () => {
     const h = loadPreload();
