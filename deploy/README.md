@@ -682,4 +682,5 @@ overrides before deploying the server; the mint route passes this argument.
 
 Claude-native `/clear` transfers the terminal and posts the old conversation's
 idle status, continuation message, and redirect before detaching its runner.
-Session events that affect ancestors stop at a different runner binding.
+Child interrupts check the parent runner binding. MCP elicitation requests are
+mirrored only to ancestors within the runner's scope.
