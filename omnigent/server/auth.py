@@ -105,7 +105,8 @@ _RUNNER_CONFINEMENT_KEY = "omnigent.runner_confinement"
 _RUNNER_OPEN_PATHS = frozenset({"/health", "/api/version"})
 _RUNNER_READ_ONLY_PREFIXES = ("/v1/agents", "/v1/policy-registry")
 _SESSION_ID_HEADER = "X-Omnigent-Session-Id"
-# Bounds the parent walk; real sub-agent trees are a few levels deep.
+# Inspect the target plus at most 32 parent edges; deeper unbound sessions
+# need an explicit runner binding before a confined bearer can access them.
 _RUNNER_SCOPE_MAX_DEPTH = 32
 
 
@@ -126,6 +127,7 @@ def runner_session_in_scope(
     session (or the ancestor it inherits from) must be bound to *runner_id*.
     An unbound session is also in scope while its one-shot bootstrap label
     names *runner_id*. Binding or detaching consumes that permission.
+    Inheritance stops after 32 parent edges; direct bindings have no depth limit.
 
     :param runner_id: Runner the bearer is confined to, e.g. ``"runner_ab"``.
     :param session_id: Session the request targets, e.g. ``"conv_abc"``.
@@ -134,7 +136,7 @@ def runner_session_in_scope(
     """
     seen: set[str] = set()
     current: str | None = session_id
-    while current and current not in seen and len(seen) < _RUNNER_SCOPE_MAX_DEPTH:
+    while current and current not in seen and len(seen) <= _RUNNER_SCOPE_MAX_DEPTH:
         seen.add(current)
         conv = get_conversation(current)
         if conv is None:

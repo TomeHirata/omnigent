@@ -569,6 +569,26 @@ def test_runner_session_scope_follows_nearest_runner_binding() -> None:
             "loop_a",
         )
     )
+    parent = "bound"
+    for depth in range(1, 34):
+        session_id = f"depth_{depth}"
+        conversations[session_id] = conv(None, parent=parent)
+        parent = session_id
+
+    reads = []
+
+    def lookup(session_id: str):
+        reads.append(session_id)
+        return conversations.get(session_id)
+
+    for depth in (31, 32, 33):
+        reads.clear()
+        assert runner_session_in_scope(_RUNNER, f"depth_{depth}", lookup) is (depth <= 32)
+        assert len(reads) == min(depth + 1, 33)
+    conversations["depth_33"].runner_id = _RUNNER
+    assert in_scope("depth_33")
+    conversations["depth_31"].runner_id = "runner_other"
+    assert not in_scope("depth_32")
 
 
 # ── resolve_auth_source (shared resolver used by every spawn path) ──

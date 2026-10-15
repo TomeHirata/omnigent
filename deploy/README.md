@@ -647,8 +647,10 @@ credentials still follow account password rotation and deletion.
 
 Runner-created sessions receive temporary bootstrap access until their first
 binding attempt. Binding, transfer, and detach consume that permission before
-changing metadata, so a detached session does not reopen access to its original
-runner. When separate databases are configured, revocation commits first; if
+changing metadata, so a detached session cannot regain access through its old
+creator label. It may still inherit access from its nearest current runner
+binding, subject to the placement limit below. When separate databases are
+configured, revocation commits first; if
 the subsequent initial binding fails, the owner must retry the binding with
 interactive credentials. A runner may reuse agent definitions uploaded by its
 owner, but that does not grant access to other sessions' transcripts.
@@ -663,3 +665,13 @@ this requires an approved compatibility transition before deployment.
 Previously issued unscoped runner bearers remain valid until their original
 expiry. Restart runners after upgrading to obtain scoped credentials; use
 password rotation to revoke earlier account credentials immediately when needed.
+
+Inherited scope is limited to 32 parent edges (33 indexed session lookups,
+including the target). Directly bound sessions and runner-created sessions with
+an active bootstrap label are unaffected by their total nesting depth. Before
+rotating credentials, explicitly bind any active unbound session whose nearest
+runner binding is more than 32 parent edges away. An owner can do this with
+`PATCH /v1/sessions/{id}` and `{"runner_id": "<runner-id>"}`. This also restores
+access after a deep detached subtree reaches the limit. A nearer conflicting
+binding still denies inherited access. This placement limit and the loss of
+account-wide tools require explicit maintainer approval before rollout.
