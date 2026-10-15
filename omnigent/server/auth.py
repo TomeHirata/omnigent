@@ -40,6 +40,8 @@ from typing import TYPE_CHECKING, Protocol
 
 from starlette.requests import HTTPConnection
 
+from omnigent.stores.conversation_store import RUNNER_CREATOR_LABEL_KEY
+
 logger = logging.getLogger(__name__)
 
 # Opt-in multi-user switch.
@@ -99,11 +101,6 @@ def delegated_path_allowed(path: str) -> bool:
 # to that runner's own sessions instead of carrying the owner's authority.
 RUNNER_TOKEN_SCOPE = "runner"
 
-# Server-written label naming the runner that created a session through its
-# runner bearer. Lets that runner bind the new, still-unbound session (native
-# /clear and /fork rotations, async calls) without widening its scope.
-RUNNER_CREATOR_LABEL_KEY = "omnigent.runner.creator"
-
 _RUNNER_CONFINEMENT_KEY = "omnigent.runner_confinement"
 _RUNNER_OPEN_PATHS = frozenset({"/health", "/api/version"})
 _RUNNER_READ_ONLY_PREFIXES = ("/v1/agents", "/v1/policy-registry")
@@ -127,7 +124,8 @@ def runner_session_in_scope(
 
     The nearest runner binding on the session's parent chain decides: the
     session (or the ancestor it inherits from) must be bound to *runner_id*.
-    An unbound session is also in scope when *runner_id* created it.
+    An unbound session is also in scope while its one-shot bootstrap label
+    names *runner_id*. Binding or detaching consumes that permission.
 
     :param runner_id: Runner the bearer is confined to, e.g. ``"runner_ab"``.
     :param session_id: Session the request targets, e.g. ``"conv_abc"``.

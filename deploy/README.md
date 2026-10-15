@@ -645,6 +645,14 @@ session rotations and sub-agents retain that binding. Interactive user clients
 continue using their own credentials for account-wide operations. Runner
 credentials still follow account password rotation and deletion.
 
+Runner-created sessions receive temporary bootstrap access until their first
+binding attempt. Binding, transfer, and detach consume that permission before
+changing metadata, so a detached session does not reopen access to its original
+runner. When separate databases are configured, revocation commits first; if
+the subsequent initial binding fails, the owner must retry the binding with
+interactive credentials. A runner may reuse agent definitions uploaded by its
+owner, but that does not grant access to other sessions' transcripts.
+
 Runner tools that require account-wide access are unavailable with these tokens:
 `sys_scheduled_task_create/list/update/delete` and tools listing all sessions.
 Use an interactive user client for those operations. Session-local operations

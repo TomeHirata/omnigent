@@ -1062,6 +1062,11 @@ def test_runner_token_is_confined_to_its_runner_sessions(setup_app, owner):
     child = runner.post("/v1/sessions", json={"agent_id": agent_id, "parent_session_id": bound})
     assert child.status_code == 201, child.text
     assert runner.get(f"/v1/sessions/{child.json()['id']}").status_code == 200
+    # Agent definitions uploaded by the same owner remain reusable; transcripts
+    # of sessions on other runners are still outside this credential's scope.
+    reusable_agent = owner_client.get(f"/v1/sessions/{own_elsewhere}").json()["agent_id"]
+    reused = runner.post("/v1/sessions", json={"agent_id": reusable_agent})
+    assert reused.status_code == 201, reused.text
     for escape in (
         {"agent_id": agent_id, "host_id": host_id},
         {"agent_id": agent_id, "host_type": "managed"},
@@ -1111,6 +1116,15 @@ def test_runner_token_is_confined_to_its_runner_sessions(setup_app, owner):
     assert forked.status_code == 201, forked.text
     fork_labels = conversations.get_conversation(forked.json()["id"]).labels
     assert fork_labels[RUNNER_CREATOR_LABEL_KEY] == runner_id
+
+    assert conversations.set_runner_id(rotated_id, runner_id)
+    assert RUNNER_CREATOR_LABEL_KEY not in conversations.get_conversation(rotated_id).labels
+    assert runner.get(f"/v1/sessions/{rotated_id}").status_code == 200
+    conversations.replace_runner_id(rotated_id, other_runner_id)
+    assert runner.get(f"/v1/sessions/{rotated_id}").status_code == 401
+    detached = owner_client.patch(f"/v1/sessions/{rotated_id}", json={"runner_id": ""})
+    assert detached.status_code == 200, detached.text
+    assert runner.get(f"/v1/sessions/{rotated_id}").status_code == 401
 
 
 def test_oauth_connection_state_cannot_cross_username_reuse(setup_app):
