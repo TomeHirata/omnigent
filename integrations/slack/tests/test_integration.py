@@ -130,7 +130,7 @@ async def test_omnigent_command_auth_wall_shows_login_link(tmp_path: Path) -> No
 
     store = await _store(tmp_path)
     token_store = await _token_store(tmp_path)
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     auth = AuthManager(token_store)
     pool.set_auth_resolver(auth.resolve_auth)
     setup = SetupFlow(store=store, pool=pool, server_url=_SERVER, auth_manager=auth)
@@ -173,7 +173,7 @@ async def test_omnigent_command_happy_path_shows_picker(tmp_path: Path) -> None:
     store = await _store(tmp_path)
     token_store = await _token_store(tmp_path)
     await token_store.put("T1", "U1", _SERVER, access_token="tok-abc", refresh_token="ref-abc")
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     auth = AuthManager(token_store)
     pool.set_auth_resolver(auth.resolve_auth)
     setup = SetupFlow(store=store, pool=pool, server_url=_SERVER, auth_manager=auth)

@@ -399,7 +399,7 @@ async def test_setup_shows_login_in_modal_and_advances_on_approval(tmp_path: Pat
 
     token_store = EncryptedTokenStore(tmp_path / "tok.sqlite3", Fernet.generate_key().decode())
     await token_store.initialize()
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     auth = AuthManager(token_store)
     pool.set_auth_resolver(auth.resolve_auth)
     flow = _flow(await _store(tmp_path), pool, auth)
@@ -472,7 +472,7 @@ async def test_setup_reports_device_grant_disabled(tmp_path: Path) -> None:
 
     token_store = EncryptedTokenStore(tmp_path / "tok.sqlite3", Fernet.generate_key().decode())
     await token_store.initialize()
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     auth = AuthManager(token_store)
     pool.set_auth_resolver(auth.resolve_auth)
     flow = _flow(await _store(tmp_path), pool, auth)
@@ -648,7 +648,7 @@ async def test_post_enrollment_advance_uses_freshly_stored_token(tmp_path: Path)
         return "https://bot/callback"
 
     auth = _EnrollAuth()
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     pool.set_auth_resolver(_resolver)
     flow = _enroll_flow(await _store(tmp_path), pool, auth, _url)
     client = FakeSetupClient()
@@ -715,7 +715,7 @@ async def test_post_enrollment_validate_failure_shows_error_not_hang(tmp_path: P
         return "https://bot/callback"
 
     auth = _EnrollAuth()
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     pool.set_auth_resolver(_resolver)
     flow = _enroll_flow(await _store(tmp_path), pool, auth, _url)
     client = FakeSetupClient()
@@ -1289,7 +1289,7 @@ async def _authenticated_pool(tmp_path: Path, *, token: str | None = _BEARER) ->
     await token_store.initialize()
     if token is not None:
         await token_store.put("T1", "U1", _SERVER, access_token=token, refresh_token="rt")
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool()
     auth = AuthManager(token_store)
     pool.set_auth_resolver(auth.resolve_auth)
     return pool, auth
