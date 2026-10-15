@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
+import pytest
 import respx
 from cryptography.fernet import Fernet
 from fakes import (
@@ -288,13 +289,12 @@ async def test_managed_session_turn_never_posts_a_runner_launch(tmp_path: Path) 
 # ── Scenario 4: auth wall mid-turn → re-login DM ───────────────────────────────
 
 
+@pytest.mark.parametrize("refusal", ["server", "local"])
 @respx.mock
-async def test_auth_wall_mid_turn_prompts_relogin(tmp_path: Path) -> None:
-    """When the session already exists and the server returns an auth wall on the
-    stream, the bot reacts by prompting the user to re-login rather than posting a
-    generic failure."""
+async def test_auth_wall_mid_turn_prompts_relogin(tmp_path: Path, refusal: str) -> None:
+    """A server auth wall or missing local credentials prompts re-login."""
     server = FakeOmnigentServer(_SERVER)
-    server.auth_required = True  # /health ok, but the stream 401s
+    server.auth_required = refusal == "server"
     server.install(respx.mock)
 
     store = await _store(tmp_path)
@@ -307,7 +307,7 @@ async def test_auth_wall_mid_turn_prompts_relogin(tmp_path: Path) -> None:
     await store.upsert_session(
         key, "conv_1", "Slack: t", owner_user_id="U1", host_id="h1", workspace="/home/bot/work"
     )
-    pool = OmnigentClientPool(auth_resolver=resolve_test_auth)
+    pool = OmnigentClientPool(auth_resolver=resolve_test_auth if refusal == "server" else None)
     setup = _RecordingSetup()
     service = SlackOmnigentService(store=store, pool=pool, setup=setup, server_url=_SERVER)
     client = RecordingSlackClient()
@@ -324,10 +324,11 @@ async def test_auth_wall_mid_turn_prompts_relogin(tmp_path: Path) -> None:
         await service.shutdown()
         await pool.aclose_all()
 
-    # Server side: the existing session was reused (no create/launch) and the
-    # stream was attempted against the auth-walled server.
-    assert f"/v1/sessions/{server.session_id}/stream" in server.paths("GET")
-    assert "/v1/sessions" not in server.paths("POST")
+    if refusal == "local":
+        assert server.paths() == []
+    else:
+        assert f"/v1/sessions/{server.session_id}/stream" in server.paths("GET")
+        assert "/v1/sessions" not in server.paths("POST")
     # Slack side: the bot prompted a re-login rather than a generic failure.
     assert setup.relogin_prompted, "expected prompt_relogin to be called"
 
