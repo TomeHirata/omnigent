@@ -1332,16 +1332,13 @@ _NOFOLLOW_DELETE_SUPPORTED = (
     and hasattr(os, "O_NOFOLLOW")
     and hasattr(os, "O_DIRECTORY")
 )
-# Directories are opened for traversal only: ``O_PATH`` (Linux) and
-# ``O_SEARCH`` (macOS 13+, BSDs) need search permission, not read, as ``rm``
-# does. Only ``O_PATH`` is certain to: a kernel predating ``O_SEARCH`` (macOS
-# 12) ignores the flag and opens read-only, like the ``O_RDONLY`` fallback.
+# ``O_PATH`` (Linux) and ``O_SEARCH`` (macOS 13+, BSDs) need only search
+# permission. Older kernels may ignore ``O_SEARCH`` and require read permission.
 _DIR_TRAVERSE_FLAGS = (
     (getattr(os, "O_PATH", 0) or getattr(os, "O_SEARCH", 0) or os.O_RDONLY)
     | getattr(os, "O_DIRECTORY", 0)
     | getattr(os, "O_CLOEXEC", 0)
 )
-_DIR_OPEN_MAY_NEED_READ = not hasattr(os, "O_PATH")
 
 
 def _delete_impl(cwd: Path, sandbox: SandboxPolicy, raw_path: str, *, recursive: bool) -> OpResult:
@@ -1353,7 +1350,8 @@ def _delete_impl(cwd: Path, sandbox: SandboxPolicy, raw_path: str, *, recursive:
     component at a time with ``O_NOFOLLOW`` from the grant that admitted it, so
     a directory swapped for a symlink after the check is refused, and the leaf
     is removed relative to that descriptor. A non-recursive directory delete is
-    a single ``rmdir``, which refuses a non-empty directory atomically.
+    a single ``rmdir``, which refuses a non-empty directory atomically. Deletion
+    is refused if safe traversal is unavailable or a parent cannot be opened.
 
     :param cwd: The environment root.
     :param sandbox: Resolved sandbox policy carrying the declared grants.
@@ -1435,12 +1433,9 @@ def _delete_anchor(
 def _delete_beneath(base: Path, parts: Sequence[str], name: str, *, recursive: bool) -> OpResult:
     """Remove *name* inside *base*/*parts*, refusing any symlinked component.
 
-    Where opening a directory may need read permission, one that can be
-    searched but not read is resolved by the kernel instead, from the last
-    directory opened (or by the checked path when that is *base* itself). A
-    symlink swapped in past that point after the reach check is followed, the
-    same check-then-act posture as every other file op; a genuine refusal
-    still fails when the entry is removed.
+    Refuse deletion when descriptor traversal is unavailable or a directory
+    cannot be opened. Falling back to a checked pathname would allow a replaced
+    intermediate directory to redirect the removal.
 
     :param base: Directory to open by path.
     :param parts: Components from *base* to the entry's parent.
@@ -1450,22 +1445,15 @@ def _delete_beneath(base: Path, parts: Sequence[str], name: str, *, recursive: b
     :raises OSError: When a component or the entry cannot be removed.
     """
     if not _NOFOLLOW_DELETE_SUPPORTED:
-        # Without dir_fd support (Windows), remove by the checked path.
-        return _delete_leaf(str(base.joinpath(*parts, name)), None, recursive=recursive)
+        return {
+            "error": "Safe directory traversal is unavailable on this platform",
+            "code": "permission_denied",
+        }
+    fd = os.open(base, _DIR_TRAVERSE_FLAGS)
     try:
-        fd = os.open(base, _DIR_TRAVERSE_FLAGS)
-    except PermissionError:
-        if not _DIR_OPEN_MAY_NEED_READ:
-            raise
-        return _delete_leaf(str(base.joinpath(*parts, name)), None, recursive=recursive)
-    try:
-        for index, part in enumerate(parts):
+        for part in parts:
             try:
                 next_fd = os.open(part, _DIR_TRAVERSE_FLAGS | os.O_NOFOLLOW, dir_fd=fd)
-            except PermissionError:
-                if not _DIR_OPEN_MAY_NEED_READ:
-                    raise
-                return _delete_leaf(os.path.join(*parts[index:], name), fd, recursive=recursive)
             except OSError as exc:
                 if exc.errno in (errno.ELOOP, errno.ENOTDIR) and stat.S_ISLNK(
                     os.stat(part, dir_fd=fd, follow_symlinks=False).st_mode
@@ -1482,11 +1470,11 @@ def _delete_beneath(base: Path, parts: Sequence[str], name: str, *, recursive: b
         os.close(fd)
 
 
-def _delete_leaf(name: str, dir_fd: int | None, *, recursive: bool) -> OpResult:
+def _delete_leaf(name: str, dir_fd: int, *, recursive: bool) -> OpResult:
     """Remove *name* without following it.
 
-    :param name: Entry to remove, relative to *dir_fd* when given.
-    :param dir_fd: Descriptor of the entry's parent, or ``None``.
+    :param name: Entry to remove, relative to *dir_fd*.
+    :param dir_fd: Descriptor of the entry's parent.
     :param recursive: Also remove a directory's contents.
     :returns: The delete result in :func:`_delete_impl`'s shape.
     :raises OSError: When the entry cannot be removed.
@@ -1495,7 +1483,7 @@ def _delete_leaf(name: str, dir_fd: int | None, *, recursive: bool) -> OpResult:
     if stat.S_ISDIR(st.st_mode):
         if not recursive:
             os.rmdir(name, dir_fd=dir_fd)
-        elif dir_fd is None or shutil.rmtree.avoids_symlink_attacks:
+        elif shutil.rmtree.avoids_symlink_attacks:
             shutil.rmtree(name, dir_fd=dir_fd)
         else:
             return {"error": "Recursive delete is not symlink-safe here", "code": "delete_failed"}

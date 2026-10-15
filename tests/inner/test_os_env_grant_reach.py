@@ -19,8 +19,11 @@ extension:
 
 from __future__ import annotations
 
+import errno
 import os
+import platform
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -323,19 +326,20 @@ def test_dotdot_traversal_from_grant_cannot_escape(tmp_path: Path) -> None:
 
 
 _IS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
+_SEARCH_ONLY_OPEN_SUPPORTED = hasattr(os, "O_PATH") or (
+    hasattr(os, "O_SEARCH")
+    and (platform.system() != "Darwin" or int(platform.mac_ver()[0].split(".")[0]) >= 13)
+)
 
 
-@pytest.fixture(params=["dir_fd", "read_only_dirs", "path_fallback"])
+@pytest.fixture(params=["dir_fd", "read_only_dirs"])
 def delete_mode(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
     """How the helper reaches the entry: the platform's directory descriptors
     (search-only on Linux), descriptors that need read permission (platforms
-    without a search-only open), or the checked path (no dir_fd support)."""
+    without a search-only open)."""
     if request.param == "read_only_dirs":
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
         monkeypatch.setattr("omnigent.inner.os_env._DIR_TRAVERSE_FLAGS", flags)
-        monkeypatch.setattr("omnigent.inner.os_env._DIR_OPEN_MAY_NEED_READ", True)
-    elif request.param == "path_fallback":
-        monkeypatch.setattr("omnigent.inner.os_env._NOFOLLOW_DELETE_SUPPORTED", False)
     return request.param
 
 
@@ -407,7 +411,7 @@ def test_delete_directory_needs_recursive_unless_empty(tmp_path: Path, delete_mo
 def test_delete_under_a_searchable_unreadable_directory(
     tmp_path: Path, delete_mode: str, unreadable: str
 ) -> None:
-    """Removing a known child needs write and search on its parent, not read."""
+    """Search-only traversal works; a failed open must preserve the entry."""
     workspace = tmp_path / "ws"
     workspace.mkdir()
     if unreadable == "parent":
@@ -425,8 +429,52 @@ def test_delete_under_a_searchable_unreadable_directory(
     finally:
         locked.chmod(0o700)
 
-    assert res == {"deleted": True, "type": "file", "bytes_deleted": 1}
-    assert list(locked.iterdir()) == []
+    if delete_mode == "read_only_dirs" or not _SEARCH_ONLY_OPEN_SUPPORTED:
+        assert res["code"] == "permission_denied"
+        assert (locked / "victim.txt").read_text() == "x"
+    else:
+        assert res == {"deleted": True, "type": "file", "bytes_deleted": 1}
+        assert list(locked.iterdir()) == []
+
+
+@pytest.mark.parametrize("failure", ["unsupported", "root_open_denied", "parent_open_denied"])
+@pytest.mark.parametrize("recursive", [False, True])
+def test_delete_refuses_when_safe_traversal_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str, recursive: bool
+) -> None:
+    """A full helper request must stop before removal when traversal fails."""
+    from omnigent.inner import os_env
+
+    workspace = tmp_path.resolve()
+    parent = workspace / "parent"
+    parent.mkdir()
+    target = Path("parent/entry")
+    kept = workspace / target
+    if recursive:
+        kept.mkdir()
+        kept /= "keep.txt"
+    kept.write_text("keep")
+
+    monkeypatch.setattr(os_env, "_NOFOLLOW_DELETE_SUPPORTED", failure != "unsupported")
+    real_open = os.open
+
+    def open_directory(path: str | Path, flags: int, *, dir_fd: int | None = None) -> int:
+        if (failure == "root_open_denied" and path == workspace) or (
+            failure == "parent_open_denied" and path == "parent"
+        ):
+            raise PermissionError(errno.EACCES, "Directory open refused", str(path))
+        return real_open(path, flags, dir_fd=dir_fd)
+
+    with (
+        patch.object(os, "open", side_effect=open_directory),
+        patch.object(os_env, "_delete_leaf") as remove,
+    ):
+        res = _req("delete", target, workspace, _grant_policy(), recursive=recursive)
+
+    remove.assert_not_called()
+    assert res["code"] == "permission_denied"
+    assert "deleted" not in res
+    assert kept.read_text() == "keep"
 
 
 @pytest.mark.skipif(_IS_ROOT, reason="root bypasses permission checks")
@@ -471,7 +519,6 @@ def test_delete_refuses_the_root_reached_through_a_link(tmp_path: Path) -> None:
     assert (workspace / "keep.txt").exists()
 
 
-@pytest.mark.parametrize("delete_mode", ["dir_fd", "read_only_dirs"], indirect=True)
 def test_delete_refuses_a_component_that_became_a_symlink(
     delete_layout: tuple[Path, Path, Path], delete_mode: str
 ) -> None:
