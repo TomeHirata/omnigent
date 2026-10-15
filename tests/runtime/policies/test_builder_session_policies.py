@@ -405,6 +405,7 @@ def test_subagent_inherits_root_session_policies(db_uri: str) -> None:
 
     names = [p.spec.name for p in engine.policies]
     assert "root_guard" in names, f"root session policy not inherited by sub-agent; got {names}"
+    assert names.count("__ask_on_scheduled_task_change") == 1
     # Root policy should come before the ask_on_add_policy sentinel.
     assert names.index("root_guard") < names.index("__ask_on_add_policy")
 
