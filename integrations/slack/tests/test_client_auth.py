@@ -196,7 +196,13 @@ async def test_pool_requires_user_token_even_when_server_accepts_anonymous(
     respx_mock: respx.MockRouter,
 ) -> None:
     anonymous = respx_mock.route().mock(return_value=httpx.Response(200, json={"data": []}))
-    pool = OmnigentClientPool()
+
+    async def tokenless_user(server_url: str, resolved_user_id: str) -> None:
+        assert server_url == _BASE
+        assert resolved_user_id == user_id
+        return
+
+    pool = OmnigentClientPool(auth_resolver=tokenless_user if user_id else None)
     try:
         client = await pool.get(_BASE, user_id)
         with pytest.raises(AuthRequiredError):
