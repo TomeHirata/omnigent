@@ -13,10 +13,9 @@ additionally enforces a minimum interval (:data:`MIN_INTERVAL_SECONDS`) and
 rejects rules that never fire or fire only once within the search window — each
 fire spawns a real agent session, so a runaway cadence is expensive.
 
-Schedules use a single HOURLY-or-coarser rule, at most 24 time combinations
-per day, and intervals of at most 366 periods. Both validation and next-fire
-lookup search at most eight calendar years. Use HOURLY instead of a MINUTELY
-or SECONDLY rule with a large interval.
+Schedules use a single rule, at most 24 time combinations, an eight-year
+occurrence horizon, and a finite search-work budget. Hourly-equivalent minute
+and second rules remain supported for persisted schedules.
 """
 
 from __future__ import annotations
@@ -29,6 +28,8 @@ from typing import Protocol, cast
 from zoneinfo import ZoneInfo
 
 from dateutil.rrule import rrule, rrulestr  # type: ignore[import-untyped]
+
+from omnigent.server.scheduled._bounded_rrule import iter_bounded
 
 # Reject anything more frequent than this. Each fire spawns a real agent
 # session, so a tight cadence gets expensive fast. One hour is the tightest
@@ -57,6 +58,7 @@ _INTERVAL_WINDOW = timedelta(hours=25)
 _MAX_SAMPLE_OCCURRENCES = 2000
 _MAX_RULE_LENGTH = 4096
 _SEARCH_YEARS = 8
+_MAX_SEARCH_STEPS = 100_000
 
 
 class RRuleValidationError(ValueError):
@@ -78,11 +80,14 @@ class _RRuleLimits(Protocol):
 
 @dataclass(frozen=True)
 class _BoundedRRule:
-    rule: _ParsedRRule
+    rule: rrule
     count: int | None
 
     def __iter__(self) -> Iterator[datetime]:
-        return islice(self.rule, self.count)
+        try:
+            yield from islice(iter_bounded(self.rule, max_steps=_MAX_SEARCH_STEPS), self.count)
+        except ValueError as exc:
+            raise RRuleValidationError(str(exc)) from exc
 
     def after(self, dt: datetime, inc: bool = False) -> datetime | None:
         return next((occ for occ in self if occ > dt or (inc and occ == dt)), None)
@@ -168,10 +173,20 @@ def _parse(rule_str: str, dtstart: datetime) -> _ParsedRRule:
             if key in fields or not value:
                 raise ValueError("RRULE fields must be unique and non-empty")
             fields[key] = value
-        if fields.get("FREQ") not in {"HOURLY", "DAILY", "WEEKLY", "MONTHLY", "YEARLY"}:
-            raise ValueError("Use HOURLY or a coarser frequency")
-        if not 1 <= int(fields.get("INTERVAL", "1")) <= 366:
-            raise ValueError("INTERVAL must be between 1 and 366")
+        frequency = fields.get("FREQ")
+        if frequency not in {
+            "SECONDLY",
+            "MINUTELY",
+            "HOURLY",
+            "DAILY",
+            "WEEKLY",
+            "MONTHLY",
+            "YEARLY",
+        }:
+            raise ValueError("Unknown recurrence frequency")
+        scale = {"SECONDLY": 3600, "MINUTELY": 60}.get(frequency, 1)
+        if not 1 <= int(fields.get("INTERVAL", "1")) <= 366 * scale:
+            raise ValueError(f"INTERVAL must be between 1 and {366 * scale}")
         if "COUNT" in fields and not 1 <= int(fields["COUNT"]) <= 2**31 - 1:
             raise ValueError("COUNT must be a positive 32-bit integer")
         combinations = 1
@@ -182,8 +197,7 @@ def _parse(rule_str: str, dtstart: datetime) -> _ParsedRRule:
         parsed = rrulestr(text, dtstart=dtstart)
         if not isinstance(parsed, rrule):
             raise ValueError("Use a single recurrence rule")
-        # Bound the iterator itself: counting yielded occurrences cannot bound
-        # the work spent searching for the first matching date.
+        # The iterator also checks the horizon before searching each period.
         horizon_year = min(dtstart.year + _SEARCH_YEARS, 9999)
         try:
             horizon = dtstart.replace(year=horizon_year)
@@ -194,7 +208,7 @@ def _parse(rule_str: str, dtstart: datetime) -> _ParsedRRule:
         until = min(original_until, horizon) if original_until is not None else horizon
         # Apply COUNT outside dateutil so the bounded rule does not combine
         # COUNT and UNTIL, which RFC 5545 disallows.
-        bounded = cast(_ParsedRRule, parsed.replace(count=None, until=until))
+        bounded = parsed.replace(count=None, until=until)
         return _BoundedRRule(bounded, limits._count)
     except (ValueError, TypeError) as exc:
         raise RRuleValidationError(f"Invalid RRULE {rule_str!r}: {exc}") from exc

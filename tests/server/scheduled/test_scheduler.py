@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field, replace
 
+import pytest
+
 from omnigent.server.scheduled.scheduler import (
     MISFIRE_GRACE_TIME_S,
     ScheduledTaskScheduler,
@@ -156,11 +158,16 @@ def _make(
 # ── boot load ────────────────────────────────────────────────────────────────
 
 
-async def test_start_arms_one_timer_per_active_task() -> None:
-    scheduler, _clock, seam, _fired = _make([_task("a"), _task("b")])
+@pytest.mark.parametrize(
+    "rule", ["FREQ=HOURLY", "FREQ=MINUTELY;INTERVAL=60", "FREQ=SECONDLY;INTERVAL=3600"]
+)
+async def test_start_arms_one_timer_per_active_task(rule: str) -> None:
+    scheduler, _clock, seam, _fired = _make([_task("a", rule), _task("b", rule)])
     await scheduler.start()
     assert scheduler.job_count == 2
     assert len(seam.live()) == 2
+    assert scheduler.next_run_at("a") is not None
+    assert all(0 < timer.delay <= 3600 for timer in seam.live())
 
 
 async def test_start_is_idempotent() -> None:

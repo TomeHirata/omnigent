@@ -34,12 +34,16 @@ To provision a fresh sandbox per firing, set `execution_target: "managed_sandbox
 
 ## Schedules are RRULEs, not cron
 
-Use a single RRULE with `HOURLY`, `DAILY`, `WEEKLY`, `MONTHLY`, or `YEARLY`
-frequency. Rules are limited to 4096 characters, an `INTERVAL` of 1–366 periods,
-and 24 combinations of `BYHOUR`, `BYMINUTE`, and `BYSECOND` per day. Use
-`FREQ=HOURLY` instead of `FREQ=MINUTELY;INTERVAL=60`. Validation and next-fire
-lookup search at most eight calendar years; schedules with no occurrence in
-that window are not armed. Validation requires at least two occurrences.
+Use a single RRULE of at most 4096 characters and at most 24 combinations of
+`BYHOUR`, `BYMINUTE`, and `BYSECOND`. `INTERVAL` is limited to 1–366 periods;
+for minute and second frequencies the equivalent maximum is 366 hours.
+Hourly-equivalent rules such as `FREQ=MINUTELY;INTERVAL=60` and
+`FREQ=SECONDLY;INTERVAL=3600` remain valid, including when loaded from storage.
+Validation and next-fire lookup have an eight-year occurrence horizon and a
+100,000-step search budget that includes inner time-filter searches. Exhausting
+the budget raises a validation error. An empty search stops at the horizon even
+when filters yield no candidates. Schedules with no occurrence in the window are
+not armed; validation requires at least two occurrences and an hourly minimum.
 
 A schedule is an [RFC 5545](https://datatracker.ietf.org/doc/html/rfc5545) recurrence rule evaluated in the task's IANA timezone.
 
