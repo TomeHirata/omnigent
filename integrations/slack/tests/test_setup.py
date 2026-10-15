@@ -354,16 +354,9 @@ async def test_setup_shows_login_in_modal_and_advances_on_approval(tmp_path: Pat
     respx.get(_SERVER + "/v1/me").mock(
         return_value=httpx.Response(401, json={"login_url": "/login"})
     )
-    # First /v1/agents (pre-login probe) 401s; after login it returns agents.
-    agents_calls = {"n": 0}
-
-    def _agents(request: httpx.Request) -> httpx.Response:
-        agents_calls["n"] += 1
-        if agents_calls["n"] == 1:
-            return httpx.Response(401)
-        return httpx.Response(200, json={"data": [{"id": "ag_1", "name": "Helper"}]})
-
-    respx.get(_SERVER + "/v1/agents").mock(side_effect=_agents)
+    agents = respx.get(_SERVER + "/v1/agents").mock(
+        return_value=httpx.Response(200, json={"data": [{"id": "ag_1", "name": "Helper"}]})
+    )
     respx.get(_SERVER + "/v1/hosts").mock(
         return_value=httpx.Response(
             200, json={"hosts": [{"host_id": "h1", "name": "H", "status": "online"}]}
@@ -412,6 +405,7 @@ async def test_setup_shows_login_in_modal_and_advances_on_approval(tmp_path: Pat
         waiting = client.updated_views[0]["view"]["blocks"][0]["text"]["text"]
         assert "ABCD-2345" in waiting
         assert client.posts == []  # no DM sent
+        assert not agents.called
 
         # client_id sent to the server is qualified by the workspace name
         # (from team.info → "Acme Corp").
@@ -758,6 +752,30 @@ async def test_setup_reports_unreachable(tmp_path: Path) -> None:
 
     body = _last_update(client)["blocks"][0]["text"]["text"]
     assert "reach" in body.lower()
+
+
+@respx.mock
+async def test_tokenless_setup_reports_login_connection_failure(tmp_path: Path) -> None:
+    from cryptography.fernet import Fernet
+    from omnigent_slack.auth_manager import AuthManager
+    from omnigent_slack.tokens import EncryptedTokenStore
+
+    respx.get(_SERVER + "/v1/me").mock(side_effect=httpx.ConnectError("unavailable"))
+    agents = respx.get(_SERVER + "/v1/agents")
+    token_store = EncryptedTokenStore(tmp_path / "tok.sqlite3", Fernet.generate_key().decode())
+    await token_store.initialize()
+    auth = AuthManager(token_store)
+    pool = OmnigentClientPool(auth_resolver=auth.resolve_auth)
+    flow = _flow(await _store(tmp_path), pool, auth)
+    client = FakeSetupClient()
+    try:
+        await flow._begin_setup(client, team_id="T1", user_id="U1", view_id="V1")
+    finally:
+        await pool.aclose_all()
+    body = _last_update(client)["blocks"][0]["text"]["text"]
+    assert "Could not start login" in body
+    assert "Try again shortly" in body
+    assert not agents.called
 
 
 async def test_select_submit_persists_config(tmp_path: Path) -> None:
