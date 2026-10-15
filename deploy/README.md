@@ -675,3 +675,11 @@ runner binding is more than 32 parent edges away. An owner can do this with
 access after a deep detached subtree reaches the limit. A nearer conflicting
 binding still denies inherited access. This placement limit and the loss of
 account-wide tools require explicit maintainer approval before rollout.
+
+Custom `AuthProvider` implementations must accept the `runner_id` keyword in
+`mint_runner_token` and bind newly minted credentials to that runner. Update
+overrides before deploying the server; the mint route passes this argument.
+
+Claude-native `/clear` transfers the terminal and posts the old conversation's
+idle status, continuation message, and redirect before detaching its runner.
+Session events that affect ancestors stop at a different runner binding.
