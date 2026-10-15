@@ -260,6 +260,9 @@ POLICY_REGISTRY: list[dict[str, object]] = (
                             '"set"|"increment"|"delete"|"append", "value": any}; '
                             "`value` is required for set/increment/append and ignored "
                             "for delete. "
+                            "Keys beginning with `_policy_` are reserved for the runtime. "
+                            "Attempting to update one denies the event and discards this "
+                            "CEL result's entire state-update list. "
                             "Event fields: "
                             'event.type ("request"|"tool_call"|"tool_result"|'
                             '"response"|"llm_request"|"llm_response"|"output_logged"); '

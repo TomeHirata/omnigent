@@ -597,6 +597,11 @@ def block_domains(blocked_domains: list[str]) -> callable:
 
 `state_updates` supports four actions: `"set"`, `"increment"`, `"delete"`, `"append"`.
 
+CEL expressions cannot update keys beginning with `_policy_`; these belong to
+the runtime. Attempting such an update denies the event and discards that CEL
+result's entire `state_updates` list, including updates to ordinary keys.
+Trusted runtime policies can still manage their reserved state.
+
 ### Making policies discoverable
 
 To make custom policies appear in the UI, export a `POLICY_REGISTRY` list from your module:
