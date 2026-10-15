@@ -45,7 +45,9 @@ delete process.env.no_proxy;
 delete process.env.NO_PROXY;
 
 const deps = desktopDepsAvailable();
-const RECORD_DIR = path.join(__dirname, "recordings", "desktop-session-expiry-browser-view");
+const RECORD_DIR =
+  process.env.OMNIGENT_DESKTOP_RECORD_DIR ||
+  fs.mkdtempSync(path.join(os.tmpdir(), "desktop-session-expiry-"));
 
 // The fake workspace sign-in page the gate serves once the session expires.
 // The anchor navigates back to "/" so "signing back in" is a plain click.
@@ -253,7 +255,7 @@ describe(
       { timeout: 300_000 },
       async () => {
         // Boot straight onto the gated server (the failure is past connect).
-        const { electronApp, userDataDir } = await launchDesktop({
+        const { electronApp, userDataDir, stopDisplayCapture } = await launchDesktop({
           recordDir: RECORD_DIR,
           serverUrl: gate.url,
         });
@@ -331,6 +333,7 @@ describe(
           );
         } finally {
           await electronApp.close();
+          await stopDisplayCapture();
           saveRecording(RECORD_DIR, "before-expiry-overlay");
           fs.rmSync(userDataDir, { recursive: true, force: true });
         }
