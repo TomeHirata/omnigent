@@ -192,6 +192,10 @@ def test_password_rotation_revokes_issued_credentials_and_keeps_work(setup_app, 
 
     issued = mint_runner_token()
     assert issued.status_code == 200, issued.text
+    stale_runner = TestClient(alice.app)
+    stale_runner.headers["Authorization"] = f"Bearer {issued.json()['token']}"
+    runner_status = f"/v1/runners/{token_bound_runner_id(binding)}/status"
+    assert stale_runner.get(runner_status).status_code == 200
 
     if revocation == "change":
         response = alice.post(
@@ -207,9 +211,7 @@ def test_password_rotation_revokes_issued_credentials_and_keeps_work(setup_app, 
         "/oauth/token", data={"grant_type": "refresh_token", "refresh_token": cli["refresh_token"]}
     )
     assert refresh.json()["error"] == "invalid_grant"
-    stale_runner = TestClient(alice.app)
-    stale_runner.headers["Authorization"] = f"Bearer {issued.json()['token']}"
-    assert stale_runner.get("/auth/me").status_code == 401
+    assert stale_runner.get(runner_status).status_code == 401
     browser = TestClient(alice.app)
     redeemed = browser.get(magic_path, follow_redirects=False)
     assert redeemed.status_code == 302
