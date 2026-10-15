@@ -1062,6 +1062,29 @@ def test_runner_token_is_confined_to_its_runner_sessions(setup_app, owner):
     child = runner.post("/v1/sessions", json={"agent_id": agent_id, "parent_session_id": bound})
     assert child.status_code == 201, child.text
     assert runner.get(f"/v1/sessions/{child.json()['id']}").status_code == 200
+    grandchild = runner.post(
+        "/v1/sessions", json={"agent_id": agent_id, "parent_session_id": child.json()["id"]}
+    )
+    assert grandchild.status_code == 201, grandchild.text
+    destination = grandchild.json()["id"]
+    uploaded = owner_client.post(
+        f"/v1/sessions/{bound}/resources/files",
+        files={"file": ("root.txt", b"grandparent", "text/plain")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    source_file = uploaded.json()["id"]
+    copy_path = f"/v1/sessions/{destination}/resources/files:copy"
+    copy_body = {"source_session_id": bound, "file_ids": [source_file]}
+    copied = runner.post(copy_path, json=copy_body)
+    assert copied.status_code == 200, copied.text
+    before = stores["file_store"].list(session_id=destination).data
+    assert len(before) == 1
+    # Lineage remains valid after the ancestor moves to another runner.
+    conversations.replace_runner_id(bound, other_runner_id)
+    denied = runner.post(copy_path, json=copy_body)
+    assert denied.status_code == 403, denied.text
+    assert stores["file_store"].list(session_id=destination).data == before
+    conversations.replace_runner_id(bound, runner_id)
     # Agent definitions uploaded by the same owner remain reusable; transcripts
     # of sessions on other runners are still outside this credential's scope.
     reusable_agent = owner_client.get(f"/v1/sessions/{own_elsewhere}").json()["agent_id"]
@@ -1125,6 +1148,23 @@ def test_runner_token_is_confined_to_its_runner_sessions(setup_app, owner):
     detached = owner_client.patch(f"/v1/sessions/{rotated_id}", json={"runner_id": ""})
     assert detached.status_code == 200, detached.text
     assert runner.get(f"/v1/sessions/{rotated_id}").status_code == 401
+
+    # Owner-created children of a detached session have no direct binding.
+    descendant = child.json()["id"]
+    detached_child = owner_client.patch(f"/v1/sessions/{descendant}", json={"runner_id": ""})
+    assert detached_child.status_code == 200, detached_child.text
+    for depth in range(1, 34):
+        if depth > 1:
+            created_child = owner_client.post(
+                "/v1/sessions", json={"agent_id": agent_id, "parent_session_id": descendant}
+            )
+            assert created_child.status_code == 201, created_child.text
+            descendant = created_child.json()["id"]
+        if depth in (31, 32, 33):
+            response = runner.get(f"/v1/sessions/{descendant}")
+            assert response.status_code == (200 if depth <= 32 else 401), response.text
+    conversations.replace_runner_id(descendant, runner_id)
+    assert runner.get(f"/v1/sessions/{descendant}").status_code == 200
 
 
 def test_oauth_connection_state_cannot_cross_username_reuse(setup_app):
