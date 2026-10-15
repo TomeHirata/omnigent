@@ -756,16 +756,9 @@ async def test_setup_reports_unreachable(tmp_path: Path) -> None:
 
 @respx.mock
 async def test_tokenless_setup_reports_login_connection_failure(tmp_path: Path) -> None:
-    from cryptography.fernet import Fernet
-    from omnigent_slack.auth_manager import AuthManager
-    from omnigent_slack.tokens import EncryptedTokenStore
-
     respx.get(_SERVER + "/v1/me").mock(side_effect=httpx.ConnectError("unavailable"))
     agents = respx.get(_SERVER + "/v1/agents")
-    token_store = EncryptedTokenStore(tmp_path / "tok.sqlite3", Fernet.generate_key().decode())
-    await token_store.initialize()
-    auth = AuthManager(token_store)
-    pool = OmnigentClientPool(auth_resolver=auth.resolve_auth)
+    pool, auth = await _authenticated_pool(tmp_path, token=None)
     flow = _flow(await _store(tmp_path), pool, auth)
     client = FakeSetupClient()
     try:

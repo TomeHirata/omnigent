@@ -197,10 +197,10 @@ owner across callers and are unsupported by this integration.
 
 ## Authentication
 
-The Slack integration requires an Omnigent server with authentication enabled.
-Anonymous server access is unsupported: user operations require an individual
-delegated token even if the target server would accept them without one.
-Before upgrading an anonymous-server deployment, configure accounts or OIDC
+The Slack integration requires an Omnigent server with accounts or OIDC authentication.
+Anonymous and header/proxy authentication modes are unsupported: user operations
+require an individual delegated token even if the target server would accept
+them without one. Before upgrading either deployment, configure accounts or OIDC
 authentication, then have each Slack user complete `/omnigent` setup again.
 Accounts deployments must also enable the device grant described below.
 Each Slack user logs in with
