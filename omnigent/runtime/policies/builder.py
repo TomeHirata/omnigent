@@ -47,7 +47,11 @@ from omnigent.spec.types import (
     Phase,
     PolicySpec,
 )
-from omnigent.stores.conversation_store import ConversationStore, DailyCostState
+from omnigent.stores.conversation_store import (
+    RUNNER_CREATOR_LABEL_KEY,
+    ConversationStore,
+    DailyCostState,
+)
 from omnigent.stores.policy_store import PolicyStore
 
 _logger = logging.getLogger(__name__)
@@ -1134,7 +1138,7 @@ def _seed_and_load_labels(
     to_seed = {
         key: ldef.initial
         for key, ldef in label_defs.items()
-        if ldef.initial is not None and key not in existing
+        if ldef.initial is not None and key not in existing and key != RUNNER_CREATOR_LABEL_KEY
     }
     if to_seed:
         conversation_store.set_labels(conversation_id, to_seed)

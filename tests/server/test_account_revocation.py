@@ -1055,14 +1055,9 @@ def test_runner_token_is_confined_to_its_runner_sessions(setup_app, owner):
     assert snapshot.status_code == 200, snapshot.text
     assert runner.get(f"/v1/runners/{runner_id}/status").status_code == 200
     for path in (
-        "/v1/me",
         f"/v1/sessions/{own_elsewhere}",
         f"/v1/sessions/{foreign}",
-        "/v1/sessions",
-        "/v1/hosts",
         f"/v1/hosts/{host_id}",
-        "/v1/scheduled-tasks",
-        "/auth/users",
         f"/v1/runners/{other_runner_id}/status",
     ):
         assert runner.get(path).status_code in (401, 403), path

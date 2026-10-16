@@ -649,8 +649,9 @@ Runner-created sessions receive temporary bootstrap access until their first
 binding attempt. Binding, transfer, and detach consume that permission before
 changing metadata, so a detached session cannot regain access through its old
 creator label. It may still inherit access from its nearest current runner
-binding, subject to the placement limit below. When separate databases are
-configured, revocation commits first; if
+binding, subject to the placement limit below. Policy label writes and declared
+label defaults cannot issue or change this server-owned permission. When separate
+databases are configured, revocation commits first; if
 the subsequent initial binding fails, the owner must retry the binding with
 interactive credentials. A runner may reuse agent definitions uploaded by its
 owner, but that does not grant access to other sessions' transcripts.
