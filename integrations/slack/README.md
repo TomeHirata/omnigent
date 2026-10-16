@@ -197,11 +197,14 @@ owner across callers and are unsupported by this integration.
 
 ## Authentication
 
-The Slack integration requires an Omnigent server with accounts or OIDC authentication.
-Anonymous and header/proxy authentication modes are unsupported: user operations
-require an individual delegated token even if the target server would accept
-them without one. Before upgrading either deployment, configure accounts or OIDC
-authentication, then have each Slack user complete `/omnigent` setup again.
+The Slack integration supports accounts, OIDC, and Databricks Apps deployments
+with per-user delegated credentials. For Databricks Apps, set
+`OMNIGENT_SLACK_SERVER_AUTH=databricks` and use the delegated-token setup below.
+Anonymous servers and ordinary header/proxy deployments without delegated-token
+enrollment are unsupported: user operations require an individual delegated
+token even if the target server would accept them without one. Before upgrading
+an unsupported deployment, configure a supported authentication flow, then have
+each Slack user complete `/omnigent` setup again.
 Accounts deployments must also enable the device grant described below.
 Each Slack user logs in with
 their own Omnigent identity — no Omnigent credential ever passes through Slack.
