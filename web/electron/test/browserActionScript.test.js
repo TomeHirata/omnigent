@@ -3,7 +3,38 @@
 const assert = require("node:assert/strict");
 const { it } = require("node:test");
 const { JSDOM } = require("jsdom");
-const { buildBrowserActionScript } = require("../src/browserActionScript");
+const { buildBrowserActionScript } = require("../src/browserActionScript.mjs");
+const { decodeLegacyBrowserAction } = require("../src/browserLegacyAction");
+const legacy = require("./fixtures/browserActions-v0.18.json");
+
+it("translates the frozen v0.18 relay templates into validated actions", () => {
+  for (const { action, args, script } of legacy.requests) {
+    assert.deepEqual(decodeLegacyBrowserAction(script), { action, params: args });
+    assert.equal(buildBrowserActionScript(action, args), script);
+  }
+});
+
+it("rejects altered legacy templates and accepts only bounded literal data", () => {
+  const script = buildBrowserActionScript("type", { ref: 1, text: "Ada" });
+  for (const input of [
+    null,
+    "1 + 1",
+    `${script}\n`,
+    `${script}; 1 + 1`,
+    script.replace("el.focus();", ""),
+    script.replace('else el.value = "Ada"', 'else el.value = "Grace"'),
+    "x".repeat(2_000_001),
+  ])
+    assert.throws(() => decodeLegacyBrowserAction(input));
+  const args = { ref: 1, snapshot_id: '"'.repeat(128), text: "\n".repeat(100000) };
+  assert.deepEqual(decodeLegacyBrowserAction(buildBrowserActionScript("type", args)), {
+    action: "type",
+    params: args,
+  });
+  assert.throws(() =>
+    decodeLegacyBrowserAction(script.replaceAll('"Ada"', JSON.stringify("x".repeat(100001)))),
+  );
+});
 
 it("snapshots the DOM, resolves refs, types literal text and rejects superseded refs", () => {
   const dom = new JSDOM('<button>Save</button><input aria-label="Name">', {

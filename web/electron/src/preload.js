@@ -264,6 +264,9 @@ contextBridge.exposeInMainWorld("omnigentDesktop", {
   /** Perform a fixed snapshot, click or type action in the conversation's view. */
   browserPerformAction: (conversationId, action, params) =>
     ipcRenderer.invoke("omnigent:browser-perform-action", { conversationId, action, params }),
+  /** @deprecated Until v0.21: main translates only recognized v0.18 action templates. */
+  browserExecute: (conversationId, js) =>
+    ipcRenderer.invoke("omnigent:browser-execute", { conversationId, js }),
   /**
    * Destroy the conversation's view (explicit close — unmount only detaches).
    * @param {string} conversationId

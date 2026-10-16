@@ -17,6 +17,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { buildBrowserActionScript } = require("../src/browserActionScript.mjs");
 
 const {
   desktopDepsAvailable,
@@ -148,32 +149,45 @@ describe(
         `,
           );
           assert.equal(fixture.ok, true, fixture.error);
-          const perform = (action, params = {}) =>
-            window.evaluate(
-              ({ cid, action: requestedAction, params: requestedParams }) =>
-                window.omnigentDesktop.browserPerformAction(cid, requestedAction, requestedParams),
-              { cid: conversationId, action, params },
+          /* oxlint-disable no-await-in-loop -- Both transports act sequentially on the same browser view. */
+          for (const transport of ["typed", "legacy"]) {
+            const perform = (action, params = {}) =>
+              transport === "typed"
+                ? window.evaluate(
+                    ({ cid, action: requestedAction, params: requestedParams }) =>
+                      window.omnigentDesktop.browserPerformAction(
+                        cid,
+                        requestedAction,
+                        requestedParams,
+                      ),
+                    { cid: conversationId, action, params },
+                  )
+                : window.evaluate(
+                    ({ cid, script }) => window.omnigentDesktop.browserExecute(cid, script),
+                    { cid: conversationId, script: buildBrowserActionScript(action, params) },
+                  );
+            const snapshot = await perform("snapshot");
+            assert.equal(snapshot.ok, true, snapshot.error);
+            const { tree, snapshot_id: snapshotId } = JSON.parse(snapshot.result);
+            const buttonRef = Number(tree.match(/button "Save" \[ref=(\d+)\]/)[1]);
+            const inputRef = Number(tree.match(/textbox "Name" \[ref=(\d+)\]/)[1]);
+            const typed = await perform("type", {
+              ref: inputRef,
+              snapshot_id: snapshotId,
+              text: `Ada ${transport}`,
+            });
+            assert.equal(typed.ok, true, typed.error);
+            const clicked = await perform("click", { ref: buttonRef, snapshot_id: snapshotId });
+            assert.equal(clicked.ok, true, clicked.error);
+            const observed = await execInBrowserView(
+              window,
+              conversationId,
+              "document.querySelector('#saved').textContent",
             );
-          const snapshot = await perform("snapshot");
-          assert.equal(snapshot.ok, true, snapshot.error);
-          const { tree, snapshot_id: snapshotId } = JSON.parse(snapshot.result);
-          const buttonRef = Number(tree.match(/button "Save" \[ref=(\d+)\]/)[1]);
-          const inputRef = Number(tree.match(/textbox "Name" \[ref=(\d+)\]/)[1]);
-          const typed = await perform("type", {
-            ref: inputRef,
-            snapshot_id: snapshotId,
-            text: "Ada",
-          });
-          assert.equal(typed.ok, true, typed.error);
-          const clicked = await perform("click", { ref: buttonRef, snapshot_id: snapshotId });
-          assert.equal(clicked.ok, true, clicked.error);
-          const observed = await execInBrowserView(
-            window,
-            conversationId,
-            "document.querySelector('#saved').textContent",
-          );
-          assert.equal(observed.ok, true, observed.error);
-          assert.equal(observed.result, "Ada");
+            assert.equal(observed.ok, true, observed.error);
+            assert.equal(observed.result, `Ada ${transport}`);
+          }
+          /* oxlint-enable no-await-in-loop */
         } finally {
           await electronApp.close();
           await stopDisplayCapture();

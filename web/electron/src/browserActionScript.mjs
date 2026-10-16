@@ -1,5 +1,3 @@
-"use strict";
-
 /** Safely interpolate a string into a browser action JS payload — always
  *  `JSON.stringify` (handles the full escape table); never hand-roll. */
 function jsString(s) {
@@ -160,7 +158,7 @@ function findElJs(args) {
   );
 }
 
-function buildBrowserActionScript(action, args = {}) {
+export function buildBrowserActionScript(action, args = {}) {
   if (!args || typeof args !== "object" || Array.isArray(args)) {
     throw new Error("Browser action arguments must be an object");
   }
@@ -212,5 +210,3 @@ function buildBrowserActionScript(action, args = {}) {
     `return 'ok'; })()`
   );
 }
-
-module.exports = { buildBrowserActionScript };

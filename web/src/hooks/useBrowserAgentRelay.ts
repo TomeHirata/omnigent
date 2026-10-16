@@ -9,6 +9,7 @@
  *  desktop build that predates the `browser*` bridge is treated as unsupported,
  *  so the relay never claims an action it couldn't fulfill. */
 import { useEffect } from "react";
+import { buildBrowserActionScript } from "../../electron/src/browserActionScript.mjs";
 import { onBrowserActionRequest } from "@/lib/browserActionBus";
 import type { BrowserActionRequestEvent } from "@/lib/events";
 import { supportsBrowser } from "@/lib/nativeBridge";
@@ -39,6 +40,11 @@ interface BrowserDesktopBridge {
   browserScreenshot?: (
     conversationId: string,
   ) => Promise<{ ok: boolean; dataUrl?: string; error?: string }>;
+  /** @deprecated Compatibility with pre-typed desktops until v0.21. */
+  browserExecute?: (
+    conversationId: string,
+    script: string,
+  ) => Promise<{ ok: boolean; result?: string; error?: string }>;
   browserPerformAction?: (
     conversationId: string,
     action: "snapshot" | "click" | "type",
@@ -73,6 +79,22 @@ interface ActionResult {
   error?: string;
   data?: Record<string, unknown>;
   data_url?: string;
+}
+
+async function performAction(
+  desktop: BrowserDesktopBridge,
+  conversationId: string,
+  action: "snapshot" | "click" | "type",
+  args?: Record<string, unknown>,
+) {
+  if (desktop.browserPerformAction) {
+    return desktop.browserPerformAction(conversationId, action, args);
+  }
+  // Pre-typed desktops retain their existing executor until the v0.21 transition.
+  if (desktop.browserExecute) {
+    return desktop.browserExecute(conversationId, buildBrowserActionScript(action, args));
+  }
+  return { ok: false, error: "this desktop shell does not support the browser pane" };
 }
 
 /** Execute one claimed action against the conversation's WebContentsView.
@@ -126,10 +148,7 @@ async function dispatch(
         return { ok: true, data_url: r.dataUrl };
       }
       case "snapshot": {
-        if (!desktop.browserPerformAction) {
-          return { ok: false, error: "this desktop shell does not support the browser pane" };
-        }
-        const r = await desktop.browserPerformAction(conversationId, "snapshot");
+        const r = await performAction(desktop, conversationId, "snapshot");
         if (!r?.ok) return { ok: false, error: r?.error ?? "snapshot failed" };
         try {
           const parsed = JSON.parse(r.result ?? "{}") as Record<string, unknown>;
@@ -139,18 +158,12 @@ async function dispatch(
         }
       }
       case "click": {
-        if (!desktop.browserPerformAction) {
-          return { ok: false, error: "this desktop shell does not support the browser pane" };
-        }
-        const r = await desktop.browserPerformAction(conversationId, "click", args);
+        const r = await performAction(desktop, conversationId, "click", args);
         if (!r?.ok) return { ok: false, error: r?.error ?? "click failed" };
         return { ok: true };
       }
       case "type": {
-        if (!desktop.browserPerformAction) {
-          return { ok: false, error: "this desktop shell does not support the browser pane" };
-        }
-        const r = await desktop.browserPerformAction(conversationId, "type", args);
+        const r = await performAction(desktop, conversationId, "type", args);
         if (!r?.ok) return { ok: false, error: r?.error ?? "type failed" };
         return { ok: true };
       }

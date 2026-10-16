@@ -55,7 +55,9 @@ describe("browser action bridge", () => {
     assert.equal(args.conversationId, "conversation");
     assert.equal(args.action, "type");
     assert.deepEqual(args.params, params);
-    assert.equal(h.desktop.browserExecute, undefined);
+    await h.desktop.browserExecute("conversation", "legacy input");
+    assert.equal(h.invokes.at(-1).channel, "omnigent:browser-execute");
+    assert.equal(h.invokes.at(-1).args.js, "legacy input");
   });
 });
 

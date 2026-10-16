@@ -8,7 +8,8 @@
 "use strict";
 
 const crypto = require("node:crypto");
-const { buildBrowserActionScript } = require("./browserActionScript");
+const { buildBrowserActionScript } = require("./browserActionScript.mjs");
+const { decodeLegacyBrowserAction } = require("./browserLegacyAction");
 const { buildDesignModeScript } = require("./designModeScript");
 
 // Max age of a real native input event for a design-mode submit marker to be
@@ -421,21 +422,28 @@ function registerBrowserIpc({
     }
   });
 
-  // Build fixed scripts in main; the renderer supplies only action data.
-  ipcMain.handle("omnigent:browser-perform-action", async (event, args) => {
+  // Both transports converge on main-owned scripts and the same sender gate.
+  async function performBrowserAction(event, args, legacy = false) {
     const g = gateRegistry(event);
     if (g.error) return { ok: false, error: g.error };
-    const { conversationId, action, params } = args ?? {};
+    const { conversationId } = args ?? {};
     const entry = g.registry.get(conversationId);
     if (!entry) return { ok: false, error: "No browser view" };
     try {
+      const { action, params } = legacy ? decodeLegacyBrowserAction(args?.js) : (args ?? {});
       const js = buildBrowserActionScript(action, params);
       const result = await entry.view.webContents.executeJavaScript(js, false);
       return { ok: true, result: typeof result === "string" ? result : JSON.stringify(result) };
     } catch (e) {
       return { ok: false, error: e && e.message ? e.message : String(e) };
     }
-  });
+  }
+  ipcMain.handle("omnigent:browser-perform-action", (event, args) =>
+    performBrowserAction(event, args),
+  );
+  ipcMain.handle("omnigent:browser-execute", (event, args) =>
+    performBrowserAction(event, args, true),
+  );
 
   // Whether a view currently exists for a conversation. Lets a (re)mounting
   // pane re-attach an already-created view without waiting for a create event.

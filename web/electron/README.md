@@ -692,12 +692,27 @@ opened in a separate browser; this also keeps later redirects in these tabs
 under the same policy.
 
 **JS trust boundary:** `omnigent:browser-perform-action` accepts only snapshot,
-click and type requests. Main validates their arguments and builds the fixed
-scripts. The renderer cannot supply JavaScript, and action execution does not
-grant a synthetic user gesture. Clipboard, popup and other gesture-gated page
-APIs still require native user interaction. An older UI using `browserExecute`
-reports browser actions as unsupported until updated; the raw script bridge is
-no longer exposed.
+click and type requests. Main validates their arguments and builds fixed scripts,
+without granting a synthetic user gesture. Clipboard, popup and other
+gesture-gated page APIs still require native user interaction.
+
+**Desktop/UI transition (through v0.20).** Desktop and the served UI can upgrade
+in either order. An updated UI prefers `browserPerformAction`; on a pre-typed
+v0.18 desktop it sends only the fixed v0.18 action templates through the existing
+`browserExecute` bridge. Older desktops retain their existing execution behavior
+until upgraded. An updated desktop also accepts a v0.18 UI: its legacy adapter
+recognizes the complete snapshot/click/type templates, extracts only JSON data,
+validates the same argument limits, and reconstructs the action in main. It never
+evaluates the submitted script. Other scripts are rejected with an update message.
+
+Both adapters are deprecated for removal in v0.21. Update desktop and server UI
+before that release. The supported combinations during this transition are:
+
+| Desktop | Served UI | Action transport                                         |
+| ------- | --------- | -------------------------------------------------------- |
+| Updated | Updated   | Typed actions                                            |
+| Updated | v0.18     | Validated legacy templates → typed actions in main       |
+| v0.18   | Updated   | Fixed v0.18 templates through the older desktop's bridge |
 
 **Availability.** The pane is always on in this build — this shell machinery
 activates the moment a `browser.action_request` arrives (the agent-side

@@ -407,20 +407,29 @@ describe("browserIpc — trust gate", () => {
   });
 
   it("rejects an unpinned sender on the new toolbar handlers", async () => {
-    const { ipcMain, event } = setup({ pinned: false });
+    const { ipcMain, event, wc } = setup({ pinned: false });
     const channels = [
       "omnigent:browser-go-back",
       "omnigent:browser-go-forward",
       "omnigent:browser-reload",
       "omnigent:open-browser-devtools",
+      "omnigent:browser-perform-action",
+      "omnigent:browser-execute",
     ];
     const results = await Promise.all(
-      channels.map((ch) => ipcMain.invoke(ch, event, { conversationId: "conv_1" })),
+      channels.map((ch) =>
+        ipcMain.invoke(ch, event, {
+          conversationId: "conv_1",
+          action: "snapshot",
+          js: require("../src/browserActionScript.mjs").buildBrowserActionScript("snapshot"),
+        }),
+      ),
     );
     results.forEach((r, i) => {
       assert.equal(r.ok, false, `${channels[i]} should be gated`);
       assert.match(r.error, /connected server's page/);
     });
+    assert.deepEqual(wc.scripts, []);
   });
 });
 
@@ -782,10 +791,27 @@ describe("browserIpc — navigation API helpers", () => {
 });
 
 describe("browserIpc — typed actions", () => {
+  it("accepts an older UI's action templates without executing arbitrary input", async () => {
+    const { ipcMain, event, wc } = setup();
+    for (const { script } of require("./fixtures/browserActions-v0.18.json").requests) {
+      // oxlint-disable-next-line no-await-in-loop -- Exercise each legacy request against the same view.
+      const result = await ipcMain.invoke("omnigent:browser-execute", event, {
+        conversationId: "conv_1",
+        js: script,
+      });
+      assert.equal(result.ok, true, result.error);
+      assert.equal(wc.scripts.at(-1), script);
+    }
+  });
+
   it("rejects raw scripts and malformed action arguments before execution", async () => {
     const wc = makeWebContents();
     const { ipcMain, event } = setup({ webContents: wc });
-    assert.ok(!ipcMain.channels().includes("omnigent:browser-execute"));
+    const legacy = await ipcMain.invoke("omnigent:browser-execute", event, {
+      conversationId: "conv_1",
+      js: "1 + 1",
+    });
+    assert.equal(legacy.ok, false);
     for (const input of [
       { action: "evaluate", params: { js: "1 + 1" } },
       { action: "click", params: { ref: "7" } },

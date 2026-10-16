@@ -25,6 +25,7 @@ import { readArcaHostId, writeArcaHostId } from "@/lib/arcaHost";
 import { emitBrowserActionRequest } from "@/lib/browserActionBus";
 import type { BrowserActionRequestEvent } from "@/lib/events";
 import { useBrowserAgentRelay } from "./useBrowserAgentRelay";
+import legacyActions from "../../electron/test/fixtures/browserActions-v0.18.json";
 
 const CONV = "conv_relay";
 const renderRelay = (visibleId: string | null | undefined = CONV, client = new QueryClient()) => {
@@ -653,7 +654,7 @@ describe("useBrowserAgentRelay — action dispatch", () => {
         .mockResolvedValue({ ok: true, result: JSON.stringify({ snapshot_id: "s1", tree: "x" }) }),
     });
     await runAction(actionEvent("snapshot"));
-    expect(bridge.browserPerformAction).toHaveBeenCalledWith("conv_relay", "snapshot");
+    expect(bridge.browserPerformAction).toHaveBeenCalledWith("conv_relay", "snapshot", undefined);
     expect((postedResult().result as { data: { snapshot_id: string } }).data.snapshot_id).toBe(
       "s1",
     );
@@ -667,31 +668,33 @@ describe("useBrowserAgentRelay — action dispatch", () => {
     expect((postedResult().result as { error: string }).error).toMatch(/snapshot parse failed/);
   });
 
-  it("click by ref: validates snapshot_id and clicks the resolved element", async () => {
-    const bridge = installBridge();
-    await runAction(actionEvent("click", { ref: 7, snapshot_id: "snap-9" }));
-    expect(bridge.browserPerformAction).toHaveBeenCalledWith("conv_relay", "click", {
-      ref: 7,
-      snapshot_id: "snap-9",
-    });
-    expect((postedResult().result as { ok: boolean }).ok).toBe(true);
+  it.each(legacyActions.requests)(
+    "supports an older desktop's $action transport with its frozen template",
+    async ({ action, args, script }) => {
+      const browserExecute = vi.fn().mockResolvedValue({ ok: true, result: "{}" });
+      installBridge({ browserPerformAction: undefined, browserExecute });
+      await runAction(actionEvent(action, args));
+      expect(browserExecute).toHaveBeenCalledWith(CONV, script);
+      expect(postedResult().result).toMatchObject({ ok: true });
+    },
+  );
+
+  it("prefers typed actions when a desktop also offers legacy compatibility", async () => {
+    const browserExecute = vi.fn();
+    const bridge = installBridge({ browserExecute });
+    await runAction(actionEvent("click", { ref: 1 }));
+    expect(bridge.browserPerformAction).toHaveBeenCalledWith(CONV, "click", { ref: 1 });
+    expect(browserExecute).not.toHaveBeenCalled();
   });
 
-  it("click by selector: resolves via querySelector (neutral selector, JSON-escaped)", async () => {
+  it.each([
+    { action: "click", args: { ref: 7, snapshot_id: "snap-9" } },
+    { action: "click", args: { selector: "button.submit" } },
+    { action: "type", args: { ref: 3, text: "hello" } },
+  ])("forwards $action with $args and returns its result", async ({ action, args }) => {
     const bridge = installBridge();
-    await runAction(actionEvent("click", { selector: "button.submit" }));
-    expect(bridge.browserPerformAction).toHaveBeenCalledWith("conv_relay", "click", {
-      selector: "button.submit",
-    });
-  });
-
-  it("type: sets the value via the native setter and dispatches input/change", async () => {
-    const bridge = installBridge();
-    await runAction(actionEvent("type", { ref: 3, text: "hello" }));
-    expect(bridge.browserPerformAction).toHaveBeenCalledWith("conv_relay", "type", {
-      ref: 3,
-      text: "hello",
-    });
+    await runAction(actionEvent(action, args));
+    expect(bridge.browserPerformAction).toHaveBeenCalledWith("conv_relay", action, args);
     expect((postedResult().result as { ok: boolean }).ok).toBe(true);
   });
 
