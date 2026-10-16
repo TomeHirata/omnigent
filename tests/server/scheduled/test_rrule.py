@@ -195,6 +195,64 @@ def test_rule_limits_apply_to_validation_and_next_fire(rule: str) -> None:
         get_next_fire_time(rule, _dt(2026, 1, 1), UTC)
 
 
+@pytest.mark.parametrize(
+    "field",
+    [
+        "BYMONTH",
+        "BYWEEKNO",
+        "BYYEARDAY",
+        "BYMONTHDAY",
+        "BYDAY",
+        "BYHOUR",
+        "BYMINUTE",
+        "BYSECOND",
+        "BYSETPOS",
+        "BYEASTER",
+    ],
+)
+def test_by_lists_have_a_distinct_value_limit(field: str) -> None:
+    values = [f"{i}MO" if field == "BYDAY" else str(i) for i in range(1, 26)]
+    rule = f"FREQ=YEARLY;{field}=" + ",".join(values)
+    for evaluate in (
+        validate_rrule,
+        lambda value: get_next_fire_time(value, _dt(2026, 1, 1), UTC),
+    ):
+        with pytest.raises(RRuleValidationError, match=f"{field} supports at most 24"):
+            evaluate(rule)
+
+
+def test_duplicate_by_values_preserve_occurrences() -> None:
+    rule = "FREQ=MONTHLY;BYDAY=+1MO,01MO,1MO;BYHOUR=" + ",".join(["09", "+9", "9"] * 10)
+    rule += ";BYSETPOS=01,+1,1"
+    validate_rrule(rule)
+    assert get_next_fire_time(rule, _dt(2026, 1, 1), UTC) == _dt(2026, 1, 5, 9)
+
+
+def test_position_selection_consumes_work() -> None:
+    from dateutil.rrule import rrulestr
+
+    from omnigent.server.scheduled._bounded_rrule import iter_bounded
+
+    parsed = rrulestr("FREQ=DAILY;BYHOUR=9,11,13;BYSETPOS=1,2,3", dtstart=_dt(2026, 1, 1))
+    # The first period and day leave only two position selections available.
+    with pytest.raises(ValueError, match="work limit"):
+        next(iter_bounded(parsed, max_steps=4, max_seconds=1))
+
+
+def test_search_stops_at_elapsed_time_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    from itertools import count
+
+    for evaluate in (
+        validate_rrule,
+        lambda value: get_next_fire_time(value, _dt(2026, 1, 1), UTC),
+    ):
+        # Advance only the recurrence clock; no real delay or costly input is needed.
+        ticks = count()
+        monkeypatch.setattr("omnigent.server.scheduled._bounded_rrule.monotonic", ticks.__next__)
+        with pytest.raises(RRuleValidationError, match="time limit"):
+            evaluate("FREQ=DAILY")
+
+
 def test_yearly_leap_day_rule_is_supported() -> None:
     rule = "FREQ=YEARLY;BYMONTH=2;BYMONTHDAY=29"
     validate_rrule(rule)
@@ -258,7 +316,7 @@ def test_empty_periods_stop_at_horizon() -> None:
         "FREQ=DAILY;BYHOUR=9;BYSETPOS=2;UNTIL=20260102T000000Z",
         dtstart=_dt(2026, 1, 1),
     )
-    assert list(iter_bounded(parsed, max_steps=3)) == []
+    assert list(iter_bounded(parsed, max_steps=7, max_seconds=1)) == []
 
 
 @pytest.mark.parametrize(
@@ -285,6 +343,8 @@ def test_bounded_iterator_preserves_dateutil_occurrences(rule: str, zone: str) -
     tz = ZoneInfo(zone)
     start = datetime(2026, 1, 1, 23, tzinfo=tz)
     parsed = rrulestr(rule, dtstart=start)
-    assert list(islice(iter_bounded(parsed, max_steps=100_000), 5)) == list(islice(parsed, 5))
+    assert list(islice(iter_bounded(parsed, max_steps=100_000, max_seconds=1), 5)) == list(
+        islice(parsed, 5)
+    )
     midnight = start.replace(hour=0)
     assert get_next_fire_time(rule, start, tz) == rrulestr(rule, dtstart=midnight).after(start)

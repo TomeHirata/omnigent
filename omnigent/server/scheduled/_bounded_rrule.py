@@ -43,6 +43,7 @@ import calendar
 import datetime
 from collections.abc import Iterator
 from math import gcd
+from time import monotonic
 from typing import Any, cast
 
 from dateutil.rrule import (  # type: ignore[import-untyped]
@@ -58,7 +59,20 @@ from dateutil.rrule import (  # type: ignore[import-untyped]
 )
 
 
-def iter_bounded(rule: rrule, *, max_steps: int) -> Iterator[datetime.datetime]:
+def iter_bounded(
+    rule: rrule, *, max_steps: int, max_seconds: float
+) -> Iterator[datetime.datetime]:
+    remaining = max_steps
+    deadline = monotonic() + max_seconds
+
+    def spend(steps: int = 1) -> None:
+        nonlocal remaining
+        remaining -= steps
+        if remaining < 0:
+            raise ValueError("RRULE search exceeds the supported work limit")
+        if monotonic() >= deadline:
+            raise ValueError("RRULE search exceeds the supported time limit")
+
     # Public dateutil stubs omit the iterator state and mask types.
     state = cast(Any, rule)
     year, month, day, hour, minute, second, weekday, _yearday, _ = state._dtstart.timetuple()
@@ -110,11 +124,8 @@ def iter_bounded(rule: rrule, *, max_steps: int) -> Iterator[datetime.datetime]:
 
     total = 0
     count = state._count
-    remaining = max_steps
     while True:
-        remaining -= 1
-        if remaining < 0:
-            raise ValueError("RRULE search exceeds the supported work limit")
+        spend()
         # UNTIL must also stop periods whose filters produce no candidates.
         period = (year, month if freq != YEARLY else 1, day if freq >= WEEKLY else 1)
         if local_until is not None and period > (
@@ -126,7 +137,7 @@ def iter_bounded(rule: rrule, *, max_steps: int) -> Iterator[datetime.datetime]:
         # Get dayset with the right frequency
         dayset, start, end = getdayset(year, month, day)
 
-        # Do the "hard" work ;-)
+        spend(end - start)
         filtered = False
         for i in dayset[start:end]:
             if (
@@ -162,13 +173,15 @@ def iter_bounded(rule: rrule, *, max_steps: int) -> Iterator[datetime.datetime]:
         # Output results
         if bysetpos and timeset:
             poslist = []
+            days = [i for i in dayset[start:end] if i is not None]
             for pos in bysetpos:
+                spend()
                 if pos < 0:
                     daypos, timepos = divmod(pos, len(timeset))
                 else:
                     daypos, timepos = divmod(pos - 1, len(timeset))
                 try:
-                    i = [x for x in dayset[start:end] if x is not None][daypos]
+                    i = days[daypos]
                     time = timeset[timepos]
                 except IndexError:
                     pass
@@ -179,6 +192,7 @@ def iter_bounded(rule: rrule, *, max_steps: int) -> Iterator[datetime.datetime]:
                         poslist.append(res)
             poslist.sort()
             for res in poslist:
+                spend()
                 if until and res > until:
                     state._len = total
                     return
@@ -194,8 +208,9 @@ def iter_bounded(rule: rrule, *, max_steps: int) -> Iterator[datetime.datetime]:
             for i in dayset[start:end]:
                 if i is not None:
                     date = datetime.date.fromordinal(ii.yearordinal + i)
-                    for time in timeset:
-                        res = datetime.datetime.combine(date, time)
+                    for candidate_time in timeset:
+                        spend()
+                        res = datetime.datetime.combine(date, candidate_time)
                         if until and res > until:
                             state._len = total
                             return
@@ -263,9 +278,7 @@ def iter_bounded(rule: rrule, *, max_steps: int) -> Iterator[datetime.datetime]:
             valid = False
             rep_rate = 24 * 60
             for _j in range(rep_rate // gcd(interval, rep_rate)):
-                remaining -= 1
-                if remaining < 0:
-                    raise ValueError("RRULE search exceeds the supported work limit")
+                spend()
                 if byminute:
                     nhours, minute = state._rrule__mod_distance(
                         value=minute, byxxx=state._byminute, base=60
@@ -297,9 +310,7 @@ def iter_bounded(rule: rrule, *, max_steps: int) -> Iterator[datetime.datetime]:
             rep_rate = 24 * 3600
             valid = False
             for _j in range(rep_rate // gcd(interval, rep_rate)):
-                remaining -= 1
-                if remaining < 0:
-                    raise ValueError("RRULE search exceeds the supported work limit")
+                spend()
                 if bysecond:
                     nminutes, second = state._rrule__mod_distance(
                         value=second, byxxx=state._bysecond, base=60
@@ -336,6 +347,7 @@ def iter_bounded(rule: rrule, *, max_steps: int) -> Iterator[datetime.datetime]:
             daysinmonth = calendar.monthrange(year, month)[1]
             if day > daysinmonth:
                 while day > daysinmonth:
+                    spend()
                     day -= daysinmonth
                     month += 1
                     if month == 13:

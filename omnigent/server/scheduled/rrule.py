@@ -13,13 +13,14 @@ additionally enforces a minimum interval (:data:`MIN_INTERVAL_SECONDS`) and
 rejects rules that never fire or fire only once within the search window — each
 fire spawns a real agent session, so a runaway cadence is expensive.
 
-Schedules use a single rule, at most 24 time combinations, an eight-year
-occurrence horizon, and a finite search-work budget. Hourly-equivalent minute
-and second rules remain supported for persisted schedules.
+Schedules use a single rule, at most 24 distinct values per BY field and 24 time
+combinations, an eight-year occurrence horizon, and work and elapsed-time limits.
+Hourly-equivalent minute and second rules remain supported for persisted schedules.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -59,6 +60,8 @@ _MAX_SAMPLE_OCCURRENCES = 2000
 _MAX_RULE_LENGTH = 4096
 _SEARCH_YEARS = 8
 _MAX_SEARCH_STEPS = 100_000
+_MAX_SEARCH_SECONDS = 0.25
+_MAX_BY_VALUES = 24
 
 
 class RRuleValidationError(ValueError):
@@ -85,7 +88,12 @@ class _BoundedRRule:
 
     def __iter__(self) -> Iterator[datetime]:
         try:
-            yield from islice(iter_bounded(self.rule, max_steps=_MAX_SEARCH_STEPS), self.count)
+            yield from islice(
+                iter_bounded(
+                    self.rule, max_steps=_MAX_SEARCH_STEPS, max_seconds=_MAX_SEARCH_SECONDS
+                ),
+                self.count,
+            )
         except ValueError as exc:
             raise RRuleValidationError(str(exc)) from exc
 
@@ -172,6 +180,24 @@ def _parse(rule_str: str, dtstart: datetime) -> _ParsedRRule:
             key, value = part.split("=", 1)
             if key in fields or not value:
                 raise ValueError("RRULE fields must be unique and non-empty")
+            if key.startswith("BY"):
+                values = []
+                for item in value.split(","):
+                    if key == "BYDAY":
+                        match = re.fullmatch(r"([+-]?\d+)?([A-Z]{2})", item.strip())
+                        if match is None:
+                            raise ValueError("Invalid BYDAY value")
+                        ordinal, weekday = match.groups()
+                        item = f"{int(ordinal)}{weekday}" if ordinal is not None else weekday
+                    else:
+                        item = str(int(item))
+                    if item not in values:
+                        values.append(item)
+                    if len(values) > _MAX_BY_VALUES:
+                        raise ValueError(
+                            f"{key} supports at most {_MAX_BY_VALUES} distinct values"
+                        )
+                value = ",".join(values)
             fields[key] = value
         frequency = fields.get("FREQ")
         if frequency not in {
@@ -194,7 +220,9 @@ def _parse(rule_str: str, dtstart: datetime) -> _ParsedRRule:
             combinations *= len(fields.get(key, "0").split(","))
         if combinations > 24:
             raise ValueError("At most 24 time combinations per day are supported")
-        parsed = rrulestr(text, dtstart=dtstart)
+        parsed = rrulestr(
+            ";".join(f"{key}={value}" for key, value in fields.items()), dtstart=dtstart
+        )
         if not isinstance(parsed, rrule):
             raise ValueError("Use a single recurrence rule")
         # The iterator also checks the horizon before searching each period.
