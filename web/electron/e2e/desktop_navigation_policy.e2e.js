@@ -52,6 +52,7 @@ it(
       `
     const mod = require(${JSON.stringify(modulePath)});
     const create = mod.createBrowserViewRegistry;
+    global.navigationRequests = [];
     global.navigationResponses = [];
     global.navigationRedirects = [];
     mod.createBrowserViewRegistry = (opts) => {
@@ -66,9 +67,13 @@ it(
         return cancel;
       };
       const request = registry.shouldCancelAgentRequest.bind(registry);
-      registry.shouldCancelAgentRequest = async (details) =>
-        registry.get("response-fixture")?.view.webContents.id === details.webContentsId
-          && details.url === ${JSON.stringify(localUrl)} ? false : request(details);
+      registry.shouldCancelAgentRequest = async (details) => {
+        const cancel = registry.get("response-fixture")?.view.webContents.id === details.webContentsId
+          && details.url === ${JSON.stringify(localUrl)} ? false : await request(details);
+        global.navigationRequests.push({ url: details.url, resourceType: details.resourceType,
+          webContentsId: details.webContentsId, cancel });
+        return cancel;
+      };
       return registry;
     };
   `,
@@ -195,6 +200,47 @@ it(
       );
       assert.equal((await navigate("preview-fixture", localUrl, true)).ok, true);
 
+      await phase("Embedded documents: refuse internal iframe and object destinations.");
+      const embeddedUrl = `http://lvh.me:${fixture.address().port}/embedded`;
+      evidence.embedded = await electronApp.evaluate(async (_electron, url) => {
+        const entry = global.omnigentTestBrowserRegistries[0].get("preview-fixture");
+        await entry.view.webContents.executeJavaScript(`
+          for (const tag of ["iframe", "object"]) {
+            const element = document.createElement(tag);
+            if (tag === "object") {
+              element.type = "text/html";
+              element.data = ${JSON.stringify(url)} + "?kind=" + tag;
+            } else {
+              element.src = ${JSON.stringify(url)} + "?kind=" + tag;
+            }
+            document.body.appendChild(element);
+          }
+          void 0;
+        `);
+        const deadline = Date.now() + 10000;
+        while (Date.now() < deadline) {
+          const requests = global.navigationRequests.filter((event) => event.url.startsWith(url));
+          if (requests.length >= 2) return requests;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        return global.navigationRequests.filter((event) => event.url.startsWith(url));
+      }, embeddedUrl);
+      for (const [tag, resourceType] of [
+        ["iframe", "subFrame"],
+        ["object", "object"],
+      ]) {
+        assert.ok(
+          evidence.embedded.some(
+            (event) =>
+              event.url === `${embeddedUrl}?kind=${tag}` &&
+              event.resourceType === resourceType &&
+              event.webContentsId === preview.id &&
+              event.cancel,
+          ),
+          JSON.stringify(evidence.embedded),
+        );
+      }
+
       const cancellation = await electronApp.evaluate(async (_electron, url) => {
         const registry = global.omnigentTestBrowserRegistries[0];
         registry.openOrNavigate("response-fixture", null);
@@ -242,6 +288,7 @@ it(
           Object.assign(
             evidence,
             await desktop.electronApp.evaluate(() => ({
+              requests: global.navigationRequests,
               responses: global.navigationResponses,
               redirects: global.navigationRedirects,
             })),

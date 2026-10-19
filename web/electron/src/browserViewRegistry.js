@@ -444,12 +444,8 @@ function createBrowserViewRegistry({
     return { requestHeaders: { ...headers, "Cache-Control": [...directives.values()].join(", ") } };
   }
 
-  // Wired to webRequest.onHeadersReceived: judges the address Chromium actually
-  // connected to, so a DNS answer that changes after the earlier check is still
-  // refused before the page gets the response. Electron v42.7.0 fills `ip` here
-  // though its typings omit it: `ToDictionary` (electron_api_web_request.cc)
-  // copies the `remote_endpoint` that `InProgressRequest::OnHeadersReceived`
-  // (proxying_url_loader_factory.cc) gets from the network service.
+  // Check Chromium's connected endpoint to catch DNS rebinding.
+  // Electron 42 supplies details.ip despite stale typings.
   async function shouldCancelAgentResponse({ webContentsId, url, ip }) {
     const entry = agentLockedEntryFor(webContentsId);
     if (!entry) return false;

@@ -157,7 +157,9 @@ Electron process. It checks public HTTPS navigation twice, an HSTS HTTP-to-HTTPS
 upgrade after learning a real server policy, a refused loopback
 alias, and a trusted localhost preview twice. The public and preview response
 assertions check connected addresses and view IDs; the HSTS assertions check
-Chromium’s HTTP-to-HTTPS redirect metadata and final URL. A main-only
+Chromium’s HTTP-to-HTTPS redirect metadata and final URL. Internal-resolving
+iframe and object destinations must be classified as `subFrame` and `object`,
+attributed to the preview view, and cancelled through production request hooks. A main-only
 fixture bypasses preflight for one local request to isolate response cancellation;
 its real network metadata must trigger the production response guard. Preview
 eligibility is supplied by the main-only fixture rather than live Arca enrollment.
