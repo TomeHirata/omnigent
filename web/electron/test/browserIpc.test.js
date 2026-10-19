@@ -79,16 +79,21 @@ describe("browser IPC Arca context", () => {
     let allowed = false;
     let navigations = 0;
     let recoveries = 0;
+    const calls = [];
     registerBrowserIpc({
       ipcMain,
       isPinnedOriginSender: () => true,
       getRegistryForEvent: () => ({
-        checkAgentNavigation: allowAgentNavigation,
-        openOrNavigate: () => ({
-          ok: allowed,
-          error: allowed ? undefined : "blocked",
-          created: false,
-        }),
+        checkAgentNavigation: async () => {
+          calls.push(allowed ? "allowed" : "denied");
+          return allowed ? { ok: true } : { ok: false, error: "blocked" };
+        },
+        openOrNavigate: () => {
+          calls.push("navigate");
+          navigations++;
+          assert.equal(allowed, true);
+          return { ok: true, created: false };
+        },
       }),
       recoverAgentNavigationForEvent: async (
         _event,
@@ -97,6 +102,7 @@ describe("browser IPC Arca context", () => {
         rememberedArcaHostId,
         sourceIsArcaHost,
       ) => {
+        calls.push("recover");
         recoveries++;
         assert.equal(url, "http://localhost:5173");
         assert.equal(sourceHostId, "arca-host");
@@ -106,7 +112,6 @@ describe("browser IPC Arca context", () => {
         return true;
       },
       getAgentContextForEvent: () => {
-        navigations++;
         return { sourceHostId: "arca-host" };
       },
     });
@@ -126,7 +131,8 @@ describe("browser IPC Arca context", () => {
     );
     assert.equal(result.ok, true);
     assert.equal(recoveries, 1);
-    assert.equal(navigations, 2);
+    assert.equal(navigations, 1);
+    assert.deepEqual(calls, ["denied", "recover", "allowed", "navigate"]);
   });
 
   it("leaves a denied navigation untouched when recovery captures no eligible identity", async () => {
