@@ -87,6 +87,15 @@ from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE as _HARNESS_NOT_CONFIGURED_ERROR_CODE,
 )
+from omnigent.host.frames import (
+    HOST_LAUNCH_EXCEPTION_ERROR_CODE as _HOST_LAUNCH_EXCEPTION_ERROR_CODE,
+)
+
+# Host launch refusals that a retry or a longer wait can't fix, so the
+# server fails at once instead of waiting out the runner connect timeout.
+_BLOCKING_HOST_LAUNCH_ERROR_CODES = frozenset(
+    {_HARNESS_NOT_CONFIGURED_ERROR_CODE, _HOST_LAUNCH_EXCEPTION_ERROR_CODE}
+)
 from omnigent.model_override import validate_model_override
 from omnigent.native_coding_agents import (
     CLAUDE_NATIVE_CODING_AGENT,
@@ -5360,12 +5369,12 @@ async def _bind_and_launch_managed_runner(
                 host_registry,
                 host_conn,
             )
-            if launch_attempt.error_code == _HARNESS_NOT_CONFIGURED_ERROR_CODE:
+            if launch_attempt.error_code in _BLOCKING_HOST_LAUNCH_ERROR_CODES:
                 # The sandbox image should bake in the harness, but if the
                 # host refuses, fail the launch loudly (mirroring the
                 # delete-during-provisioning path) rather than waiting out
                 # the connect timeout for a runner that will never appear.
-                reason = launch_attempt.error or "harness not configured on the sandbox host"
+                reason = launch_attempt.error or "the sandbox host refused the runner launch"
                 tracker.fail(session_id, reason)
                 _publish_sandbox_status(session_id, "failed", reason)
                 return
@@ -6151,14 +6160,15 @@ async def _persist_host_launch_failure_turn(
     runner_router: RunnerRouter | None,
     *,
     created_by: str | None,
+    error_code: str | None = _HARNESS_NOT_CONFIGURED_ERROR_CODE,
 ) -> str:
     """
     Persist a consumed user message and a host-launch failure error.
 
     Used when a message arrives for a host-bound session whose runner is
-    dead and the host *refuses* to relaunch because the agent's harness
-    isn't configured there (the daemon's structured
-    ``harness_not_configured`` reply). The message is the real
+    dead and the host *refuses* to relaunch with a blocking error code —
+    the agent's harness isn't configured there (``harness_not_configured``)
+    or the daemon's launch handler raised (``host_launch_exception``). The message is the real
     runner-start attempt, so — exactly like a native terminal that can't
     boot (:func:`_persist_native_terminal_failure`) — the server records
     the user's message (so the input is consumed, not silently dropped)
@@ -6181,13 +6191,17 @@ async def _persist_host_launch_failure_turn(
         the parent-wake forward, or ``None`` in in-process / test setups.
     :param created_by: Authenticated posting actor, e.g.
         ``"alice@example.com"``; ``None`` in single-user mode.
+    :param error_code: The host's structured ``error_code``, e.g.
+        ``"harness_not_configured"`` or ``"host_launch_exception"``; used
+        as the error item's code.
     :returns: Store-assigned id of the consumed user message item.
     """
+    is_harness_refusal = error_code in (None, _HARNESS_NOT_CONFIGURED_ERROR_CODE)
     error = ErrorData(
         source="execution",
         # Stable classifier mirroring the host's wire error code, so the
         # web can special-case the banner if it ever wants to.
-        code="harness_not_configured",
+        code=_HARNESS_NOT_CONFIGURED_ERROR_CODE if is_harness_refusal else error_code,
         message=(
             host_error
             if host_error
@@ -6196,6 +6210,8 @@ async def _persist_host_launch_failure_turn(
             # third-party host omits it.
             else (
                 "the agent's harness is not configured on the selected host — run `omnigent setup`"
+                if is_harness_refusal
+                else "the host failed to launch the runner — see the host logs"
             )
         ),
     )
@@ -16177,9 +16193,9 @@ def create_sessions_router(
                         _host_reg,
                         _host_conn,
                     )
-                    if launch_attempt.error_code == _HARNESS_NOT_CONFIGURED_ERROR_CODE:
-                        # The host refused: the agent's harness isn't
-                        # configured there. This message was the real
+                    if launch_attempt.error_code in _BLOCKING_HOST_LAUNCH_ERROR_CODES:
+                        # The host refused: e.g. the agent's harness isn't
+                        # configured there, or the launch handler raised. This message was the real
                         # runner-start attempt, so consume it and record a
                         # transcript error (the host's message names the
                         # fix, `omnigent setup`) the web renders as a
@@ -16194,6 +16210,7 @@ def create_sessions_router(
                             launch_attempt.error,
                             runner_router,
                             created_by=_attribution_user(user_id),
+                            error_code=launch_attempt.error_code,
                         )
                         return {"queued": True, "item_id": item_id}
                     relaunched_runner_id = launch_attempt.runner_id

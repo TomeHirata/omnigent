@@ -602,6 +602,73 @@ async def test_message_relaunch_harness_not_configured_persists_error_turn(
     assert conv.host_id == _HOST_ID
 
 
+async def test_message_relaunch_host_launch_exception_persists_error_turn(
+    client: httpx.AsyncClient,
+    app: FastAPI,
+    db_uri: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A relaunch the host answers with ``host_launch_exception`` fails at once.
+
+    The daemon sends this code when its launch handler raised. It is
+    deterministic, so the server records the error turn immediately
+    instead of waiting out the runner connect timeout and 503ing with a
+    generic ``runner_unavailable``.
+    """
+    from omnigent.runtime import set_runner_client
+    from omnigent.server.routes import sessions as sessions_module
+
+    monkeypatch.setattr(sessions_module, "_HOST_BOUND_RUNNER_CONNECT_GRACE_S", 0.0)
+
+    comm = await _connect_host(app)
+    agent = await create_test_agent(
+        client,
+        executor={"type": "omnigent", "config": {"harness": "codex"}},
+    )
+    create_responder = asyncio.create_task(_serve_one_launch(comm, launch_status="launched"))
+    create_resp = await client.post(
+        "/v1/sessions",
+        json={"agent_id": agent["id"], "host_id": _HOST_ID, "workspace": _WORKSPACE},
+    )
+    await create_responder
+    assert create_resp.status_code == 201, create_resp.text
+    session_id = create_resp.json()["id"]
+
+    host_error = (
+        "host 'test-host' failed to launch the runner (PermissionError) — see the host logs"
+    )
+    set_runner_client(None)
+    relaunch_responder = asyncio.create_task(
+        _serve_one_launch(
+            comm,
+            launch_status="failed",
+            launch_error=host_error,
+            launch_error_code="host_launch_exception",
+        )
+    )
+    try:
+        msg_resp = await client.post(
+            f"/v1/sessions/{session_id}/events",
+            json={
+                "type": "message",
+                "data": {"role": "user", "content": [{"type": "input_text", "text": "hi"}]},
+            },
+        )
+    finally:
+        await relaunch_responder
+        set_runner_client(None)
+
+    assert msg_resp.status_code == 202, (
+        f"expected 202, got {msg_resp.status_code}: {msg_resp.text}"
+    )
+    items = await client.get(f"/v1/sessions/{session_id}/items")
+    assert items.status_code == 200, items.text
+    error_items = [item for item in items.json()["data"] if item.get("type") == "error"]
+    assert len(error_items) == 1, error_items
+    assert error_items[0]["code"] == "host_launch_exception"
+    assert error_items[0]["message"] == host_error
+
+
 @pytest.mark.parametrize(
     "workspace,expected_detail",
     [

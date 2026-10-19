@@ -31,6 +31,11 @@ from typing import Any
 # ``ErrorCode.HARNESS_NOT_CONFIGURED``), and tests.
 HARNESS_NOT_CONFIGURED_ERROR_CODE = "harness_not_configured"
 
+# ``HostLaunchRunnerResultFrame.error_code`` when the launch handler raised
+# unexpectedly. The error message carries only the exception type; details
+# stay in the host log.
+HOST_LAUNCH_EXCEPTION_ERROR_CODE = "host_launch_exception"
+
 
 class HostFrameKind(str, Enum):
     """All host frame kinds; the value is the JSON wire string."""

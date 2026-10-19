@@ -22,6 +22,7 @@ from omnigent.host.connect import (
 )
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
+    HOST_LAUNCH_EXCEPTION_ERROR_CODE,
     HostHelloFrame,
     HostLaunchRunnerFrame,
     HostLaunchRunnerResultFrame,
@@ -220,6 +221,44 @@ async def test_handle_launch_refuses_unconfigured_harness(
     assert result.runner_id is None
     # No runner subprocess may exist after a refusal.
     assert host._runners == {}
+
+
+async def test_dispatch_launch_exception_sends_failed_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Verify an unexpected exception from _handle_launch is answered with a
+    ``failed`` launch result instead of no frame at all.
+
+    If this regresses, the server waits out its launch-result timeout and
+    the turn later fails as a generic runner_failed_to_start, with the
+    real cause only in the host log.
+    """
+    host = _make_host_process()
+
+    async def _raise(frame: HostLaunchRunnerFrame) -> HostLaunchRunnerResultFrame:
+        raise PermissionError(13, "Permission denied", "/secret/path/harness-cli")
+
+    monkeypatch.setattr(host, "_handle_launch", _raise)
+    tunnel = _FakeTunnel()
+    frame = HostLaunchRunnerFrame(
+        request_id="req_boom",
+        binding_token="token_abc",
+        workspace="/tmp",
+    )
+
+    await host._dispatch_host_frame(tunnel, frame)  # type: ignore[arg-type]
+
+    assert len(tunnel.sent) == 1
+    result = decode_host_frame(tunnel.sent[0])
+    assert isinstance(result, HostLaunchRunnerResultFrame)
+    assert result.request_id == "req_boom"
+    assert result.status == "failed"
+    assert result.error_code == HOST_LAUNCH_EXCEPTION_ERROR_CODE
+    assert result.runner_id is None
+    # Names the exception type, but not its (possibly sensitive) message.
+    assert "PermissionError" in (result.error or "")
+    assert "/secret/path" not in (result.error or "")
 
 
 async def test_handle_launch_configured_harness_proceeds_to_spawn(

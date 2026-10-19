@@ -22,6 +22,7 @@ from websockets.exceptions import InvalidStatus, InvalidURI
 
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE,
+    HOST_LAUNCH_EXCEPTION_ERROR_CODE,
     HostCreateWorktreeFrame,
     HostCreateWorktreeResultFrame,
     HostHelloFrame,
@@ -1405,7 +1406,23 @@ class HostProcess:
         :returns: None.
         """
         if isinstance(frame, HostLaunchRunnerFrame):
-            await ws.send(encode_host_frame(await self._handle_launch(frame)))
+            try:
+                result = await self._handle_launch(frame)
+            except Exception as exc:
+                # Always answer the launch: without a result the server
+                # waits out its launch-result timeout and the turn fails
+                # later as a generic "runner not available".
+                _logger.exception("Runner launch failed for request %s", frame.request_id)
+                result = HostLaunchRunnerResultFrame(
+                    request_id=frame.request_id,
+                    status="failed",
+                    error=(
+                        f"host {self._identity.name!r} failed to launch the runner "
+                        f"({type(exc).__name__}) — see the host logs"
+                    ),
+                    error_code=HOST_LAUNCH_EXCEPTION_ERROR_CODE,
+                )
+            await ws.send(encode_host_frame(result))
         elif isinstance(frame, HostStopRunnerFrame):
             await ws.send(encode_host_frame(self._handle_stop(frame)))
         elif isinstance(frame, HostStatFrame):
