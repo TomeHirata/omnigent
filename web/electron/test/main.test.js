@@ -2237,6 +2237,8 @@ describe("browser permission wiring", () => {
         if (!sessions.has(partition)) {
           const ses = {
             installs: [],
+            lookups: [],
+            dns: { ...dns },
             setPermissionRequestHandler() {},
             setPermissionCheckHandler() {},
             webRequest: {
@@ -2244,9 +2246,12 @@ describe("browser permission wiring", () => {
               onBeforeSendHeaders: (filter, fn) => ses.installs.push(["sendHeaders", filter, fn]),
               onHeadersReceived: (filter, fn) => ses.installs.push(["headers", filter, fn]),
             },
-            resolveHost: async (host) => ({
-              endpoints: dns[host] ? [{ address: dns[host], family: "ipv4" }] : [],
-            }),
+            resolveHost: async (host) => {
+              ses.lookups.push(host);
+              return {
+                endpoints: ses.dns[host] ? [{ address: ses.dns[host], family: "ipv4" }] : [],
+              };
+            },
             resolveProxy: async () => "DIRECT",
           };
           sessions.set(partition, ses);
@@ -2282,10 +2287,10 @@ describe("browser permission wiring", () => {
         "installed once per partition, for document requests only",
       );
       // Round-trip through JSON so objects from main.js's vm realm compare.
-      const decide = (kind, details) =>
+      const decide = (kind, details, session = ses, view = agent) =>
         new Promise((resolve) => {
-          const [, , fn] = ses.installs.find(([k]) => k === kind);
-          fn({ webContentsId: agent.id, ...details }, (response) =>
+          const [, , fn] = session.installs.find(([k]) => k === kind);
+          fn({ webContentsId: view.id, ...details }, (response) =>
             resolve(JSON.parse(JSON.stringify(response))),
           );
         });
@@ -2308,6 +2313,40 @@ describe("browser permission wiring", () => {
       );
       const firstHop = await registry.checkAgentNavigation("conv", "http://lvh.me:8899/", null);
       assert.equal(firstHop.ok, false, "the IPC first hop resolves through the same session");
+      const otherAgent = registry.openOrNavigate("other-conv", "https://example.com/", undefined, {
+        agent: true,
+      }).entry.view.webContents;
+      assert.notEqual(partitions[2], partitions[0], "conversations use independent partitions");
+      const otherSession = sessions.get(partitions[2]);
+      assert.notEqual(otherSession, ses);
+      assert.deepEqual(
+        otherSession.installs.map(([kind, filter]) => [kind, [...filter.types]]),
+        ses.installs.map(([kind, filter]) => [kind, [...filter.types]]),
+        "each independent session receives all document hooks",
+      );
+      otherSession.dns["example.com"] = "127.0.0.1";
+      ses.lookups.length = 0;
+      otherSession.lookups.length = 0;
+      assert.deepEqual(await decide("request", { url: next }, otherSession, otherAgent), {
+        cancel: true,
+      });
+      assert.deepEqual(otherSession.lookups, ["example.com"]);
+      assert.deepEqual(ses.lookups, [], "the second session never resolves through the first");
+      assert.deepEqual(await decide("request", { url: next }), { cancel: false });
+      assert.deepEqual(ses.lookups, ["example.com"]);
+      assert.deepEqual(
+        otherSession.lookups,
+        ["example.com"],
+        "the first session stays independent",
+      );
+      assert.deepEqual(
+        await decide("sendHeaders", { url: next, requestHeaders: {} }, otherSession, otherAgent),
+        { requestHeaders: { "Cache-Control": "no-cache" } },
+      );
+      assert.deepEqual(
+        await decide("headers", { url: next, ip: "127.0.0.1" }, otherSession, otherAgent),
+        { cancel: true },
+      );
     } finally {
       h.cleanup();
     }

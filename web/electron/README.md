@@ -629,7 +629,9 @@ against its local Chromium, and the result is posted back.
   does not resolve or any address is non-public. `main.js` also applies the
   policy to every document request (frames, `<object>`/`<embed>`) of an
   agent-locked view through `webRequest`, covering redirects and in-place
-  window opens. Those requests skip HTTP-cache reads so every response reports
+  window opens. Scripts, images, fetch/XHR, and WebSockets are outside this
+  guard and continue through Chromium's Local Network Access controls.
+  Those requests skip HTTP-cache reads so every response reports
   the address Chromium connected to, and a response whose address is missing
   or non-public (a DNS answer that changed after the check) is cancelled,
   unless that address belongs to a configured proxy. Limits: that response

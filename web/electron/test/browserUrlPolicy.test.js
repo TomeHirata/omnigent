@@ -29,6 +29,8 @@ describe("browserUrlPolicy — agent navigation allowlist", () => {
     }
     for (const url of [
       "http://app.localhost",
+      "http://[::ffff:127.0.0.1]:5173/",
+      "http://[::127.0.0.1]/",
       "http://127.2.3.4",
       "http://0.0.0.0",
       "http://[::]",
@@ -86,6 +88,8 @@ describe("browserUrlPolicy — agent navigation allowlist", () => {
       "http://localhost/",
       "http://localhost:6767/health",
       "http://app.localhost/",
+      "http://localhost./",
+      "http://app.localhost./",
       "http://127.0.0.1/",
       "http://127.0.0.1:8080/admin",
       "http://127.5.6.7/",
@@ -202,18 +206,6 @@ describe("browserUrlPolicy — agent navigation allowlist", () => {
       "http://[64:ff9b::8.8.8.8]/", // NAT64 to a public IPv4
     ]) {
       assert.equal(isAgentNavigationAllowed(url).ok, true, `expected allow: ${url}`);
-    }
-  });
-
-  it("blocks localhost names written with a trailing dot", () => {
-    for (const url of ["http://localhost./", "http://app.localhost./"]) {
-      assert.equal(isAgentNavigationAllowed(url).ok, false, url);
-    }
-  });
-
-  it("keeps the Arca loopback exception to its exact hosts", () => {
-    for (const url of ["http://[::ffff:127.0.0.1]:5173/", "http://[::127.0.0.1]/"]) {
-      assert.equal(isAgentNavigationAllowed(url, { allowLocalhost: true }).ok, false, url);
     }
   });
 });
