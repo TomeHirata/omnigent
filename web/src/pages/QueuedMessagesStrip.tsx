@@ -115,7 +115,7 @@ function QueuedRow({
         // WebKit's long-press text selection and callout cancel the touch
         // gesture dnd-kit's TouchSensor relies on, so suppress them on the row.
         "relative flex min-w-0 items-center gap-1 py-0.5 text-sm text-foreground select-none [-webkit-touch-callout:none]",
-        isDragging && "z-10 rounded-md bg-muted opacity-80 shadow-md",
+        isDragging && "z-10 rounded-md bg-background shadow-md ring-1 ring-border",
         isOver &&
           !isDragging &&
           "after:absolute after:inset-x-0 after:-bottom-0.5 after:h-0.5 after:rounded-full after:bg-muted-foreground/60",
