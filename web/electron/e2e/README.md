@@ -159,7 +159,9 @@ alias, and a trusted localhost preview twice. The public and preview response
 assertions check connected addresses and view IDs; the HSTS assertions check
 Chromium’s HTTP-to-HTTPS redirect metadata and final URL. Internal-resolving
 iframe and object destinations must be classified as `subFrame` and `object`,
-attributed to the preview view, and cancelled through production request hooks. A main-only
+attributed to the preview view, and cancelled through production request hooks.
+A main-frame redirect and page-created `window.open` to that alias must also
+retain the owning view ID and be cancelled. A main-only
 fixture bypasses preflight for one local request to isolate response cancellation;
 its real network metadata must trigger the production response guard. Preview
 eligibility is supplied by the main-only fixture rather than live Arca enrollment.

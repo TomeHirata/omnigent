@@ -28,6 +28,13 @@ it(
       fs.mkdtempSync(path.join(os.tmpdir(), "omni-navigation-recordings-"));
     const evidence = {};
     const fixture = http.createServer((req, res) => {
+      if (req.url === "/redirect") {
+        res.writeHead(302, {
+          Location: `http://lvh.me:${fixture.address().port}/embedded?kind=redirect`,
+        });
+        res.end();
+        return;
+      }
       res.setHeader("Cache-Control", "public, max-age=3600");
       res.setHeader("ETag", '"preview-v1"');
       if (req.headers["if-none-match"] === '"preview-v1"') {
@@ -202,9 +209,10 @@ it(
 
       await phase("Embedded documents: refuse internal iframe and object destinations.");
       const embeddedUrl = `http://lvh.me:${fixture.address().port}/embedded`;
-      evidence.embedded = await electronApp.evaluate(async (_electron, url) => {
-        const entry = global.omnigentTestBrowserRegistries[0].get("preview-fixture");
-        await entry.view.webContents.executeJavaScript(`
+      evidence.embedded = await electronApp.evaluate(
+        async (_electron, { url, previewUrl }) => {
+          const entry = global.omnigentTestBrowserRegistries[0].get("preview-fixture");
+          await entry.view.webContents.executeJavaScript(`
           for (const tag of ["iframe", "object"]) {
             const element = document.createElement(tag);
             if (tag === "object") {
@@ -217,22 +225,39 @@ it(
           }
           void 0;
         `);
-        const deadline = Date.now() + 10000;
-        return new Promise((resolve) => {
-          const check = () => {
-            const requests = global.navigationRequests.filter((event) => event.url.startsWith(url));
-            if (requests.length >= 2 || Date.now() >= deadline) {
-              resolve(requests);
-            } else {
-              setTimeout(check, 50);
-            }
+          const waitForRequests = (count) => {
+            const deadline = Date.now() + 10000;
+            return new Promise((resolve) => {
+              const check = () => {
+                const requests = global.navigationRequests.filter((event) =>
+                  event.url.startsWith(url),
+                );
+                if (requests.length >= count || Date.now() >= deadline) {
+                  resolve(requests);
+                } else {
+                  setTimeout(check, 50);
+                }
+              };
+              check();
+            });
           };
-          check();
-        });
-      }, embeddedUrl);
+          await waitForRequests(2);
+          await entry.view.webContents.executeJavaScript(
+            "location.href = " + JSON.stringify(previewUrl + "redirect") + "; void 0;",
+          );
+          await waitForRequests(3);
+          await entry.view.webContents.executeJavaScript(
+            "window.open(" + JSON.stringify(url + "?kind=window-open") + "); void 0;",
+          );
+          return waitForRequests(4);
+        },
+        { url: embeddedUrl, previewUrl: localUrl },
+      );
       for (const [tag, resourceType] of [
         ["iframe", "subFrame"],
         ["object", "object"],
+        ["redirect", "mainFrame"],
+        ["window-open", "mainFrame"],
       ]) {
         assert.ok(
           evidence.embedded.some(
@@ -277,7 +302,7 @@ it(
       }
       assert.ok(
         responses
-          .filter((event) => event.webContentsId === preview.id)
+          .filter((event) => event.webContentsId === preview.id && event.url === localUrl)
           .every((event) => event.statusCode === 200),
         JSON.stringify(responses),
       );

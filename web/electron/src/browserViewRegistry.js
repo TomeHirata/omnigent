@@ -92,6 +92,13 @@ function createBrowserViewRegistry({
   partitionScope = `w${++registrySeq}`,
 } = {}) {
   const entries = new Map(); // conversationId -> BrowserViewEntry
+  const pendingNavigations = new Map();
+
+  function beginAgentNavigation(conversationId) {
+    const generation = Symbol();
+    pendingNavigations.set(conversationId, generation);
+    return () => pendingNavigations.get(conversationId) === generation;
+  }
   let activeConversationId = null;
   // When true, the active view is hidden in place (setVisible(false)) so DOM
   // overlays (dialogs, menus, tooltips, toasts) aren't covered by the native
@@ -597,6 +604,7 @@ function createBrowserViewRegistry({
   }
 
   function close(conversationId, reason) {
+    pendingNavigations.delete(conversationId);
     const entry = entries.get(conversationId);
     if (!entry) return { ok: true, removed: false };
     cancelRecentSessionInput(entry, true);
@@ -641,6 +649,7 @@ function createBrowserViewRegistry({
   }
 
   function closeAll(reason) {
+    pendingNavigations.clear();
     for (const conversationId of [...entries.keys()]) {
       close(conversationId, reason);
     }
@@ -651,6 +660,7 @@ function createBrowserViewRegistry({
     get,
     getOrCreate,
     openOrNavigate,
+    beginAgentNavigation,
     checkAgentNavigation: checkAgentNavigationFor,
     shouldCancelAgentRequest,
     agentRequestHeaders,

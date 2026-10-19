@@ -44,6 +44,64 @@ function makeIpcMain() {
 
 const allowAgentNavigation = async () => ({ ok: true });
 
+describe("browser IPC pending navigation lifecycle", () => {
+  for (const action of ["supersede", "close", "closeAll", "recovery teardown"]) {
+    it(`drops pending DNS after ${action}`, async () => {
+      const { createBrowserViewRegistry } = require("../src/browserViewRegistry");
+      const registry = createBrowserViewRegistry();
+      const deferred = Promise.withResolvers();
+      const opened = [];
+      let checks = 0;
+      registry.checkAgentNavigation = () => {
+        checks++;
+        return checks === 1 ? deferred.promise : Promise.resolve({ ok: true });
+      };
+      registry.openOrNavigate = (_id, url) => {
+        opened.push(url);
+        return { ok: true, created: false };
+      };
+      const ipcMain = makeIpcMain();
+      let recoveries = 0;
+      registerBrowserIpc({
+        ipcMain,
+        isPinnedOriginSender: () => true,
+        getRegistryForEvent: () => registry,
+        recoverAgentNavigationForEvent: async () => {
+          recoveries++;
+          registry.closeAll();
+          return true;
+        },
+      });
+      const navigate = (url) =>
+        ipcMain.invoke(
+          "omnigent:browser-open-or-navigate",
+          {},
+          {
+            conversationId: "conv",
+            url,
+            opts: { agent: true },
+          },
+        );
+      const first = navigate("https://first.example/");
+      if (action === "supersede") {
+        assert.equal((await navigate("https://second.example/")).ok, true);
+      } else if (action === "close") {
+        registry.close("conv");
+      } else if (action === "closeAll") {
+        registry.closeAll();
+      }
+      deferred.resolve(
+        action === "recovery teardown" ? { ok: false, error: "blocked" } : { ok: true },
+      );
+      const result = await first;
+      assert.equal(result.ok, false);
+      assert.match(result.error, /superseded or closed/);
+      assert.deepEqual(opened, action === "supersede" ? ["https://second.example/"] : []);
+      assert.equal(recoveries, action === "recovery teardown" ? 1 : 0);
+    });
+  }
+});
+
 describe("browser IPC Arca context", () => {
   it("adds a main-owned recovery hint only to a denied agent navigation", async () => {
     const ipcMain = makeIpcMain();
@@ -53,6 +111,7 @@ describe("browser IPC Arca context", () => {
       ipcMain,
       isPinnedOriginSender: () => true,
       getRegistryForEvent: () => ({
+        beginAgentNavigation: () => () => true,
         checkAgentNavigation: allowAgentNavigation,
         openOrNavigate: () => ({ ok: allowed, error: allowed ? undefined : "blocked" }),
       }),
@@ -80,21 +139,23 @@ describe("browser IPC Arca context", () => {
     let navigations = 0;
     let recoveries = 0;
     const calls = [];
+    const registry = {
+      beginAgentNavigation: () => () => true,
+      checkAgentNavigation: async () => {
+        calls.push(allowed ? "allowed" : "denied");
+        return allowed ? { ok: true } : { ok: false, error: "blocked" };
+      },
+      openOrNavigate: () => {
+        calls.push("navigate");
+        navigations++;
+        assert.equal(allowed, true);
+        return { ok: true, created: false };
+      },
+    };
     registerBrowserIpc({
       ipcMain,
       isPinnedOriginSender: () => true,
-      getRegistryForEvent: () => ({
-        checkAgentNavigation: async () => {
-          calls.push(allowed ? "allowed" : "denied");
-          return allowed ? { ok: true } : { ok: false, error: "blocked" };
-        },
-        openOrNavigate: () => {
-          calls.push("navigate");
-          navigations++;
-          assert.equal(allowed, true);
-          return { ok: true, created: false };
-        },
-      }),
+      getRegistryForEvent: () => registry,
       recoverAgentNavigationForEvent: async (
         _event,
         url,
@@ -142,6 +203,7 @@ describe("browser IPC Arca context", () => {
       ipcMain,
       isPinnedOriginSender: () => true,
       getRegistryForEvent: () => ({
+        beginAgentNavigation: () => () => true,
         checkAgentNavigation: allowAgentNavigation,
         openOrNavigate: () => {
           navigations++;
@@ -174,6 +236,7 @@ describe("browser IPC Arca context", () => {
       ipcMain,
       isPinnedOriginSender: () => true,
       getRegistryForEvent: () => ({
+        beginAgentNavigation: () => () => true,
         checkAgentNavigation: allowAgentNavigation,
         openOrNavigate: () => ({ ok: false, error: "blocked", created: false }),
       }),
@@ -198,10 +261,12 @@ describe("browser IPC Arca context", () => {
     const ipcMain = makeIpcMain();
     let registryCalls = 0;
     const first = {
+      beginAgentNavigation: () => () => true,
       checkAgentNavigation: allowAgentNavigation,
       openOrNavigate: () => ({ ok: false, error: "blocked" }),
     };
     const second = {
+      beginAgentNavigation: () => () => true,
       checkAgentNavigation: allowAgentNavigation,
       openOrNavigate: () => ({ ok: true, created: false }),
     };
@@ -221,7 +286,8 @@ describe("browser IPC Arca context", () => {
         opts: { agent: true, sourceHostId: "arca-host", rememberedArcaHostId: "arca-host" },
       },
     );
-    assert.equal(result.ok, true);
+    assert.equal(result.ok, false);
+    assert.match(result.error, /superseded or closed/);
     assert.equal(registryCalls, 2);
   });
 
@@ -234,6 +300,7 @@ describe("browser IPC Arca context", () => {
       ipcMain,
       isPinnedOriginSender: () => true,
       getRegistryForEvent: () => ({
+        beginAgentNavigation: () => () => true,
         checkAgentNavigation: async (...args) => {
           checks.push(args);
           return { ok: true };
@@ -276,6 +343,7 @@ describe("browser IPC Arca context", () => {
       ipcMain,
       isPinnedOriginSender: () => true,
       getRegistryForEvent: () => ({
+        beginAgentNavigation: () => () => true,
         checkAgentNavigation: async (_id, url) => {
           checked.push(url);
           return url.includes("lvh.me")
@@ -377,6 +445,7 @@ function makeRegistry(conversationId, webContents) {
   return {
     get: (id) => entries.get(id) ?? null,
     has: (id) => entries.has(id),
+    beginAgentNavigation: () => () => true,
     checkAgentNavigation: allowAgentNavigation,
     openOrNavigate: (id) => {
       const wc = makeWebContents();
@@ -915,6 +984,7 @@ it("applies navigation policy even when renderer options claim user intent", asy
       ipcMain,
       isPinnedOriginSender: () => true,
       getRegistryForEvent: () => ({
+        beginAgentNavigation: () => () => true,
         checkAgentNavigation: allowAgentNavigation,
         openOrNavigate: (...args) => {
           calls.push(args);
