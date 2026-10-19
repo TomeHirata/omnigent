@@ -393,6 +393,51 @@ describe("QueuedMessagesStrip", () => {
     await waitFor(() => expect(onReorder).toHaveBeenCalledWith("q_1", "q_3"));
   });
 
+  it("reorders on a touch long-press drag and keeps WebKit's long-press UI off the rows", async () => {
+    const onReorder = vi.fn();
+    render(
+      <QueuedMessagesStrip
+        messages={[msg("q_1", "first"), msg("q_2", "second")]}
+        onDelete={vi.fn()}
+        onEdit={vi.fn()}
+        onReorder={onReorder}
+      />,
+    );
+    const rows = screen.getAllByRole("listitem");
+    const handles = screen.getAllByRole("button", { name: "Reorder queued message" });
+    for (const row of rows) {
+      expect(row).toHaveClass("select-none", "[-webkit-touch-callout:none]");
+    }
+    const rect = (top: number) =>
+      ({
+        x: 0,
+        y: top,
+        top,
+        right: 300,
+        bottom: top + 44,
+        left: 0,
+        width: 300,
+        height: 44,
+        toJSON: () => ({}),
+      }) as DOMRect;
+    rows.forEach((row, index) =>
+      vi.spyOn(row, "getBoundingClientRect").mockReturnValue(rect(index * 48)),
+    );
+
+    const touch = (y: number) => ({ clientX: 20, clientY: y });
+    fireEvent.touchStart(handles[1]!, { touches: [touch(70)] });
+    // Hold past the TouchSensor's 250ms delay before moving.
+    await waitFor(() => expect(handles[1]).toHaveAttribute("aria-pressed", "true"), {
+      timeout: 1000,
+    });
+    fireEvent.touchMove(handles[1]!, { touches: [touch(40)] });
+    fireEvent.touchMove(handles[1]!, { touches: [touch(20)] });
+    await waitFor(() => expect(rows[1]!.style.transform).toBe("translate3d(0, -50px, 0)"));
+    fireEvent.touchEnd(handles[1]!, { changedTouches: [touch(20)] });
+
+    await waitFor(() => expect(onReorder).toHaveBeenCalledWith("q_2", "q_1"));
+  });
+
   it("caps and scrolls a long backlog instead of growing the composer stack", () => {
     render(
       <QueuedMessagesStrip
