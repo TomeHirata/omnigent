@@ -23,7 +23,10 @@ it(
   },
   async () => {
     const scratch = fs.mkdtempSync(path.join(os.tmpdir(), "omni-navigation-"));
-    const recordDir = process.env.OMNIGENT_DESKTOP_RECORD_DIR || path.join(scratch, "recordings");
+    const recordDir =
+      process.env.OMNIGENT_DESKTOP_RECORD_DIR ||
+      fs.mkdtempSync(path.join(os.tmpdir(), "omni-navigation-recordings-"));
+    const evidence = {};
     const fixture = http.createServer((req, res) => {
       res.setHeader("Cache-Control", "public, max-age=3600");
       res.setHeader("ETag", '"preview-v1"');
@@ -50,6 +53,7 @@ it(
     const mod = require(${JSON.stringify(modulePath)});
     const create = mod.createBrowserViewRegistry;
     global.navigationResponses = [];
+    global.navigationRedirects = [];
     mod.createBrowserViewRegistry = (opts) => {
       const registry = create({ ...opts,
         isArcaAgentContext: (context) => context?.trustedPreviewFixture === true,
@@ -109,6 +113,21 @@ it(
             entry.agentNavLocked = true;
             entry.agentContext = context;
             registry.setActive(args.id);
+            if (args.id === "hsts-fixture") {
+              entry.view.webContents.session.webRequest.onBeforeRedirect(
+                { urls: ["*://hsts.badssl.com/*"] },
+                ({ url: sourceUrl, redirectURL, statusCode, statusLine, responseHeaders, ip }) => {
+                  global.navigationRedirects.push({
+                    url: sourceUrl,
+                    redirectURL,
+                    statusCode,
+                    statusLine,
+                    responseHeaders,
+                    ip,
+                  });
+                },
+              );
+            }
             await Promise.race([
               entry.view.webContents.loadURL(args.url),
               new Promise((_, reject) => {
@@ -127,6 +146,7 @@ it(
               ok: true,
               id: entry.view.webContents.id,
               title: entry.view.webContents.getTitle(),
+              url: entry.view.webContents.getURL(),
             };
           },
           { id, url, preview },
@@ -134,17 +154,41 @@ it(
 
       await phase("1. Public navigation through the production document guards");
       const publicPage = await navigate("public-fixture", "https://example.com/");
+      evidence.publicPage = publicPage;
       assert.equal(publicPage.ok, true, publicPage.error);
       assert.match(publicPage.title, /Example Domain/);
       await phase("Public page loaded. Repeating the navigation checks the cache path.");
       assert.equal((await navigate("public-fixture", "https://example.com/")).ok, true);
 
+      await phase("HSTS: learn the HTTPS policy, then navigate to the HTTP URL.");
+      evidence.hstsSecure = await navigate("hsts-fixture", "https://hsts.badssl.com/");
+      assert.equal(evidence.hstsSecure.ok, true, evidence.hstsSecure.error);
+      evidence.hstsUpgrade = await navigate("hsts-fixture", "http://hsts.badssl.com/");
+      assert.equal(evidence.hstsUpgrade.ok, true, evidence.hstsUpgrade.error);
+      assert.equal(evidence.hstsUpgrade.url, "https://hsts.badssl.com/");
+      const redirects = await electronApp.evaluate(() => global.navigationRedirects);
+      assert.ok(
+        redirects.some(
+          (event) =>
+            event.url === "http://hsts.badssl.com/" &&
+            event.redirectURL === "https://hsts.badssl.com/" &&
+            event.statusCode === 307 &&
+            Object.entries(event.responseHeaders).some(
+              ([name, values]) =>
+                name.toLowerCase() === "non-authoritative-reason" && values.includes("HSTS"),
+            ),
+        ),
+        JSON.stringify(redirects),
+      );
+
       const denied = await navigate("alias-fixture", `http://lvh.me:${fixture.address().port}/`);
+      evidence.denied = denied;
       assert.equal(denied.ok, false);
       assert.match(denied.error, /navigation blocked/);
       await phase("2. Loopback alias refused: navigation blocked");
 
       const preview = await navigate("preview-fixture", localUrl, true);
+      evidence.preview = preview;
       assert.equal(preview.ok, true, preview.error);
       await phase(
         "3. Trusted localhost preview loaded. Fetching the document again with the cache guard.",
@@ -169,6 +213,7 @@ it(
           return { cancelled: true, error: String(error), id: entry.view.webContents.id };
         }
       }, localUrl);
+      evidence.cancellation = cancellation;
       assert.equal(cancellation.cancelled, true);
       const responses = await electronApp.evaluate(() => global.navigationResponses);
       for (const id of [publicPage.id, preview.id]) {
@@ -190,22 +235,41 @@ it(
           (event) => event.webContentsId === cancellation.id && event.ip && event.cancel,
         ),
       );
-      fs.writeFileSync(
-        path.join(recordDir, "network-evidence.json"),
-        JSON.stringify({ publicPage, denied, preview, cancellation, responses }, null, 2),
-      );
       await phase("Verified: public pages load, internal responses cancel, trusted previews work.");
     } finally {
       if (desktop) {
-        await desktop.electronApp.close();
-        await desktop.stopDisplayCapture();
-        console.log(saveRecording(recordDir, "navigation-policy"));
+        try {
+          Object.assign(
+            evidence,
+            await desktop.electronApp.evaluate(() => ({
+              responses: global.navigationResponses,
+              redirects: global.navigationRedirects,
+            })),
+          );
+        } catch (error) {
+          evidence.captureError = String(error);
+        }
       }
-      if (server) await server.close();
-      fixture.closeAllConnections();
-      await new Promise((resolve) => {
-        fixture.close(resolve);
-      });
+      fs.mkdirSync(recordDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(recordDir, "network-evidence.json"),
+        JSON.stringify(evidence, null, 2),
+      );
+      try {
+        if (desktop) {
+          await desktop.electronApp.close();
+          await desktop.stopDisplayCapture();
+          console.log(saveRecording(recordDir, "navigation-policy"));
+          fs.rmSync(desktop.userDataDir, { recursive: true, force: true });
+        }
+      } finally {
+        if (server) await server.close();
+        fixture.closeAllConnections();
+        await new Promise((resolve) => {
+          fixture.close(resolve);
+        });
+        fs.rmSync(scratch, { recursive: true, force: true });
+      }
     }
   },
 );

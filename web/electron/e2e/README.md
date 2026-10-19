@@ -153,14 +153,15 @@ Actual Size, then collapse/reopen the sidebar and open Settings.
 ## Navigation policy runtime boundary
 
 `desktop_navigation_policy.e2e.js` uses the production partition hooks in a real
-Electron process. It checks public HTTPS navigation twice, a refused loopback
+Electron process. It checks public HTTPS navigation twice, an HSTS HTTP-to-HTTPS
+upgrade after learning a real server policy, a refused loopback
 alias, and a trusted localhost preview twice, asserting that each document
 response carries a connected address and the correct view ID. A main-only
 fixture bypasses preflight for one local request to isolate response cancellation;
 its real network metadata must trigger the production response guard. Preview
 eligibility is supplied by the main-only fixture rather than live Arca enrollment.
-The test requires outbound HTTPS access to `example.com` and public DNS resolution
-of `lvh.me` to loopback. Repeated local-fixture loads must report HTTP 200 because
+The test requires outbound HTTPS access to `example.com` and `hsts.badssl.com`,
+and public DNS resolution of `lvh.me` to loopback. Repeated local-fixture loads must report HTTP 200 because
 the document guard skips cache reads.
 
 Run with the prerequisites above:
@@ -170,6 +171,8 @@ OMNIGENT_DESKTOP_RECORD_DIR=/absolute/path/outside/repo \
   OMNIGENT_PW_NO_SANDBOX=1 xvfb-run -a node --test e2e/desktop_navigation_policy.e2e.js
 ```
 
-The recording and `network-evidence.json` are retained together. Renderer
+The recording and `network-evidence.json` are retained together, including partial
+network evidence when an assertion fails. Temporary server fixtures and the desktop
+profile are removed separately from the recording directory. Renderer
 URL-bar navigation also passes through the policy; it has no local-network
 opt-out.
