@@ -630,7 +630,8 @@ against its local Chromium, and the result is posted back.
   policy to every document request (frames, `<object>`/`<embed>`) of an
   agent-locked view through `webRequest`, covering redirects and in-place
   window opens. Scripts, images, fetch/XHR, and WebSockets are outside this
-  guard and continue through Chromium's Local Network Access controls.
+  guard and can still reach internal addresses; Electron 42 does not enforce
+  Chromium's Local Network Access checks here.
   Those requests skip HTTP-cache reads so every response reports
   the address Chromium connected to, and a response whose address is missing
   or non-public (a DNS answer that changed after the check) is cancelled,

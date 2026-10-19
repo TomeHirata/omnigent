@@ -292,8 +292,11 @@ it(
       evidence.cancellation = cancellation;
       assert.equal(cancellation.cancelled, true);
       const responses = await electronApp.evaluate(() => global.navigationResponses);
-      for (const id of [publicPage.id, preview.id]) {
-        const events = responses.filter((event) => event.webContentsId === id);
+      for (const [id, url] of [
+        [publicPage.id, "https://example.com/"],
+        [preview.id, localUrl],
+      ]) {
+        const events = responses.filter((event) => event.webContentsId === id && event.url === url);
         assert.ok(events.length >= 2, JSON.stringify(responses));
         assert.ok(
           events.every((event) => event.ip && !event.cancel),

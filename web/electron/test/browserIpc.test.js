@@ -45,7 +45,13 @@ function makeIpcMain() {
 const allowAgentNavigation = async () => ({ ok: true });
 
 describe("browser IPC pending navigation lifecycle", () => {
-  for (const action of ["supersede", "close", "closeAll", "recovery teardown"]) {
+  for (const action of [
+    "supersede",
+    "close",
+    "closeAll",
+    "recovery teardown",
+    "sender trust revoked",
+  ]) {
     it(`drops pending DNS after ${action}`, async () => {
       const { createBrowserViewRegistry } = require("../src/browserViewRegistry");
       const registry = createBrowserViewRegistry();
@@ -62,9 +68,10 @@ describe("browser IPC pending navigation lifecycle", () => {
       };
       const ipcMain = makeIpcMain();
       let recoveries = 0;
+      let trusted = true;
       registerBrowserIpc({
         ipcMain,
-        isPinnedOriginSender: () => true,
+        isPinnedOriginSender: () => trusted,
         getRegistryForEvent: () => registry,
         recoverAgentNavigationForEvent: async () => {
           recoveries++;
@@ -89,6 +96,8 @@ describe("browser IPC pending navigation lifecycle", () => {
         registry.close("conv");
       } else if (action === "closeAll") {
         registry.closeAll();
+      } else if (action === "sender trust revoked") {
+        trusted = false;
       }
       deferred.resolve(
         action === "recovery teardown" ? { ok: false, error: "blocked" } : { ok: true },
