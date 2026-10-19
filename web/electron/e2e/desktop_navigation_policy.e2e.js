@@ -218,12 +218,17 @@ it(
           void 0;
         `);
         const deadline = Date.now() + 10000;
-        while (Date.now() < deadline) {
-          const requests = global.navigationRequests.filter((event) => event.url.startsWith(url));
-          if (requests.length >= 2) return requests;
-          await new Promise((resolve) => setTimeout(resolve, 50));
-        }
-        return global.navigationRequests.filter((event) => event.url.startsWith(url));
+        return new Promise((resolve) => {
+          const check = () => {
+            const requests = global.navigationRequests.filter((event) => event.url.startsWith(url));
+            if (requests.length >= 2 || Date.now() >= deadline) {
+              resolve(requests);
+            } else {
+              setTimeout(check, 50);
+            }
+          };
+          check();
+        });
       }, embeddedUrl);
       for (const [tag, resourceType] of [
         ["iframe", "subFrame"],
