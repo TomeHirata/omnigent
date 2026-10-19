@@ -149,3 +149,24 @@ Actual Size, then collapse/reopen the sidebar and open Settings.
    footage. Use `saveRecording(RECORD_DIR, "before-<facet>")` (or
    `fixed-<facet>`), then write the journey `caption` for the handoff exactly as
    the other lanes do (see `dev/repro-agent/AGENTS.md`, Step 4).
+
+## Navigation policy runtime boundary
+
+`desktop_navigation_policy.e2e.js` uses the production partition hooks in a real
+Electron process. It checks public HTTPS navigation twice, a refused loopback
+alias, and a trusted localhost preview twice, asserting that each document
+response carries a connected address and the correct view ID. A main-only
+fixture bypasses preflight for one local request to isolate response cancellation;
+its real network metadata must trigger the production response guard. Preview
+eligibility is supplied by the main-only fixture rather than live Arca enrollment.
+
+Run with the prerequisites above:
+
+```sh
+OMNIGENT_DESKTOP_RECORD_DIR=/absolute/path/outside/repo \
+  OMNIGENT_PW_NO_SANDBOX=1 xvfb-run -a node --test e2e/desktop_navigation_policy.e2e.js
+```
+
+The recording and `network-evidence.json` are retained together. Renderer
+URL-bar navigation also passes through the policy; it has no local-network
+opt-out.

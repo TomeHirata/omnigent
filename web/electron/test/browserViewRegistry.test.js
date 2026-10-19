@@ -656,17 +656,8 @@ describe("browserViewRegistry — network-layer agent guard (DNS + connected add
         url: "http://rebind.example/",
         ip,
       });
-    // The proxy's IP is accepted whether or not the proxy carried the request
-    // (see the documented limit below); a DIRECT fallback to loopback is not.
+    // The endpoint metadata cannot distinguish this direct connection from the configured proxy.
     assert.deepEqual(await Promise.all(["10.0.0.2", "127.0.0.1"].map(response)), [false, true]);
-  });
-
-  it("accepts a DIRECT connection to another port on the proxy's IP (documented limit)", async () => {
-    // webRequest reports no port and no proxy use, so a DIRECT fallback to
-    // 10.0.0.2:8080 is indistinguishable from the proxy at 10.0.0.2:3128. The
-    // gap is documented on isProxyAddress and in the README; failing closed
-    // would block agent browsing through internal proxies with a DIRECT fallback.
-    const { registry, idOf } = makeNetworkGuardRegistry({ proxy: "PROXY proxy.corp:3128; DIRECT" });
     registry.openOrNavigate("conv_1", "http://rebind.example:8080/", undefined, { agent: true });
     const cancel = await registry.shouldCancelAgentResponse({
       webContentsId: idOf("conv_1"),

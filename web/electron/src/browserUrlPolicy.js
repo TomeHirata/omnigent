@@ -43,7 +43,8 @@ function parseIpv4(host) {
  * payload targets (metadata 169.254.169.254, loopback, internal hosts). Mirrors
  * `omnigent/util/ssrf.py`, but deliberately stricter on blocks that are never
  * web destinations: all of 192.0.0.0/24 (Python exempts the .9/.10 anycast
- * services), and on the IPv6 side ::/96, fec0::/10 and 3fff::/20.
+ * services), and on the IPv6 side ::/96, fec0::/10, 2001::/23 (including
+ * Python's global exceptions), and 3fff::/20.
  *
  * @param {[number, number, number, number]} octets
  */

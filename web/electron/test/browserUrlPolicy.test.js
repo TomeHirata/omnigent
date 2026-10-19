@@ -182,6 +182,10 @@ describe("browserUrlPolicy — agent navigation allowlist", () => {
   });
 
   it("allows public IPv4 and IPv6 literals next to the blocked ranges", () => {
+    // Protocol-assignment exceptions remain conservatively excluded.
+    for (const host of ["2001:3::1", "2001:4:112::1"]) {
+      assert.equal(isAgentNavigationAllowed(`http://[${host}]/`).ok, false, host);
+    }
     for (const url of [
       "http://8.8.8.8/",
       "http://100.63.255.255/",
