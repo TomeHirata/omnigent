@@ -90,12 +90,6 @@ from omnigent.host.frames import (
 from omnigent.host.frames import (
     HOST_LAUNCH_EXCEPTION_ERROR_CODE as _HOST_LAUNCH_EXCEPTION_ERROR_CODE,
 )
-
-# Host launch refusals that a retry or a longer wait can't fix, so the
-# server fails at once instead of waiting out the runner connect timeout.
-_BLOCKING_HOST_LAUNCH_ERROR_CODES = frozenset(
-    {_HARNESS_NOT_CONFIGURED_ERROR_CODE, _HOST_LAUNCH_EXCEPTION_ERROR_CODE}
-)
 from omnigent.model_override import validate_model_override
 from omnigent.native_coding_agents import (
     CLAUDE_NATIVE_CODING_AGENT,
@@ -271,6 +265,12 @@ from omnigent.stores.permission_store import PermissionStore
 from omnigent.tools.client_specified import parse_client_side_tool_specs
 
 _logger = logging.getLogger(__name__)
+
+# Host launch refusals that a retry or a longer wait can't fix, so the
+# server fails at once instead of waiting out the runner connect timeout.
+_BLOCKING_HOST_LAUNCH_ERROR_CODES = frozenset(
+    {_HARNESS_NOT_CONFIGURED_ERROR_CODE, _HOST_LAUNCH_EXCEPTION_ERROR_CODE}
+)
 
 # ── Module-level constants (rule 34) ──────────────────────────────
 
