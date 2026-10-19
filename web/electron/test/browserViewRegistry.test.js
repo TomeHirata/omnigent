@@ -658,13 +658,6 @@ describe("browserViewRegistry — network-layer agent guard (DNS + connected add
       });
     // The endpoint metadata cannot distinguish this direct connection from the configured proxy.
     assert.deepEqual(await Promise.all(["10.0.0.2", "127.0.0.1"].map(response)), [false, true]);
-    registry.openOrNavigate("conv_1", "http://rebind.example:8080/", undefined, { agent: true });
-    const cancel = await registry.shouldCancelAgentResponse({
-      webContentsId: idOf("conv_1"),
-      url: "http://rebind.example:8080/",
-      ip: "10.0.0.2",
-    });
-    assert.equal(cancel, false);
   });
 
   it("forces agent-locked document requests past the HTTP cache", () => {

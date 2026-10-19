@@ -180,6 +180,12 @@ it(
         );
       }
       assert.ok(
+        responses
+          .filter((event) => event.webContentsId === preview.id)
+          .every((event) => event.statusCode === 200),
+        JSON.stringify(responses),
+      );
+      assert.ok(
         responses.some(
           (event) => event.webContentsId === cancellation.id && event.ip && event.cancel,
         ),
