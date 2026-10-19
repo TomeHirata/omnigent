@@ -7,7 +7,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TooltipProvider } from "@/components/ui/tooltip";
 import type { QueuedMessage } from "@/store/chatStore";
-import { QueuedMessagesStrip, queuedMessageCollisionDetection } from "./QueuedMessagesStrip";
+import {
+  QueuedMessagesStrip,
+  queuedMessageCollisionDetection,
+  restrictToQueuedList,
+} from "./QueuedMessagesStrip";
 
 const msg = (queueId: string, text: string): QueuedMessage => ({
   queueId,
@@ -354,6 +358,21 @@ describe("QueuedMessagesStrip", () => {
     expect(queuedMessageCollisionDetection(args)).toEqual([]);
   });
 
+  it("keeps the dragged row vertical and inside the queued list", () => {
+    const box = (top: number, bottom: number) =>
+      ({ top, bottom, left: 0, right: 300, width: 300, height: bottom - top }) as const;
+    const restrict = (y: number) =>
+      restrictToQueuedList({
+        transform: { x: 30, y, scaleX: 1, scaleY: 1 },
+        draggingNodeRect: box(48, 92),
+        scrollableAncestorRects: [box(0, 128)],
+      } as unknown as Parameters<typeof restrictToQueuedList>[0]);
+
+    expect(restrict(-20)).toMatchObject({ x: 0, y: -20 });
+    expect(restrict(-80)).toMatchObject({ x: 0, y: -48 });
+    expect(restrict(80)).toMatchObject({ x: 0, y: 36 });
+  });
+
   it("calls onReorder after moving a queued message with the keyboard", async () => {
     const onReorder = vi.fn();
     render(
@@ -385,12 +404,10 @@ describe("QueuedMessagesStrip", () => {
     handles.forEach((handle, index) =>
       vi.spyOn(handle, "getBoundingClientRect").mockReturnValue(rect(index * 32, 24)),
     );
-    // The DragOverlay starts where the dragged first row sits; jsdom has no layout.
-    const zeroRect = { ...rect(0, 0), height: 0, bottom: 0 };
-    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
-      this: HTMLElement,
-    ) {
-      return this.dataset.testid === "queued-message-drag-preview" ? rect(0, 300) : zeroRect;
+    vi.spyOn(screen.getByRole("list"), "getBoundingClientRect").mockReturnValue({
+      ...rect(0, 300),
+      bottom: 96,
+      height: 96,
     });
 
     const handle = handles[0]!;
@@ -433,6 +450,14 @@ describe("QueuedMessagesStrip", () => {
     rows.forEach((row, index) =>
       vi.spyOn(row, "getBoundingClientRect").mockReturnValue(rect(index * 48)),
     );
+    const list = screen.getByRole("list");
+    // jsdom doesn't load Tailwind, so give the list its scroll overflow inline.
+    list.style.overflowY = "auto";
+    vi.spyOn(list, "getBoundingClientRect").mockReturnValue({
+      ...rect(0),
+      bottom: 100,
+      height: 100,
+    });
 
     const touch = (y: number) => ({ clientX: 20, clientY: y });
     fireEvent.touchStart(handles[1]!, { touches: [touch(70)] });
@@ -442,14 +467,12 @@ describe("QueuedMessagesStrip", () => {
     });
     fireEvent.touchMove(handles[1]!, { touches: [touch(40)] });
     fireEvent.touchMove(handles[1]!, { touches: [touch(20)] });
-    await waitFor(() =>
-      expect(screen.getByTestId("queued-message-drag-preview")).toHaveTextContent("second"),
-    );
-    expect(rows[1]).toHaveClass("opacity-40");
+    // The row follows the finger up but stops at the list's top edge (-48px).
+    await waitFor(() => expect(rows[1]!.style.transform).toBe("translate3d(0, -48px, 0)"));
     fireEvent.touchEnd(handles[1]!, { changedTouches: [touch(20)] });
 
     await waitFor(() => expect(onReorder).toHaveBeenCalledWith("q_2", "q_1"));
-    expect(screen.queryByTestId("queued-message-drag-preview")).not.toBeInTheDocument();
+    expect(rows[1]!.style.transform).toBe("");
   });
 
   it("caps and scrolls a long backlog instead of growing the composer stack", () => {

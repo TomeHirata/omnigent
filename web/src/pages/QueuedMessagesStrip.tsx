@@ -3,8 +3,6 @@ import {
   DndContext,
   type CollisionDetection,
   type DragEndEvent,
-  DragOverlay,
-  type DragStartEvent,
   KeyboardSensor,
   type Modifier,
   MouseSensor,
@@ -24,8 +22,6 @@ import {
   PencilIcon,
   XIcon,
 } from "lucide-react";
-import { useState } from "react";
-import { createPortal } from "react-dom";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -40,7 +36,25 @@ const ACTION_BUTTON_CLASS =
 
 const ACTION_ICON_CLASS = "size-3.5 max-md:size-4";
 
-const restrictToVerticalAxis: Modifier = ({ transform }) => ({ ...transform, x: 0 });
+/**
+ * Keep the dragged row vertical and inside the scrolling list, which would
+ * otherwise clip it. A fixed-position overlay is avoided on purpose: Mobile
+ * Safari draws it offset from the finger once the page has shifted for the
+ * keyboard.
+ */
+export const restrictToQueuedList: Modifier = ({
+  transform,
+  draggingNodeRect,
+  scrollableAncestorRects,
+}) => {
+  const list = scrollableAncestorRects[0];
+  if (!draggingNodeRect || !list) return { ...transform, x: 0 };
+  const y = Math.min(
+    Math.max(transform.y, list.top - draggingNodeRect.top),
+    list.bottom - draggingNodeRect.bottom,
+  );
+  return { ...transform, x: 0, y };
+};
 
 export const queuedMessageCollisionDetection: CollisionDetection = (args) =>
   args.pointerCoordinates ? pointerWithin(args) : closestCenter(args);
@@ -85,13 +99,14 @@ function QueuedRow({
   onSteer?: (queueId: string) => void;
   reorderable: boolean;
 }) {
-  // The grip starts the drag and the whole row is the drop target, so dropping
-  // anywhere on another row reorders. The strip renders the lifted copy.
+  // The whole row drags (via its grip) and is the drop target, so the row
+  // follows the finger and dropping anywhere on another row reorders.
   const {
     attributes,
     listeners,
     setNodeRef: setDragRef,
     setActivatorNodeRef,
+    transform,
     isDragging,
   } = useDraggable({
     id: message.queueId,
@@ -116,11 +131,12 @@ function QueuedRow({
     <div
       ref={setRowRef}
       role="listitem"
+      style={transform ? { transform: `translate3d(0, ${transform.y}px, 0)` } : undefined}
       className={cn(
         // WebKit's long-press text selection and callout cancel the touch
         // gesture dnd-kit's TouchSensor relies on, so suppress them on the row.
         "relative flex min-w-0 items-center gap-1 py-0.5 text-sm text-foreground select-none [-webkit-touch-callout:none]",
-        isDragging && "opacity-40",
+        isDragging && "z-10 rounded-md bg-background shadow-md ring-1 ring-border ring-inset",
         isOver &&
           !isDragging &&
           "after:absolute after:inset-x-0 after:-bottom-0.5 after:h-0.5 after:rounded-full after:bg-muted-foreground/60",
@@ -232,23 +248,6 @@ function QueuedRow({
   );
 }
 
-/** The lifted copy of a row that follows the finger or pointer while dragging. */
-function QueuedRowDragPreview({ message }: { message: QueuedMessage }) {
-  const files = message.files ?? [];
-  const label = message.text.trim() || files.map(attachmentFilename).join(", ");
-  return (
-    <div
-      data-testid="queued-message-drag-preview"
-      className="flex min-w-0 cursor-grabbing items-center gap-1 rounded-md bg-background py-0.5 text-sm text-foreground shadow-md ring-1 ring-border select-none"
-    >
-      <span className={cn(ACTION_BUTTON_CLASS, "inline-flex size-6 items-center justify-center")}>
-        <GripVerticalIcon className={ACTION_ICON_CLASS} aria-hidden="true" />
-      </span>
-      <span className="min-w-0 flex-1 truncate">{label}</span>
-    </div>
-  );
-}
-
 /**
  * Docked strip above the composer listing messages queued while the agent is
  * busy. Peeks above the composer stack's top surface (`-mb-4` + bottom
@@ -276,14 +275,9 @@ export function QueuedMessagesStrip({
     useSensor(KeyboardSensor),
   );
 
-  const [activeId, setActiveId] = useState<string | null>(null);
-
   if (messages.length === 0) return null;
 
-  const activeMessage = messages.find((m) => m.queueId === activeId);
-
   const handleDragEnd = (event: DragEndEvent) => {
-    setActiveId(null);
     const { active, over } = event;
     if (onReorder === undefined || over === null || active.id === over.id) return;
     const from = messages.findIndex((m) => m.queueId === active.id);
@@ -331,18 +325,10 @@ export function QueuedMessagesStrip({
           <DndContext
             sensors={sensors}
             collisionDetection={queuedMessageCollisionDetection}
-            onDragStart={(event: DragStartEvent) => setActiveId(String(event.active.id))}
+            modifiers={[restrictToQueuedList]}
             onDragEnd={handleDragEnd}
-            onDragCancel={() => setActiveId(null)}
           >
             {rows}
-            {/* Portaled so the lifted row isn't clipped by the scrolling list. */}
-            {createPortal(
-              <DragOverlay modifiers={[restrictToVerticalAxis]}>
-                {activeMessage ? <QueuedRowDragPreview message={activeMessage} /> : null}
-              </DragOverlay>,
-              document.body,
-            )}
           </DndContext>
         )}
       </div>
