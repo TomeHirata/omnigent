@@ -15,7 +15,10 @@ const msg = (queueId: string, text: string): QueuedMessage => ({
   conversationId: "conv_abc",
 });
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe("QueuedMessagesStrip", () => {
   it.each([
@@ -382,6 +385,13 @@ describe("QueuedMessagesStrip", () => {
     handles.forEach((handle, index) =>
       vi.spyOn(handle, "getBoundingClientRect").mockReturnValue(rect(index * 32, 24)),
     );
+    // The DragOverlay starts where the dragged first row sits; jsdom has no layout.
+    const zeroRect = { ...rect(0, 0), height: 0, bottom: 0 };
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      return this.dataset.testid === "queued-message-drag-preview" ? rect(0, 300) : zeroRect;
+    });
 
     const handle = handles[0]!;
     handle.focus();
@@ -432,10 +442,14 @@ describe("QueuedMessagesStrip", () => {
     });
     fireEvent.touchMove(handles[1]!, { touches: [touch(40)] });
     fireEvent.touchMove(handles[1]!, { touches: [touch(20)] });
-    await waitFor(() => expect(rows[1]!.style.transform).toBe("translate3d(0, -50px, 0)"));
+    await waitFor(() =>
+      expect(screen.getByTestId("queued-message-drag-preview")).toHaveTextContent("second"),
+    );
+    expect(rows[1]).toHaveClass("opacity-40");
     fireEvent.touchEnd(handles[1]!, { changedTouches: [touch(20)] });
 
     await waitFor(() => expect(onReorder).toHaveBeenCalledWith("q_2", "q_1"));
+    expect(screen.queryByTestId("queued-message-drag-preview")).not.toBeInTheDocument();
   });
 
   it("caps and scrolls a long backlog instead of growing the composer stack", () => {
