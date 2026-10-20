@@ -735,7 +735,9 @@ async def test_events_clear_on_codex_native_types_clear_into_the_tui(
     terminal_registry = TerminalRegistry()
     instance = make_test_terminal_instance("codex", "main", tmp_path)
     terminal_registry._by_conversation.setdefault(conv_id, {})[("codex", "main")] = instance
-    app, _ = await _build_app_for_spec(_harness_spec("codex-native"), terminal_registry=terminal_registry)
+    app, _ = await _build_app_for_spec(
+        _harness_spec("codex-native"), terminal_registry=terminal_registry
+    )
 
     async with _runner_client(app) as client:
         create_resp = await client.post(

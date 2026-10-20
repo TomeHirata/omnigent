@@ -45,16 +45,22 @@ def _fake_runner_returning(clear_status: int) -> tuple[httpx.AsyncClient, list[d
 
     def _handler(request: httpx.Request) -> httpx.Response:
         """Record clear POSTs and return the configured status."""
-        body = json.loads(request.content) if request.method == "POST" and request.content else None
+        body = (
+            json.loads(request.content) if request.method == "POST" and request.content else None
+        )
         if isinstance(body, dict) and body.get("type") == "clear":
             captured.append(body)
             return httpx.Response(clear_status)
         return httpx.Response(204)
 
-    return httpx.AsyncClient(transport=httpx.MockTransport(_handler), base_url="http://runner"), captured
+    return httpx.AsyncClient(
+        transport=httpx.MockTransport(_handler), base_url="http://runner"
+    ), captured
 
 
-async def _post_clear(client: httpx.AsyncClient, clear_status: int) -> tuple[httpx.Response, list[dict[str, Any]]]:
+async def _post_clear(
+    client: httpx.AsyncClient, clear_status: int
+) -> tuple[httpx.Response, list[dict[str, Any]]]:
     """
     POST a ``clear`` control with the runner answering *clear_status*.
 

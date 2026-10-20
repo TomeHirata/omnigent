@@ -1357,7 +1357,9 @@ describe("buildSlashCommandMap", () => {
     // /btw (claude-native), /side (codex-native) and /clear (native terminals)
     // are gated off by default, so all three are excluded here.
     expect(Object.keys(map)).toEqual(
-      Object.keys(BUILTIN_SLASH_COMMANDS).filter((name) => !["/btw", "/side", "/clear"].includes(name)),
+      Object.keys(BUILTIN_SLASH_COMMANDS).filter(
+        (name) => !["/btw", "/side", "/clear"].includes(name),
+      ),
     );
     // Spot-check a built-in description survives the spread.
     expect(map["/help"]).toBe(BUILTIN_SLASH_COMMANDS["/help"]);
@@ -1439,7 +1441,9 @@ describe("buildSlashCommandMap", () => {
     // Built-ins first, then skills in their input order — the menu
     // surfaces built-ins above user skills. /btw, /side and /clear are gated off.
     expect(Object.keys(map)).toEqual([
-      ...Object.keys(BUILTIN_SLASH_COMMANDS).filter((name) => !["/btw", "/side", "/clear"].includes(name)),
+      ...Object.keys(BUILTIN_SLASH_COMMANDS).filter(
+        (name) => !["/btw", "/side", "/clear"].includes(name),
+      ),
       "/triage-issues",
       "/mlflow-bug",
     ]);
