@@ -8,6 +8,7 @@ retain configuration, fault injection and behavioral assertions.
 | Need | Primitive | Existing example |
 | --- | --- | --- |
 | Bundle bytes and upload with caller metadata/client | `bundle_files`, `post_session_bundle` in [session.py](session.py) | [Headless subagent](../e2e/test_codex_native_headless_subagent_e2e.py) |
+| Trusted fixture with Python tools, custom policies, or host paths | `operator_agent_store`, `post_operator_session` in [operator_agents.py](operator_agents.py) | [Image result policies](../integration/test_mcp_image_http_round_trip.py) |
 | Browser-suite session for an explicit identity | `create_user_session` in [_multi_user_server.py](../e2e_ui/collaboration/_multi_user_server.py) | [Default-public sessions](../e2e_ui/collaboration/test_default_public_sessions.py) |
 | Isolated local server | `isolated_local_server` in [live_server.py](live_server.py) | [Multi-user server](../e2e_ui/collaboration/_multi_user_server.py) |
 | Port held until its process binds it | `reserve_port` in [live_server.py](live_server.py) | [Resilience lab](../e2e/resilience/lab/lab.py) |
@@ -128,3 +129,9 @@ for distinct production boundaries. Real consumers often cover a helper already;
 add direct helper tests only for meaningful contract gaps. Measure test/support
 LOC including helper growth, and preserve original reproduction evidence when
 selecting smaller permanent coverage.
+
+Operator provisioning requires the local server fixture to expose its database
+and artifact directory through `operator_agent_store`. It uses the same
+registration function as `server --agent`, then creates a session by agent id.
+Use it only for operator-authored fixtures; upload validation and authorization
+scenarios must keep `post_session_bundle`. External servers are not enrolled.
