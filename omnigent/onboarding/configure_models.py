@@ -30,13 +30,15 @@ from dataclasses import dataclass
 
 from omnigent.onboarding.ambient import DetectedProvider
 from omnigent.onboarding.databricks_config import databricks_sdk_installed
-from omnigent.onboarding.interactive import ACCENT, console
+from omnigent.onboarding.interactive import ACCENT, console, encodable
 from omnigent.onboarding.provider_config import (
     ANTHROPIC_FAMILY,
+    BEDROCK_KIND,
     CHAT_WIRE_API,
     CLI_CONFIG_KIND,
     DATABRICKS_KIND,
     GATEWAY_KIND,
+    GEMINI_FAMILY,
     KEY_KIND,
     LOCAL_KIND,
     OPENAI_FAMILY,
@@ -46,9 +48,9 @@ from omnigent.onboarding.provider_config import (
     surface_default_provider,
 )
 
-# A short glyph per kind for the grouped listing. ASCII-safe fallbacks are
-# not needed — the rest of the REPL/CLI already emits emoji freely — but
-# the glyph is purely decorative: the kind word follows it.
+# A short glyph per kind for the grouped listing. The glyph is purely
+# decorative — the kind word follows it — and degrades to an ASCII stand-in
+# (see _KIND_ASCII_GLYPH) on a console that can't encode emoji.
 # The ADMISSION TICKETS glyph (subscription) carries a VARIATION SELECTOR-16 so
 # terminals render it as a 2-cell emoji (matching 🔑 / 🌐 / 🧱 and the 🎟️ in
 # README.oss.md) instead of a cramped 1-cell text glyph — that VS16, not extra
@@ -64,6 +66,23 @@ _KIND_GLYPH: dict[str, str] = {
     # GEAR carries a VS16 for the same 2-cell-emoji rendering reason as the
     # ADMISSION TICKETS glyph above.
     CLI_CONFIG_KIND: "\N{GEAR}\N{VARIATION SELECTOR-16}",
+    # CLOUD for Bedrock-style gateways (AWS Bedrock, corporate AI gateways)
+    BEDROCK_KIND: "\N{CLOUD}",
+}
+
+
+# Stand-ins for a console whose encoding can't carry the emoji above — a
+# Windows shell on a legacy ANSI codepage (cp1252) raises UnicodeEncodeError
+# on the write instead of rendering it. Each token is 2 ASCII cells, matching
+# the emoji's display width so the listing's columns stay aligned.
+_KIND_ASCII_GLYPH: dict[str, str] = {
+    KEY_KIND: "Ky",
+    SUBSCRIPTION_KIND: "Sb",
+    GATEWAY_KIND: "Gw",
+    LOCAL_KIND: "Lc",
+    DATABRICKS_KIND: "Db",
+    CLI_CONFIG_KIND: "Cf",
+    BEDROCK_KIND: "Cl",
 }
 
 
@@ -87,6 +106,7 @@ _KIND_STYLE: dict[str, str] = {
 _FAMILY_LABEL: dict[str, str] = {
     ANTHROPIC_FAMILY: "Claude",
     OPENAI_FAMILY: "Codex",
+    GEMINI_FAMILY: "Gemini",
     PI_SURFACE: "Pi",
 }
 
@@ -96,6 +116,7 @@ _FAMILY_LABEL: dict[str, str] = {
 _FAMILY_HARNESS_IDS: dict[str, str] = {
     ANTHROPIC_FAMILY: "claude-sdk, native-claude",
     OPENAI_FAMILY: "codex, native-codex, openai-agents",
+    GEMINI_FAMILY: "antigravity, antigravity-native",
     PI_SURFACE: "pi",
 }
 
@@ -129,6 +150,10 @@ def family_harness_ids(family: str) -> str:
 _FAMILY_DEFAULT_BASE_URL: dict[str, str] = {
     ANTHROPIC_FAMILY: "https://api.anthropic.com",
     OPENAI_FAMILY: "https://api.openai.com/v1",
+    # Gemini's OpenAI-compatible endpoint, used as the listing base URL for a
+    # ``key``-kind gemini provider (the antigravity harness drives the SDK
+    # directly with the key, so this only feeds model enumeration).
+    GEMINI_FAMILY: "https://generativelanguage.googleapis.com/v1beta/openai",
 }
 
 # Maps a catalog provider name (from
@@ -140,6 +165,9 @@ _FAMILY_DEFAULT_BASE_URL: dict[str, str] = {
 _CATALOG_PROVIDER_FAMILY: dict[str, str] = {
     "anthropic": ANTHROPIC_FAMILY,
     "openai": OPENAI_FAMILY,
+    # ``gemini`` serves the Gemini surface (the antigravity harness drives the
+    # SDK directly with a GEMINI_API_KEY).
+    "gemini": GEMINI_FAMILY,
     "openrouter": OPENAI_FAMILY,
     "groq": OPENAI_FAMILY,
     "deepseek": OPENAI_FAMILY,
@@ -263,7 +291,7 @@ def cli_display_name(cli: str) -> str:
         or ``"ChatGPT"`` for ``codex`` (the ChatGPT plan drives codex).
         Falls back to a title-cased form for any other value.
     """
-    return {"claude": "Claude (Pro/Max)", "codex": "ChatGPT"}.get(cli, cli.title())
+    return {"claude": "Claude (Pro/Max)", "codex": "ChatGPT", "pi": "Pi"}.get(cli, cli.title())
 
 
 def kind_glyph(kind: str) -> str:
@@ -277,12 +305,31 @@ def kind_glyph(kind: str) -> str:
     subscription ticket via its VARIATION SELECTOR-16), so a single space
     separates it from the following label.
 
+    A console that can't encode the emoji — a Windows shell on a legacy
+    ANSI codepage — gets the kind's 2-cell ASCII stand-in instead, so the
+    listing degrades rather than dying on the write.
+
     :param kind: A provider kind, e.g. ``"key"``, ``"subscription"``,
         ``"gateway"``, ``"local"``, or ``"databricks"``.
     :returns: The kind's glyph (e.g. ``"🔑"`` for ``"key"``), or an
         empty string for an unknown kind.
     """
-    return _KIND_GLYPH.get(kind, "")
+    glyph = _KIND_GLYPH.get(kind, "")
+    if glyph and not encodable(glyph, console):
+        return _KIND_ASCII_GLYPH.get(kind, "")
+    return glyph
+
+
+def default_marker() -> str:
+    """Return the check mark used in the listing's ``default`` marker.
+
+    A legacy-codepage console (e.g. cp1252) cannot encode ``\N{CHECK MARK}``
+    either, so the marker degrades to ``*`` there — keeping the listing
+    renderable even when the stream itself was not relaxed to replace
+    unencodable output.
+    """
+    check = "\N{CHECK MARK}"
+    return check if encodable(check, console) else "*"
 
 
 def credential_label(
@@ -310,11 +357,11 @@ def credential_label(
         databricks credential whose profile is unknown to the caller).
     :param display_name: The provider's own display name for a
         ``cli-config`` credential — the ``name`` field of its
-        ``[model_providers.X]`` table, e.g. ``"Databricks AI Gateway"``;
+        ``[model_providers.X]`` table, e.g. ``"Databricks Unity Gateway"``;
         ``None`` for other kinds (and when the table named none, falling
         back to *provider_name*).
     :returns: A human label, e.g. ``"Subscription"``, ``"Anthropic API
-        Key"``, ``"Databricks (oss)"``, ``"Databricks AI Gateway"``, or a
+        Key"``, ``"Databricks (oss)"``, ``"Databricks Unity Gateway"``, or a
         gateway's display name.
     """
     if kind == SUBSCRIPTION_KIND:
@@ -324,12 +371,20 @@ def credential_label(
     if kind == DATABRICKS_KIND:
         return f"Databricks ({profile})" if profile else "Databricks"
     if kind == CLI_CONFIG_KIND:
-        # The provider's own name field is the friendliest label there is
-        # ("Databricks AI Gateway"); the entry name ("codex-databricks") is
-        # the readable fallback.
-        return display_name or provider_name
+        # Use the entry name (e.g. "isaac-databricks-codex" → "Isaac-Databricks-Codex")
+        # so cli-config providers show consistently alongside other provider kinds.
+        return provider_display_name(provider_name)
     if kind == KEY_KIND:
         return f"{provider_display_name(provider_name)} API Key"
+    if kind == BEDROCK_KIND:
+        # The credential is always AWS Bedrock; the entry name is user-chosen
+        # (like a gateway), so naming it after the provider id gave "Bedrock
+        # Bedrock". Show "AWS Bedrock", qualified by the entry name only when it
+        # isn't the generic default — clean for the common single-provider case,
+        # still distinguishable when several are configured.
+        if provider_name == BEDROCK_KIND:
+            return "AWS Bedrock"
+        return f"AWS Bedrock ({provider_name})"
     return provider_display_name(provider_name)
 
 
@@ -364,7 +419,11 @@ class AddOption:
 
 # Catalog providers surfaced as their own top-level add option; the rest
 # are reachable via the "Other provider" catch-all so the menu stays short.
-_PRESET_KEY_PROVIDERS: tuple[str, ...] = ("openai", "anthropic", "openrouter")
+# ``gemini`` has its own "Gemini — API key" entry (it is the antigravity
+# surface, a distinct family), so it must be excluded here too — otherwise it
+# leaks into the openai-family "Other provider" catch-all, whose tail is
+# documented as "all openai-family" (see :func:`_add_option_families`).
+_PRESET_KEY_PROVIDERS: tuple[str, ...] = ("openai", "anthropic", "openrouter", "gemini")
 
 
 def add_menu_options() -> list[AddOption]:
@@ -391,7 +450,7 @@ def add_menu_options() -> list[AddOption]:
     def _opt(text: str, description: str, kind: str, **kw: object) -> AddOption:
         """Build an :class:`AddOption` whose label is glyph-prefixed for *kind*."""
         return AddOption(
-            label=f"{_KIND_GLYPH[kind]} {text}",
+            label=f"{kind_glyph(kind)} {text}",
             description=description,
             kind=kind,
             **kw,  # type: ignore[arg-type]  # provider/cli/other forwarded to AddOption
@@ -414,6 +473,12 @@ def add_menu_options() -> list[AddOption]:
             provider="anthropic",
         ),
         _opt(
+            "Gemini — API key",
+            "Use a Google Gemini API key (aistudio.google.com) for the antigravity harness.",
+            KEY_KIND,
+            provider="gemini",
+        ),
+        _opt(
             "ChatGPT — subscription",
             "Use your ChatGPT plan via the codex CLI login.",
             SUBSCRIPTION_KIND,
@@ -425,10 +490,16 @@ def add_menu_options() -> list[AddOption]:
             SUBSCRIPTION_KIND,
             cli="claude",
         ),
+        _opt(
+            "Pi — original auth",
+            "Use Pi's own auth (~/.pi/agent) as-is, without Omnigent managing the provider.",
+            SUBSCRIPTION_KIND,
+            cli="pi",
+        ),
         # Cross-vendor extras, alphabetical (Gateway before OpenRouter).
         _opt(
-            "Gateway — custom base URL + key (e.g. OpenRouter)",
-            "An OpenAI/Anthropic-compatible proxy: LiteLLM, Ollama, OpenRouter, vLLM, …",
+            "Gateway — custom base URL + key",
+            "An OpenAI/Anthropic-compatible proxy: LiteLLM, Ollama, vLLM, …",
             GATEWAY_KIND,
         ),
         _opt(
@@ -443,7 +514,7 @@ def add_menu_options() -> list[AddOption]:
         # selecting it aborts with the same hint (_configure_harness_add).
         _opt(
             "Databricks — workspace",
-            "Route harnesses through a Databricks workspace's Unity AI Gateway (via ucode)."
+            "Route harnesses through a Databricks workspace's Unity Gateway (via ucode)."
             if databricks_sdk_installed()
             # Markup-safe (rendered via Text.from_markup): no literal
             # brackets, so the extra is named in prose here and the exact
@@ -457,6 +528,15 @@ def add_menu_options() -> list[AddOption]:
             KEY_KIND,
             other=True,
         ),
+        # AWS Bedrock / Bedrock-compatible gateway — anthropic-only, drives the
+        # native ``omnigent claude`` terminal in Bedrock mode. Listed last so it
+        # never shifts the first-party / extras order users already know.
+        _opt(
+            "AWS Bedrock — API key",
+            "AWS Bedrock or a Bedrock-compatible gateway for the native Claude "
+            "terminal (omnigent claude). Claude only.",
+            BEDROCK_KIND,
+        ),
     ]
 
 
@@ -464,30 +544,46 @@ def _add_option_families(opt: AddOption) -> frozenset[str]:
     """Return the surfaces an add-menu *opt* can serve.
 
     Used to scope the add menu to the harness the user drilled into
-    (``configure harness`` → Claude / Codex / Pi → "Add a provider"): a
-    Claude add should not offer an OpenAI-only key, and vice versa.
-    Gateways and Databricks serve every surface; any API key can drive pi
-    (it consumes both model families); subscriptions never drive pi (a
-    CLI login is unusable outside its own CLI).
+    (``configure harness`` → Claude / Codex / Gemini / Pi → "Add a
+    provider"): a Claude add should not offer an OpenAI-only key, and vice
+    versa. Gateways and Databricks serve the anthropic / openai / pi surfaces —
+    but NOT Gemini, which is key-only (the antigravity harness needs a real
+    GEMINI_API_KEY, not a proxy). An anthropic / openai API key can also drive
+    pi (it consumes both model families); a gemini key serves ONLY the Gemini
+    surface; subscriptions never drive pi (a CLI login is unusable outside its
+    own CLI).
 
     :param opt: One add-menu option.
     :returns: The surfaces this option can configure — a subset of
-        ``{"anthropic", "openai", "pi"}``.
+        ``{"anthropic", "openai", "gemini", "pi"}``.
     """
     if opt.kind == GATEWAY_KIND or opt.kind == DATABRICKS_KIND:
         return frozenset({ANTHROPIC_FAMILY, OPENAI_FAMILY, PI_SURFACE})
+    if opt.kind == BEDROCK_KIND:
+        # Bedrock mode drives only the native Claude terminal (anthropic
+        # family); codex/pi reject it, so it never serves their surfaces.
+        return frozenset({ANTHROPIC_FAMILY})
     if opt.kind == SUBSCRIPTION_KIND:
         if opt.cli == "claude":
             return frozenset({ANTHROPIC_FAMILY})
         if opt.cli == "codex":
             return frozenset({OPENAI_FAMILY})
+        if opt.cli == "pi":
+            return frozenset({PI_SURFACE})
         return frozenset()
     if opt.kind == KEY_KIND:
         if opt.other:
             # The catch-all tail (Groq, DeepSeek, …) are all openai-family.
             return frozenset({OPENAI_FAMILY, PI_SURFACE})
         if opt.provider is not None:
-            return frozenset({family_for_key_provider(opt.provider), PI_SURFACE})
+            family = family_for_key_provider(opt.provider)
+            # The Gemini surface (antigravity) is not a pi model family — pi
+            # consumes the anthropic / openai families only. So a gemini key
+            # serves ONLY the Gemini surface; anthropic / openai keys also drive
+            # pi.
+            if family == GEMINI_FAMILY:
+                return frozenset({GEMINI_FAMILY})
+            return frozenset({family, PI_SURFACE})
     return frozenset()
 
 
@@ -511,12 +607,21 @@ def other_key_providers() -> list[str]:
 
     Backs the ``"Other provider — API key"`` secondary pick — the long tail
     of API-key providers (Groq, DeepSeek, xAI, …) not already a top-level
-    :func:`add_menu_options` entry.
+    :func:`add_menu_options` entry. The ``"Other provider"`` option is scoped
+    to the openai family (see :func:`_add_option_families`), so the tail is
+    filtered to ``OPENAI_FAMILY`` rather than only excluding the preset list:
+    that way a future non-openai catalog family (the gemini case) cannot leak
+    into the openai-only catch-all even if it is omitted from
+    :data:`_PRESET_KEY_PROVIDERS`.
 
-    :returns: Catalog provider ids excluding :data:`_PRESET_KEY_PROVIDERS`,
-        in catalog (popular-first) order.
+    :returns: openai-family catalog provider ids excluding
+        :data:`_PRESET_KEY_PROVIDERS`, in catalog (popular-first) order.
     """
-    return [p for p in key_providers() if p not in _PRESET_KEY_PROVIDERS]
+    return [
+        p
+        for p in key_providers()
+        if p not in _PRESET_KEY_PROVIDERS and family_for_key_provider(p) == OPENAI_FAMILY
+    ]
 
 
 def render_provider_listing_by_harness(
@@ -543,7 +648,7 @@ def render_provider_listing_by_harness(
     if not providers:
         console.print("  [dim]none configured yet[/dim]")
         return
-    for family in (ANTHROPIC_FAMILY, OPENAI_FAMILY, PI_SURFACE):
+    for family in (ANTHROPIC_FAMILY, OPENAI_FAMILY, GEMINI_FAMILY, PI_SURFACE):
         console.print(f"  [bold]{_FAMILY_LABEL[family]}[/]")
         serving = [
             (name, entry)
@@ -554,14 +659,14 @@ def render_provider_listing_by_harness(
             console.print("    [dim](none configured)[/dim]")
             continue
         for name, entry in serving:
-            glyph = _KIND_GLYPH.get(entry.kind, "")
+            glyph = kind_glyph(entry.kind)
             kind_style = _KIND_STYLE.get(entry.kind, "white")
             summary = _entry_models_summary(entry)
             line = (
                 f"    {glyph} [{kind_style}]{entry.kind}[/] [bold]{name}[/] [dim]{summary}[/dim]"
             )
             if family in _provider_default_families(entry, config):
-                line += " [green]✓ default[/green]"
+                line += f" [green]{default_marker()} default[/green]"
             console.print(line)
 
 
@@ -579,14 +684,40 @@ def _provider_default_families(entry: ProviderEntry, config: dict[str, object]) 
     :param config: The parsed config mapping (``providers:`` block), used
         to resolve each surface's default.
     :returns: Surface names this entry is the default for, in
-        ``[anthropic, openai, pi]`` order, e.g. ``["anthropic", "pi"]``.
+        ``[anthropic, openai, gemini, pi]`` order, e.g. ``["anthropic", "pi"]``.
     """
     result: list[str] = []
-    for family in (ANTHROPIC_FAMILY, OPENAI_FAMILY, PI_SURFACE):
+    for family in (ANTHROPIC_FAMILY, OPENAI_FAMILY, GEMINI_FAMILY, PI_SURFACE):
         default = surface_default_provider(config, family)
         if default is not None and default.name == entry.name:
             result.append(family)
     return result
+
+
+def _subscription_auth_summary(entry: ProviderEntry) -> str:
+    """Return the auth summary for a ``subscription`` provider row.
+
+    A codex "subscription" entry covers *any* usable ``~/.codex/auth.json``,
+    but that file's credential may be an API key rather than a ChatGPT plan
+    (``codex`` itself reports ``auth_mode: apikey``). Naming the effective
+    mode keeps a quota diagnosis pointed at the right credential — a bare
+    "subscription" label looks healthy when the real problem is a dead key.
+
+    :param entry: A ``kind: subscription`` provider entry.
+    :returns: A display string, e.g. ``"via claude CLI"``,
+        ``"via codex CLI (API key login)"``.
+    """
+    from omnigent.onboarding.ambient import codex_cli_effective_auth_mode
+
+    base = f"via {entry.cli} CLI"
+    if entry.cli != "codex":
+        return base
+    mode = codex_cli_effective_auth_mode()
+    if mode == "apikey":
+        return f"{base} (API key login, not a ChatGPT plan)"
+    if mode == "pat":
+        return f"{base} (personal access token)"
+    return base
 
 
 def _entry_models_summary(entry: ProviderEntry) -> str:
@@ -603,7 +734,7 @@ def _entry_models_summary(entry: ProviderEntry) -> str:
         databricks profile).
     """
     if entry.kind == SUBSCRIPTION_KIND:
-        return f"via {entry.cli} CLI"
+        return _subscription_auth_summary(entry)
     if entry.kind == DATABRICKS_KIND:
         return f"profile: {entry.profile}"
     if entry.kind == CLI_CONFIG_KIND:
@@ -612,7 +743,7 @@ def _entry_models_summary(entry: ProviderEntry) -> str:
     # base_url is set (a gateway without a pinned default model still works
     # — the spec/override picks the model).
     models: list[str] = []
-    for family in (ANTHROPIC_FAMILY, OPENAI_FAMILY):
+    for family in (ANTHROPIC_FAMILY, OPENAI_FAMILY, GEMINI_FAMILY):
         default_model = entry.family_default_model(family)
         if default_model:
             models.append(default_model)
@@ -651,14 +782,14 @@ def render_provider_listing(
     if providers:
         console.print(f"[{ACCENT}]Configured providers[/]")
         for name, entry in providers.items():
-            glyph = _KIND_GLYPH.get(entry.kind, "")
+            glyph = kind_glyph(entry.kind)
             kind_style = _KIND_STYLE.get(entry.kind, "white")
             summary = _entry_models_summary(entry)
             default_families = _provider_default_families(entry, config)
             line = f"  {glyph} [{kind_style}]{entry.kind}[/] [bold]{name}[/] [dim]{summary}[/dim]"
             if default_families:
                 labels = " · ".join(_FAMILY_LABEL[f] for f in default_families)
-                line += f" [green]✓ default · {labels}[/green]"
+                line += f" [green]{default_marker()} default · {labels}[/green]"
             console.print(line)
     else:
         console.print("[dim]No providers configured yet.[/dim]")
@@ -720,12 +851,44 @@ def build_key_provider_entry(
     return {"kind": KEY_KIND, family: family_block}
 
 
+def build_bedrock_provider_entry(
+    base_url: str,
+    api_key_ref: str,
+    default_model: str | None,
+) -> dict[str, object]:
+    """Build a ``kind: bedrock`` provider entry body (config shape).
+
+    A Bedrock provider serves only the ``anthropic`` family and drives the
+    native ``omnigent claude`` terminal in AWS Bedrock mode (the in-process /
+    gateway harnesses reject it). ``base_url`` is the regional Bedrock-runtime
+    endpoint or a Bedrock-compatible gateway; ``api_key_ref`` resolves the AWS
+    bearer token delivered via ``AWS_BEARER_TOKEN_BEDROCK``.
+
+    :param base_url: The Bedrock endpoint, e.g.
+        ``"https://bedrock-runtime.us-east-1.amazonaws.com"``.
+    :param api_key_ref: The secret reference, e.g. ``"keychain:bedrock"`` or
+        ``"env:AWS_BEARER_TOKEN_BEDROCK"``.
+    :param default_model: A Bedrock model id / inference profile, e.g.
+        ``"us.anthropic.claude-opus-4-5-20251101-v1:0"``, or ``None`` to omit
+        the ``models`` block (not recommended — Claude then picks its own
+        default, usually not enabled on a Bedrock account).
+    :returns: A provider entry body, e.g. ``{"kind": "bedrock", "anthropic":
+        {"base_url": "...", "api_key_ref": "...", "models": {"default": "..."}}}``.
+    """
+    family_block: dict[str, object] = {"base_url": base_url, "api_key_ref": api_key_ref}
+    if default_model:
+        family_block["models"] = {"default": default_model}
+    return {"kind": BEDROCK_KIND, ANTHROPIC_FAMILY: family_block}
+
+
 def default_base_url_for_family(family: str) -> str:
     """Return the canonical vendor base URL for a ``key`` provider family.
 
-    :param family: ``"anthropic"`` or ``"openai"``.
+    :param family: ``"anthropic"``, ``"openai"``, or ``"gemini"``.
     :returns: The default endpoint base URL, e.g.
-        ``"https://api.anthropic.com"``.
+        ``"https://api.anthropic.com"`` (anthropic),
+        ``"https://api.openai.com/v1"`` (openai), or Gemini's
+        OpenAI-compatible endpoint (gemini).
     :raises KeyError: If *family* is not a known family.
     """
     return _FAMILY_DEFAULT_BASE_URL[family]
@@ -752,7 +915,7 @@ def build_cli_config_provider_entry(
     A cli-config provider pins a custom model provider defined in the
     harness CLI's own config file (today: a ``[model_providers.X]`` table
     in ``~/.codex/config.toml`` with self-contained auth, e.g. the
-    Databricks AI Gateway written by ``isaac configure codex``). The
+    Databricks Unity Gateway written by ``isaac configure codex``). The
     provider definition and credential stay in that file; this entry only
     records which provider the launch selects.
 
@@ -761,11 +924,11 @@ def build_cli_config_provider_entry(
     :param model_provider: The ``[model_providers.X]`` id to pin, e.g.
         ``"Databricks"``.
     :param display_name: The provider table's ``name`` field, snapshotted
-        for display, e.g. ``"Databricks AI Gateway"``; ``None`` omits it
+        for display, e.g. ``"Databricks Unity Gateway"``; ``None`` omits it
         (labels fall back to the entry name).
     :returns: A provider entry body, e.g. ``{"kind": "cli-config", "cli":
         "codex", "model_provider": "Databricks", "display_name":
-        "Databricks AI Gateway"}``.
+        "Databricks Unity Gateway"}``.
     """
     body: dict[str, object] = {
         "kind": CLI_CONFIG_KIND,

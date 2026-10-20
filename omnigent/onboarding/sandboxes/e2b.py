@@ -49,12 +49,15 @@ from typing import TYPE_CHECKING, ClassVar
 
 import click
 
+from omnigent.cli_invocation import cli_invocation
+from omnigent.inner import ui
 from omnigent.onboarding.sandboxes.base import (
     RemoteCommandResult,
     RemoteProcess,
     SandboxLauncher,
     host_image_wheel_install_command,
 )
+from omnigent.onboarding.sandboxes.types import SandboxCapabilities
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -248,6 +251,19 @@ class _E2BRemoteProcess(RemoteProcess):
     :class:`RemoteProcess` contract wants.
     """
 
+    @property
+    def capabilities(self) -> SandboxCapabilities:
+        return SandboxCapabilities(
+            cli_bootstrap=True,
+            managed_launch=True,
+            local_port_forward=False,
+            resume_stopped=False,
+            programmatic_terminate=True,
+            file_copy=True,
+            streaming_exec=True,
+            foreground_exec=True,
+        )
+
     def __init__(self, handle: CommandHandle) -> None:
         """
         Wrap a running background command handle.
@@ -410,7 +426,7 @@ class E2BSandboxLauncher(SandboxLauncher):
                     f"E2B sandbox '{sandbox_id}' not found — it may have passed its "
                     "lifetime cap. Managed sessions provision a replacement on the "
                     "next message; for a CLI host create a fresh one with "
-                    "`omnigent sandbox create --provider e2b`."
+                    f"`{cli_invocation()} sandbox create --provider e2b`."
                 ) from exc
             self._sandboxes[sandbox_id] = handle
         return handle
@@ -491,7 +507,7 @@ class E2BSandboxLauncher(SandboxLauncher):
         env_vars = self._resolve_sandbox_env()
         click.echo(f"▸ Creating E2B sandbox '{name}' from template '{template}'")
         sandbox = self._create_sandbox(template, resolve_max_lifetime_s(), name, env_vars)
-        sandbox_id = sandbox.sandbox_id
+        sandbox_id = str(sandbox.sandbox_id)
         self._sandboxes[sandbox_id] = sandbox
         click.echo(f"  → created {sandbox_id}")
         return sandbox_id
@@ -548,11 +564,12 @@ class E2BSandboxLauncher(SandboxLauncher):
         # The requested lifetime exceeds this account's maximum (e.g. a
         # Hobby account's 1 h cap vs the 24 h default) and E2B rejected it
         # rather than clamping — retry once at the cap.
-        click.secho(
+        ui.console.print(
             f"  → requested {timeout // 3600}h lifetime exceeds this E2B account's "
             f"maximum ({cap // 3600}h); retrying clamped to it (set "
             f"{MAX_LIFETIME_ENV_VAR} to request a specific lifetime).",
-            fg="yellow",
+            style="omni.warning",
+            markup=False,
         )
         try:
             return Sandbox.create(
@@ -575,7 +592,7 @@ class E2BSandboxLauncher(SandboxLauncher):
             raise click.ClickException(
                 f"E2B sandbox '{sandbox_id}' is not running (it may have passed its "
                 "lifetime cap). Create a fresh one with "
-                "`omnigent sandbox create --provider e2b`."
+                f"`{cli_invocation()} sandbox create --provider e2b`."
             )
 
     def keep_alive(self, sandbox_id: str) -> None:
@@ -598,10 +615,11 @@ class E2BSandboxLauncher(SandboxLauncher):
         try:
             handle.set_timeout(lifetime)
         except SandboxException as exc:
-            click.secho(
+            ui.console.print(
                 f"  → warning: could not extend the lifetime of '{sandbox_id}' "
                 f"({exc}); the sandbox will stop at its current timeout.",
-                fg="yellow",
+                style="omni.warning",
+                markup=False,
             )
         else:
             # set_timeout accepts an over-cap request without raising (unlike
