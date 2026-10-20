@@ -75,6 +75,10 @@ _MCP_ELICITATION_TYPE: str = "mcp_elicitation"
 _COMPACT_TYPE: str = "compact"
 
 
+# Starts a fresh context in a native session's own terminal (the vendor /clear).
+_CLEAR_TYPE: str = "clear"
+
+
 _SLASH_COMMAND_TYPE: str = "slash_command"
 
 
@@ -557,6 +561,7 @@ _ALLOWED_EVENT_TYPES: frozenset[str] = frozenset(ITEM_TYPE_TO_DATA_CLS.keys()) |
     _APPROVAL_TYPE,
     _MCP_ELICITATION_TYPE,
     _COMPACT_TYPE,
+    _CLEAR_TYPE,
     _STOP_SESSION_TYPE,
     _RETRY_SESSION_TYPE,
     _EXTERNAL_ASSISTANT_MESSAGE_TYPE,
@@ -1111,6 +1116,7 @@ __all__ = [
     "_CODEX_NATIVE_SUBAGENT_TOOL_CALL_ID_LABEL_KEY",
     "_CODEX_NATIVE_SUBAGENT_WRAPPER_LABEL_VALUE",
     "_CODEX_NATIVE_WRAPPER_LABEL_VALUE",
+    "_CLEAR_TYPE",
     "_COMPACT_TYPE",
     "_CURSOR_FORK_HISTORY_HARNESSES",
     "_CURSOR_NATIVE_HARNESS",
