@@ -1,7 +1,5 @@
-# Build Omnigent for Anthropic's OSS Scanner (https://github.com/anthropics/oss-scanner, projects/omnigent).
-# The scanner uses the repository root as the build context and audits /src with no network, so everything
-# the tests need is installed here. The Python environment is the one the unit-test lane of
-# .github/workflows/ci.yml installs; the web UI is built the way deploy/docker/Dockerfile builds it.
+# Image for Anthropic's OSS Scanner: the repo root is the build context, the checkout lives at /src, and the
+# audit runs offline. Python deps match CI's unit-test lane; the web UI builds as in deploy/docker/Dockerfile.
 ARG PYTHON_VERSION=3.12
 ARG NODE_VERSION=22
 
@@ -37,8 +35,9 @@ RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 COPY . /src
 WORKDIR /src
 
-# The pnpm version package.json pins and the uv version .github/actions/setup-uv pins.
-RUN npm install -g "$(node -p 'require("./package.json").packageManager')" \
+# The pnpm version package.json pins (without any Corepack hash suffix) and the uv version
+# .github/actions/setup-uv pins.
+RUN npm install -g "$(node -p 'require("./package.json").packageManager.split("+")[0]')" \
     && UV_VERSION="$(awk '/^  version:/{f=1} f&&/default:/{gsub(/"/,"",$2); print $2; exit}' .github/actions/setup-uv/action.yml)" \
     && pip install --no-cache-dir "uv==${UV_VERSION}"
 
@@ -50,7 +49,7 @@ RUN pnpm install --frozen-lockfile --filter web \
 # Every package the CI unit-test lane installs, from the committed lock file, into /src/.venv.
 RUN uv sync --locked --extra all --extra openshell --extra kubernetes --group test
 
-# The network is gone after this point, so `uv run` must use the environment built above as it is.
+# The scanner runs offline, so `uv run` must use the prebuilt venv without resolving or syncing.
 # OMNIGENT_TEST_TIMEOUT_SCALE stretches the tests' hang guards, as CI does on its shared runners.
 ENV UV_FROZEN=1 \
     UV_NO_SYNC=1 \
@@ -59,8 +58,8 @@ ENV UV_FROZEN=1 \
     PATH=/src/.venv/bin:$PATH \
     OMNIGENT_TEST_TIMEOUT_SCALE=4
 
-# A fast slice of the auth, permission and policy tests, so the image is known to work; a failing test must
-# not abort the build. Other tests: `pytest <path> -m "not databricks"`.
+# A best-effort smoke check of the auth, permission and policy tests; failures don't abort the build.
+# Other tests: `pytest <path> -m "not databricks"`.
 RUN pytest tests/server/test_auth_mode.py tests/server/test_permissions.py \
         tests/server/test_public_sharing_policy.py tests/policies \
         -m "not databricks" -q -p no:cacheprovider \

@@ -1,0 +1,40 @@
+# Only paths .gitignore already ignores, so the scanner's fresh clone builds unchanged. Keeps a local build from
+# a working checkout from copying secrets, host installs and local data into the image.
+
+# Secrets
+**/.env
+.envrc
+
+# Host installs, which would also clash with the image's own uv sync and pnpm install
+.venv
+**/node_modules
+.pnpm-store
+
+# Build outputs and caches
+build
+dist
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+.pytest_cache
+omnigent/_build_info.py
+omnigent/server/static/web-ui
+web/storybook-static
+dev/omnidev/target
+
+# Local databases, sessions and run output
+**/*.db
+**/*.db-wal
+**/*.db-shm
+.omnigent
+.sessions
+.codex
+.codex-tmp
+.worktrees
+.claude/worktrees
+.tmp*
+artifacts
+test-results
+output/playwright
+recordings
+reviews

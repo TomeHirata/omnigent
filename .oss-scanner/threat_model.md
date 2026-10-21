@@ -30,8 +30,11 @@ The roles, from most to least trusted:
 - **Session owner**: owns sessions and the hosts they registered. Their agents run with their privileges on
   their hosts.
 - **Collaborators**: users granted read (1), edit (2) or manage (3) on a session
-  (`omnigent/stores/permission_store/`, `LEVEL_*` in `omnigent/server/auth.py`). Public sharing is the
-  `__public__` grant, limited by `OMNIGENT_SHARING_MODE`.
+  (`omnigent/stores/permission_store/`, `LEVEL_*` in `omnigent/server/auth.py`). Public (anyone with the
+  link) access is the `__public__` grant. `OMNIGENT_PUBLIC_SHARING` decides whether it can be granted,
+  `OMNIGENT_PUBLIC_SHARING_MAX_LEVEL` caps it at read or edit, and `OMNIGENT_DEFAULT_PUBLIC_SESSIONS` decides
+  which new sessions start public. `OMNIGENT_SHARING_MODE` limits new user grants. Admins can override each
+  from the Sharing settings panel (`omnigent/server/sharing_settings.py`).
 - **Other authenticated users** of the same server: no access to sessions, hosts, files or credentials
   they have not been granted.
 - **Hosts and managed sandboxes**: authenticate the tunnel as their owner, or with a managed-host launch
@@ -45,8 +48,9 @@ The defects we want found cross one of these boundaries:
 - reaching anything beyond login and public endpoints without authenticating, forging a session cookie,
   or using a device-grant or machine client-credentials token outside its allowed paths or scope;
 - an authenticated user reading or changing another user's sessions, messages, files, artifacts, hosts,
-  connections or stored credentials (IDOR), or exceeding a grant (read to edit, edit to manage, or
-  bypassing `OMNIGENT_SHARING_MODE`);
+  connections or stored credentials (IDOR), or exceeding a grant (read to edit, edit to manage);
+- public access above the current `OMNIGENT_PUBLIC_SHARING_MAX_LEVEL`, which applies live to existing grants
+  too, or a new grant that `OMNIGENT_PUBLIC_SHARING` or `OMNIGENT_SHARING_MODE` should have refused;
 - a host or sandbox tunnel acting for another user, binding to a session it does not own, or reusing a
   token beyond its scope;
 - one user's input running as script in another user's web UI session (stored XSS). In the Electron app,
@@ -63,10 +67,11 @@ The defects we want found cross one of these boundaries:
 
 Most:
 
-- `omnigent/server/auth.py`, `oidc.py`, `oidc_access.py`, `accounts_*.py`, `device_grant_store.py`,
-  `routes/auth.py`: authentication, cookies, device grant, client credentials.
+- `omnigent/server/auth.py`, `oidc.py`, `oidc_access.py`, `accounts_*.py`, `device_grant_store.py`, and
+  `routes/auth.py`, `routes/accounts_auth.py`, `routes/device_auth.py`, `routes/client_credentials.py`:
+  authentication, cookies, password login, device grant, client credentials.
 - `omnigent/server/routes/` and `omnigent/stores/`: the permission check on every session, host, file and
-  connection route; `routes/sessions/routes_permissions.py` for sharing.
+  connection route; `routes/sessions/routes_permissions.py` and `sharing_settings.py` for sharing.
 - `omnigent/server/routes/host_tunnel.py`, `runner_tunnel.py`, `omnigent/server/host_registry.py`,
   `managed_hosts.py`: host and runner identity.
 - `omnigent/server/mcp_gateway.py`, `mcp_*.py`, `connections_registry.py`: the MCP gateway and stored
@@ -115,8 +120,12 @@ The image has the full Python test environment in `/src/.venv` (on `PATH`) and t
 
 - The single-user local mode is unauthenticated by design. A server bound to a non-loopback interface with
   `OMNIGENT_LOCAL_SINGLE_USER=1` prints a warning; that configuration is the operator's choice.
-- `header` auth trusts the identity header, and the operator must put an authenticating proxy in front of
-  it. Spoofing the header against a server reached directly is not a vulnerability.
+- `header` auth trusts the identity header, so the operator must put an authenticating proxy in front of the
+  server that strips or overwrites it. Spoofing the header against a deployment where clients can reach the
+  server directly, bypassing that proxy, is not a vulnerability. Header handling behind a correctly
+  configured proxy is in scope.
+- Turning public sharing off, or tightening `OMNIGENT_SHARING_MODE`, blocks new grants and leaves existing
+  ones in place. This is by design.
 - Agents running commands, reading files or using the network on their own host is the product. It is a
   finding only when a sandbox or policy that was configured to stop it fails.
 - Edit access to a session means driving its agent, which runs on the owner's host.
