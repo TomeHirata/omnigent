@@ -20,7 +20,12 @@ from starlette.requests import HTTPConnection
 
 from omnigent.errors import OmnigentError
 from omnigent.runner import create_runner_app
-from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_runner_id
+from omnigent.runner.identity import (
+    RUNNER_CREDENTIAL_PROTOCOL,
+    RUNNER_CREDENTIAL_PROTOCOL_HEADER,
+    RUNNER_TUNNEL_TOKEN_HEADER,
+    token_bound_runner_id,
+)
 from omnigent.runner.transports.ws_tunnel.diagnostics import OutboundFrame, TunnelDiagnostics
 from omnigent.runner.transports.ws_tunnel.frames import (
     EVENT_INGEST_CAPABILITY,
@@ -1903,6 +1908,8 @@ class _MintingAuthProvider(_CredentialHeaderAuthProvider):
     ``tests/server/test_accounts.py``.
     """
 
+    runner_token_scope = "runner"
+
     def mint_runner_token(self, user_id: str, ttl_seconds: int, *, runner_id: str) -> str | None:
         """Return a deterministic sentinel bearer for *user_id* and *runner_id*."""
         return f"minted-owner-token:{user_id}:{ttl_seconds}:{runner_id}"
@@ -1945,6 +1952,7 @@ async def _post_mint_token(
     runner_id: str,
     *,
     token: str | None,
+    credential_protocol: str | None = RUNNER_CREDENTIAL_PROTOCOL,
 ) -> httpx.Response:
     """POST the mint endpoint with an optional binding-token header.
 
@@ -1955,6 +1963,8 @@ async def _post_mint_token(
     :returns: The HTTP response.
     """
     headers = {} if token is None else {RUNNER_TUNNEL_TOKEN_HEADER: token}
+    if credential_protocol is not None:
+        headers[RUNNER_CREDENTIAL_PROTOCOL_HEADER] = credential_protocol
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
         base_url="http://server",
@@ -2597,3 +2607,37 @@ async def test_sender_loop_ends_quietly_when_a_close_wins_mid_send() -> None:
     await asyncio.wait_for(frame_in_transport.wait(), timeout=5)
     await ws.close(code=4000)
     await asyncio.wait_for(sender, timeout=5)  # returns instead of raising
+
+
+@pytest.mark.parametrize("credential_protocol", [None, "unknown-v2"])
+async def test_mint_rejects_incompatible_runners_before_issuing_credentials(credential_protocol):
+    token = "managed-runner-binding-token"
+    app = _mint_route_app(
+        auth_provider=_MintingAuthProvider(),
+        resolve_managed_runner_owner=lambda _: "owner@example.com",
+    )
+    response = await _post_mint_token(
+        app,
+        token_bound_runner_id(token),
+        token=token,
+        credential_protocol=credential_protocol,
+    )
+    assert response.status_code == 426
+    assert response.headers["Upgrade"] == RUNNER_CREDENTIAL_PROTOCOL
+    assert "upgrade the runner" in response.json()["detail"]
+    assert "token" not in response.json()
+
+
+async def test_mint_rejects_legacy_provider_with_actionable_error():
+    class LegacyProvider(_CredentialHeaderAuthProvider):
+        def mint_runner_token(self, user_id, ttl_seconds):
+            pytest.fail("a legacy provider must never issue an unrestricted bearer")
+
+    token = "managed-runner-binding-token"
+    app = _mint_route_app(
+        auth_provider=LegacyProvider(),
+        resolve_managed_runner_owner=lambda _: "owner@example.com",
+    )
+    response = await _post_mint_token(app, token_bound_runner_id(token), token=token)
+    assert response.status_code == 400
+    assert "upgrade the provider" in response.json()["error"]["message"]

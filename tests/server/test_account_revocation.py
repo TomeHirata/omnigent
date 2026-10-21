@@ -10,6 +10,7 @@ import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 
+from omnigent.runner.identity import RUNNER_CREDENTIAL_PROTOCOL, RUNNER_CREDENTIAL_PROTOCOL_HEADER
 from tests.server.helpers import build_agent_bundle
 from tests.server.test_accounts import _build_accounts_app, _login
 
@@ -187,7 +188,10 @@ def test_password_rotation_revokes_issued_credentials_and_keeps_work(setup_app, 
     def mint_runner_token():
         return runner.post(
             f"/v1/runners/{token_bound_runner_id(binding)}/token",
-            headers={RUNNER_TUNNEL_TOKEN_HEADER: binding},
+            headers={
+                RUNNER_TUNNEL_TOKEN_HEADER: binding,
+                RUNNER_CREDENTIAL_PROTOCOL_HEADER: RUNNER_CREDENTIAL_PROTOCOL,
+            },
         )
 
     issued = mint_runner_token()
@@ -966,7 +970,10 @@ def test_runner_token_uses_saved_account_authority(
     def mint():
         return runner.post(
             f"/v1/runners/{runner_id}/token",
-            headers={RUNNER_TUNNEL_TOKEN_HEADER: binding},
+            headers={
+                RUNNER_TUNNEL_TOKEN_HEADER: binding,
+                RUNNER_CREDENTIAL_PROTOCOL_HEADER: RUNNER_CREDENTIAL_PROTOCOL,
+            },
         )
 
     issued = mint()
@@ -1015,7 +1022,7 @@ def test_runner_token_uses_saved_account_authority(
     assert mint().status_code == 401
 
 
-def _runner_for_session(owner_client, stores, owner):
+def _runner_for_session(owner_client, stores, owner, *, legacy=False):
     import uuid
 
     from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_runner_id
@@ -1030,10 +1037,33 @@ def _runner_for_session(owner_client, stores, owner):
     conversations.replace_runner_id(bound, runner_id)
     runner = TestClient(owner_client.app)
     issued = runner.post(
-        f"/v1/runners/{runner_id}/token", headers={RUNNER_TUNNEL_TOKEN_HEADER: binding}
+        f"/v1/runners/{runner_id}/token",
+        headers={
+            RUNNER_TUNNEL_TOKEN_HEADER: binding,
+            RUNNER_CREDENTIAL_PROTOCOL_HEADER: RUNNER_CREDENTIAL_PROTOCOL,
+        },
     )
     assert issued.status_code == 200, issued.text
-    runner.headers["Authorization"] = f"Bearer {issued.json()['token']}"
+    if legacy:
+        from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER
+        from omnigent.server.oidc import mint_session_token
+
+        refused = runner.post(
+            f"/v1/runners/{runner_id}/token", headers={RUNNER_TUNNEL_TOKEN_HEADER: binding}
+        )
+        assert refused.status_code == 426, refused.text
+        assert refused.headers["Upgrade"] == RUNNER_CREDENTIAL_PROTOCOL
+        # Reproduce the token shape issued before scoped credentials existed.
+        token = mint_session_token(
+            owner,
+            stores["auth_provider"]._accounts_config.cookie_secret,
+            1800,
+            "accounts",
+            account_generation=stores["account_store"].get_user(owner).account_generation,
+        )
+    else:
+        token = issued.json()["token"]
+    runner.headers["Authorization"] = f"Bearer {token}"
     return runner, bound, runner_id
 
 
@@ -1088,14 +1118,15 @@ def test_runner_token_is_confined_to_its_runner_sessions(setup_app, owner):
 
 
 @pytest.mark.asyncio
-async def test_runner_clear_finalizes_before_detaching(setup_app, monkeypatch):
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_runner_clear_finalizes_before_detaching(setup_app, monkeypatch, legacy):
     import httpx
 
     from omnigent.harnesses.claude_native.forwarder import _post_clear_supersession
     from omnigent.runtime import session_stream
 
     _, alice, stores, _ = setup_app
-    runner, old_id, runner_id = _runner_for_session(alice, stores, "alice")
+    runner, old_id, runner_id = _runner_for_session(alice, stores, "alice", legacy=legacy)
     agent_id = stores["conversation_store"].get_conversation(old_id).agent_id
     created = runner.post("/v1/sessions", json={"agent_id": agent_id})
     assert created.status_code == 201, created.text
@@ -1116,11 +1147,36 @@ async def test_runner_clear_finalizes_before_detaching(setup_app, monkeypatch):
         headers={"Authorization": runner.headers["Authorization"]},
         event_hooks={"response": [record]},
     ) as client:
-        await _post_clear_supersession(
-            client, old_session_id=old_id, new_session_id=new_id, agent_name="review-agent"
-        )
-    assert responses == [("POST", 202), ("POST", 202), ("POST", 202), ("PATCH", 200)]
-    assert runner.get(f"/v1/sessions/{old_id}").status_code == 401
+        if legacy:
+            await client.patch(f"/v1/sessions/{old_id}", json={"runner_id": ""})
+            for event in (
+                {"type": "external_session_status", "data": {"status": "idle"}},
+                {
+                    "type": "external_conversation_item",
+                    "data": {
+                        "item_type": "message",
+                        "item_data": {
+                            "role": "assistant",
+                            "agent": "review-agent",
+                            "content": [
+                                {"type": "output_text", "text": f"Continue at /c/{new_id}"}
+                            ],
+                        },
+                    },
+                },
+                {
+                    "type": "external_session_superseded",
+                    "data": {"target_conversation_id": new_id},
+                },
+            ):
+                await client.post(f"/v1/sessions/{old_id}/events", json=event)
+        else:
+            await _post_clear_supersession(
+                client, old_session_id=old_id, new_session_id=new_id, agent_name="review-agent"
+            )
+    posts = [("POST", 202)] * 3
+    assert responses == ([("PATCH", 200), *posts] if legacy else [*posts, ("PATCH", 200)])
+    assert runner.get(f"/v1/sessions/{old_id}").status_code == (200 if legacy else 401)
     assert runner.get(f"/v1/sessions/{new_id}").status_code == 200
     assert stores["conversation_store"].get_conversation(old_id).runner_id is None
     items = alice.get(f"/v1/sessions/{old_id}/items")
@@ -1638,7 +1694,10 @@ async def test_existing_session_transfers_between_hosts(setup_app, workflow):
             ) as runner:
                 issued = await runner.post(
                     f"/v1/runners/{replacement_runner}/token",
-                    headers={RUNNER_TUNNEL_TOKEN_HEADER: bindings[replacement_runner]},
+                    headers={
+                        RUNNER_TUNNEL_TOKEN_HEADER: bindings[replacement_runner],
+                        RUNNER_CREDENTIAL_PROTOCOL_HEADER: RUNNER_CREDENTIAL_PROTOCOL,
+                    },
                 )
                 assert issued.status_code == 200, issued.text
                 authenticated = await runner.get(

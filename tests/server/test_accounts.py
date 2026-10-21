@@ -433,6 +433,7 @@ def test_mint_runner_token_returns_none_for_header_source() -> None:
     can't synthesize it. The base ``AuthProvider`` default is also None.
     """
     header_provider = UnifiedAuthProvider(source="header")
+    assert header_provider.runner_token_scope is None
     assert header_provider.mint_runner_token("alice@example.com", 1800, runner_id=_RUNNER) is None
 
     class _Base(AuthProvider):

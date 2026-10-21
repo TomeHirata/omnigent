@@ -709,12 +709,28 @@ Runner tools that require account-wide access are unavailable with these tokens:
 `sys_scheduled_task_create/list/update/delete` and tools listing all sessions.
 Use an interactive user client for those operations. Session-local operations
 and permitted child-session work continue with delegated credentials. Older
-runners may still advertise unavailable tools and receive authentication errors;
-this requires an approved compatibility transition before deployment.
+runners must be upgraded before they can obtain newly scoped credentials.
+Current runners hide `sys_agent_list` and the four scheduled-task tools in request
+harnesses, native relays, and the Pi extension. Direct calls return a credential
+capability error; session-local discovery remains available.
+
+Roll out the runner first, then the accounts/OIDC server. Upgraded runners send
+`X-Omnigent-Runner-Credential-Protocol: scoped-v1` when requesting a bearer.
+This announces support for scoped tool discovery and finalization before detach.
+Older servers ignore the header and continue issuing their existing credentials;
+upgraded runners preserve the older tool surface with those credentials.
+The upgraded server refuses missing or unknown protocols with HTTP 426 and
+upgrade guidance. It never gives an older runner a newly scoped or unrestricted
+fallback token. Older runners must be upgraded and restarted before their next
+mint; the upgrade response prevents silently changing their active authorization
+contract. A wrong deployment order interrupts credential renewal until that
+upgrade, so do not upgrade the server while incompatible runners remain active.
+Custom managed-token issuers keep their existing protocol and authorization.
 
 Previously issued unscoped runner bearers remain valid until their original
-expiry. Restart runners after upgrading to obtain scoped credentials; use
-password rotation to revoke earlier account credentials immediately when needed.
+expiry, including the older detach-then-final-events sequence. They do not acquire
+new scope rules in place. Restart upgraded runners to obtain scoped credentials;
+use password rotation to revoke earlier account credentials immediately when needed.
 
 Inherited scope is limited to 32 parent edges (33 indexed session lookups,
 including the target). Directly bound sessions and runner-created sessions with
@@ -723,12 +739,15 @@ rotating credentials, explicitly bind any active unbound session whose nearest
 runner binding is more than 32 parent edges away. An owner can do this with
 `PATCH /v1/sessions/{id}` and `{"runner_id": "<runner-id>"}`. This also restores
 access after a deep detached subtree reaches the limit. A nearer conflicting
-binding still denies inherited access. This placement limit and the loss of
-account-wide tools require explicit maintainer approval before rollout.
+binding still denies inherited access. The placement limit and the loss of
+account-wide tools are compatibility constraints of scoped delegation; operators
+must complete this preparation before the server rollout.
 
 Custom `AuthProvider` implementations must accept the `runner_id` keyword in
-`mint_runner_token` and bind newly minted credentials to that runner. Update
-overrides before deploying the server; the mint route passes this argument.
+`mint_runner_token`, bind newly minted credentials to that runner, and declare
+`runner_token_scope = "runner"`. The route checks this capability before calling
+the provider. An older provider receives a configuration error with upgrade
+guidance; its old unscoped mint method is never called as a fallback.
 
 Claude-native `/clear` transfers the terminal and posts the old conversation's
 idle status, continuation message, and redirect before detaching its runner.

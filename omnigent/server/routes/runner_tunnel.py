@@ -24,12 +24,17 @@ from collections.abc import Awaitable, Callable, Mapping
 from ipaddress import ip_address
 from typing import cast
 
-from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
 
 from omnigent.debug_logging import debug_event
 from omnigent.errors import ErrorCategory, ErrorCode, ErrorImpact, ErrorPhase, OmnigentError
-from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_runner_id
+from omnigent.runner.identity import (
+    RUNNER_CREDENTIAL_PROTOCOL,
+    RUNNER_CREDENTIAL_PROTOCOL_HEADER,
+    RUNNER_TUNNEL_TOKEN_HEADER,
+    token_bound_runner_id,
+)
 from omnigent.runner.transports.ws_tunnel.diagnostics import (
     TunnelDiagnosticAttrs,
     silence_source,
@@ -49,7 +54,7 @@ from omnigent.runner.transports.ws_tunnel.frames import (
 )
 from omnigent.runner.transports.ws_tunnel.registry import RunnerSession, TunnelRegistry
 from omnigent.server import managed_host_keepalive, session_live_state, shutdown_state
-from omnigent.server.auth import RESERVED_USER_LOCAL, AuthProvider
+from omnigent.server.auth import RESERVED_USER_LOCAL, RUNNER_TOKEN_SCOPE, AuthProvider
 from omnigent.server.host_registry import RunnerExitReports
 from omnigent.server.routes._auth_helpers import require_user
 from omnigent.server.tunnel_handshake import receive_tunnel_hello
@@ -350,6 +355,7 @@ def create_runner_tunnel_router(
             doesn't match ``runner_id``, or resolves to no managed-launch
             owner; 400 when the active auth mode can't mint server-side
             (header/proxy, or no auth provider).
+        :raises HTTPException: 426 when the runner does not announce scoped-v1 support.
         """
         if auth_provider is None:
             # No auth configured: the runner authenticates by binding
@@ -361,6 +367,19 @@ def create_runner_tunnel_router(
         token = (request.headers.get(RUNNER_TUNNEL_TOKEN_HEADER) or "").strip()
         if not token or token_bound_runner_id(token) != runner_id:
             raise OmnigentError("unauthenticated", code=ErrorCode.UNAUTHORIZED)
+        if (
+            auth_provider.runner_token_scope == RUNNER_TOKEN_SCOPE
+            and request.headers.get(RUNNER_CREDENTIAL_PROTOCOL_HEADER)
+            != RUNNER_CREDENTIAL_PROTOCOL
+        ):
+            # Old runners detach before final events and advertise account-wide tools.
+            # Do not give them a credential with semantics they cannot handle.
+            raise HTTPException(
+                status_code=426,
+                detail="upgrade the runner before requesting scoped-v1 credentials; "
+                "deploy compatible runners before upgrading the accounts/OIDC server",
+                headers={"Upgrade": RUNNER_CREDENTIAL_PROTOCOL},
+            )
         if mint_managed_runner_token is not None:
             bearer = await asyncio.to_thread(
                 mint_managed_runner_token, runner_id, _MANAGED_RUNNER_TOKEN_TTL_S
@@ -373,6 +392,12 @@ def create_runner_tunnel_router(
                 owner = await asyncio.to_thread(resolve_managed_runner_owner, runner_id)
             if owner is None:
                 raise OmnigentError("unauthenticated", code=ErrorCode.UNAUTHORIZED)
+            if auth_provider.runner_token_scope != RUNNER_TOKEN_SCOPE:
+                raise OmnigentError(
+                    "auth provider must implement runner-confined token minting and set "
+                    "runner_token_scope='runner'; upgrade the provider before enabling delegation",
+                    code=ErrorCode.INVALID_INPUT,
+                )
             bearer = auth_provider.mint_runner_token(
                 owner, _MANAGED_RUNNER_TOKEN_TTL_S, runner_id=runner_id
             )

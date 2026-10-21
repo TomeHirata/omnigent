@@ -518,6 +518,9 @@ class AuthProvider(ABC):
     When ``None`` is returned, the route helpers respond with 401.
     """
 
+    # Providers opt in only after implementing runner-bound issuance and checks.
+    runner_token_scope: str | None = None
+
     @abstractmethod
     def get_user_id(self, request: HTTPConnection) -> str | None:
         """Return the authenticated user ID, or ``None``."""
@@ -615,6 +618,7 @@ class UnifiedAuthProvider(AuthProvider):
         header_strip_prefix: str | None = None,
     ) -> None:
         self._source = source
+        self.runner_token_scope = RUNNER_TOKEN_SCOPE if source in ("accounts", "oidc") else None
         self._oidc_config = oidc_config
         self._accounts_config = accounts_config
         self._local_single_user = (

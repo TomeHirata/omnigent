@@ -349,6 +349,13 @@ class _RunnerDatabricksAuth(ThreadedAuth):
         self._factory = factory
         self._server_url = server_url or os.environ.get(_RUNNER_SERVER_URL_ENV_VAR)
 
+    @property
+    def runner_confined(self) -> bool:
+        """Whether account-wide tools are unavailable with the current bearer."""
+        from omnigent.runner.identity import runner_bearer_is_confined
+
+        return runner_bearer_is_confined(self._factory() if self._factory is not None else None)
+
     def auth_flow(
         self,
         request: httpx.Request,
@@ -950,6 +957,11 @@ class _ManagedMintTokenFactory:
             )
         except httpx.HTTPStatusError as exc:
             response = exc.response
+            if response.status_code == 426:
+                raise RuntimeError(
+                    "runner credential protocol is incompatible with the server; "
+                    "upgrade the runner before restarting it"
+                ) from exc
             if (
                 response.status_code in (400, 404)
                 or response.is_server_error
@@ -1066,11 +1078,14 @@ def _mint_managed_owner_token(
     from omnigent.cli_auth import databricks_request_headers
     from omnigent.runner.identity import (
         OMNIGENT_INTERNAL_WS_ORIGIN,
+        RUNNER_CREDENTIAL_PROTOCOL,
+        RUNNER_CREDENTIAL_PROTOCOL_HEADER,
         RUNNER_TUNNEL_TOKEN_HEADER,
     )
 
     headers = {
         "Origin": OMNIGENT_INTERNAL_WS_ORIGIN,
+        RUNNER_CREDENTIAL_PROTOCOL_HEADER: RUNNER_CREDENTIAL_PROTOCOL,
         RUNNER_TUNNEL_TOKEN_HEADER: binding_token,
         **databricks_request_headers(server_url, bearer_token=proxy_bearer),
     }

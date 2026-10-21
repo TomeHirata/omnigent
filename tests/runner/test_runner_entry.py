@@ -49,6 +49,8 @@ from omnigent.runner._entry import (
 )
 from omnigent.runner.identity import (
     RUNNER_AUTH_REJECTED_EXIT_CODE,
+    RUNNER_CREDENTIAL_PROTOCOL,
+    RUNNER_CREDENTIAL_PROTOCOL_HEADER,
     RUNNER_INITIAL_AUTH_TOKEN_ENV_VAR,
     RUNNER_INTERACTIVE_SHELLS_ENV_VAR,
     RUNNER_TUNNEL_TOKEN_HEADER,
@@ -1430,6 +1432,9 @@ def test_mint_managed_owner_token_posts_binding_token_and_parses_response(
         captured["url"] = str(request.url)
         captured["method"] = request.method
         captured["binding_token"] = request.headers.get(RUNNER_TUNNEL_TOKEN_HEADER, "")
+        captured["credential_protocol"] = request.headers.get(
+            RUNNER_CREDENTIAL_PROTOCOL_HEADER, ""
+        )
         return httpx.Response(200, json={"token": "owner-jwt", "expires_at": 1234567890})
 
     real_client = httpx.Client
@@ -1450,6 +1455,7 @@ def test_mint_managed_owner_token_posts_binding_token_and_parses_response(
     assert expires_at == 1234567890.0
     assert captured["method"] == "POST"
     assert captured["binding_token"] == "the-binding-token"
+    assert captured["credential_protocol"] == RUNNER_CREDENTIAL_PROTOCOL
     assert captured["url"].endswith("/v1/runners/runner_token_abc/token")
 
 
@@ -3388,3 +3394,22 @@ async def test_runner_selection_changes_without_rewriting_cached_bundle(tmp_path
     ]
     assert len({result.workdir for result in results}) == 1
     assert "registry" not in (results[0].workdir / "config.yaml").read_text()
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_managed_mint_protocol_failure_never_falls_back(monkeypatch, cached):
+    def refuse(mint_url, *args, **kwargs):
+        request = httpx.Request("POST", mint_url)
+        raise httpx.HTTPStatusError(
+            "upgrade required", request=request, response=httpx.Response(426, request=request)
+        )
+
+    monkeypatch.setattr("omnigent.runner._entry._mint_managed_owner_token", refuse)
+    factory = _ManagedMintTokenFactory("http://server/token", "http://server", "binding")
+    if cached:
+        factory._cached_token = "previous-bearer"
+        factory._cached_expires_at = time.time() + 1
+    with pytest.raises(RuntimeError, match="upgrade the runner"):
+        factory()
+    assert not factory.declined
+    assert not factory.proxy_auth_failed
