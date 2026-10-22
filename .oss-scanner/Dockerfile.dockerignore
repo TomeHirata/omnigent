@@ -1,6 +1,5 @@
-# Only paths .gitignore already ignores, so the scanner's fresh clone builds unchanged. Keeps a local build from
-# a working checkout from copying secrets, host installs and local data into the image. .git stays for history,
-# so don't share an image built from a checkout whose .git/config holds credentials.
+# Only git-ignored paths, so local builds match the scanner's fresh clone and leave out secrets and host installs.
+# .git stays for history: don't share an image built from a checkout whose .git/config holds credentials.
 
 # Secrets
 **/.env

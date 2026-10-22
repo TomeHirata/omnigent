@@ -21,7 +21,8 @@ There are two deployment modes, and the trust model differs between them:
   `local` user. This is intentional; there is one user.
 - **Multi-user server**: identity comes from the built-in `accounts` provider (username and password,
   invite-only, the first user is admin), `oidc` (authorization code + PKCE), or `header` (a trusted upstream
-  proxy sets `X-Forwarded-Email` or `OMNIGENT_AUTH_HEADER`). `resolve_auth_source()` in
+  proxy sets `X-Forwarded-Email`, or the header `OMNIGENT_AUTH_HEADER` names, with any prefix in
+  `OMNIGENT_AUTH_HEADER_STRIP_PREFIX` removed). `resolve_auth_source()` in
   `omnigent/server/auth.py` picks one: an explicit `OMNIGENT_AUTH_PROVIDER` wins; otherwise
   `OMNIGENT_AUTH_ENABLED=1` gives `oidc` when `OMNIGENT_OIDC_ISSUER` is set and `accounts` when it isn't;
   otherwise it is `header`. `omnigent server` bound to a non-loopback address with no auth configured turns
@@ -49,10 +50,13 @@ The roles, from most to least trusted:
 
 The defects we want found cross one of these boundaries:
 
-- reaching anything beyond login and public endpoints without authenticating, forging a session cookie,
-  or using a device-grant or machine client-credentials token outside its allowed paths or scope;
+- reaching anything beyond login and public endpoints without authenticating, signing in through OIDC
+  without passing the admission check (domain allowlist, admin list and invites in
+  `omnigent/server/oidc_access.py`), forging a session cookie, or using a device-grant or machine
+  client-credentials token outside its allowed paths or scope;
 - an authenticated user reading or changing another user's sessions, messages, files, artifacts, hosts,
-  connections or stored credentials (IDOR), or exceeding a grant (read to edit, edit to manage);
+  connections or stored credentials (IDOR), or exceeding a grant (read to edit, edit to manage, manage to
+  owner);
 - public access above the current `OMNIGENT_PUBLIC_SHARING_MAX_LEVEL`, which applies live to existing grants
   too, or a new grant that `OMNIGENT_PUBLIC_SHARING` or `OMNIGENT_SHARING_MODE` should have refused;
 - an unintended party claiming a grant made to an identity nobody holds yet, for example through an invite,
@@ -65,8 +69,9 @@ The defects we want found cross one of these boundaries:
   treat XSS that reaches Node, IPC or the agent browser as code execution on the desktop;
 - untrusted agent-visible content (prompt injection, a malicious repository, an MCP response) defeating a
   control Omnigent enforces: a DENY policy, an ASK approval that gets skipped or auto-approved, the
-  `linux_bwrap` / `darwin_seatbelt` sandbox, or the Electron agent browser's URL policy
-  (`web/electron/src/browserUrlPolicy.js`; there is no server-side URL policy);
+  `linux_bwrap` / `darwin_seatbelt` sandbox, the sandbox's L7 egress proxy (`egress_rules`, which blocks
+  private destinations by default; `omnigent/inner/egress/`), or the Electron agent browser's URL policy
+  (`web/electron/src/browserUrlPolicy.js`). The server itself has no URL policy;
 - server-side path traversal, archive extraction outside its target (`omnigent/spec/tar_utils.py`,
   `omnigent/tools/builtins/upload_file.py`, agent bundles), or SSRF from the server to internal addresses;
 - credentials (KMS-encrypted connections, the sandbox credential proxy, OAuth tokens) appearing in
@@ -86,8 +91,8 @@ Most:
   `managed_hosts.py`: host and runner identity.
 - `omnigent/server/mcp_gateway.py`, `mcp_*.py`, `connections_registry.py`: the MCP gateway and stored
   credentials.
-- `omnigent/policies/`, `omnigent/runtime/policies/`, `omnigent/inner/sandbox.py`: policy evaluation and
-  sandboxing.
+- `omnigent/policies/`, `omnigent/runtime/policies/`, `omnigent/inner/sandbox.py`, `omnigent/inner/egress/`:
+  policy evaluation, sandboxing and the egress proxy.
 - `web/src/` (rendering of messages, markdown, files and tool output; see
   `web/src/components/ai-elements/streamdown-security.ts`) and `web/electron/` (main process, IPC, the agent
   browser).
