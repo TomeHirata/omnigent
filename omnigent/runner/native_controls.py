@@ -115,6 +115,49 @@ async def _drive_claude_pane(
         return await asyncio.to_thread(function, *args, **kwargs)
 
 
+def _claude_model_change_blocked_detail(exc: BaseException) -> str | None:
+    """
+    Return a model-switch next step when the terminal is waiting on the person, else ``None``.
+
+    :param exc: The exception the prompt wait or ``/model`` injection raised.
+    :returns: Client-facing detail ending with the pane tail the bridge
+        captured, or ``None`` for failures with no person-actionable cause.
+    """
+    from omnigent.harnesses.claude_native.bridge import (
+        ClaudePromptTimeout,
+        ClaudeSignInPending,
+        ClaudeTerminalDialog,
+        ClaudeTerminalExited,
+        ClaudeUserPromptPending,
+        terminal_failure_tail,
+    )
+
+    if isinstance(exc, ClaudeSignInPending):
+        # The bridge's remediation targets the chat card's live link, which this reply lacks.
+        return f"{exc.title}. Finish the sign-in in the terminal, then switch models again."
+    if isinstance(exc, ClaudeUserPromptPending):
+        next_step = (
+            "Claude is waiting for an answer to a question or prompt. "
+            "Answer it, then switch models again."
+        )
+    elif isinstance(exc, ClaudeTerminalDialog):
+        next_step = (
+            "Claude Code's terminal is showing a prompt or dialog. Open the terminal, "
+            "answer or dismiss it, then switch models again."
+        )
+    elif isinstance(exc, ClaudeTerminalExited):
+        next_step = "The Claude Code terminal has exited. Relaunch it, then switch models again."
+    elif isinstance(exc, ClaudePromptTimeout):
+        # Also raised for a slow boot or a startup crash, so hint rather than prescribe.
+        next_step = (
+            "Claude Code's input box never appeared. It may still be starting, or waiting "
+            "on a prompt such as a password. Check the terminal, then switch models again."
+        )
+    else:
+        return None
+    return next_step + terminal_failure_tail(str(exc))
+
+
 # How long the detached watcher keeps answering a /model confirm dialog that
 # pops after the active turn settles (a mid-turn switch queues in the
 # composer), and how often it looks. Long turns are common; the watch is
@@ -1359,11 +1402,13 @@ def build_native_controls(
         command = f"/model {model_arg}"
 
         def _model_failed(exc: BaseException) -> JSONResponse:
+            # Always log the full cause; the reply carries it only when actionable.
+            safe_detail = _client_safe_error_detail(exc, context="claude-native model change")
             return JSONResponse(
                 status_code=503,
                 content={
                     "error": "claude_native_model_failed",
-                    "detail": _client_safe_error_detail(exc, context="claude-native model change"),
+                    "detail": _claude_model_change_blocked_detail(exc) or safe_detail,
                 },
             )
 
