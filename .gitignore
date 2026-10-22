@@ -46,7 +46,7 @@ omnigent/_build_info.py
 .claude/*
 !.claude/skills/
 
-# Exception: track .oss-scanner/ (the Dockerfile and threat model Anthropic's OSS Scanner builds and reads).
+# Exception: track .oss-scanner/ (OSS Scanner config) despite the .*/ rule above.
 !.oss-scanner/
 
 # Local helper scripts

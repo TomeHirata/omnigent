@@ -16,12 +16,16 @@ Electron desktop app (`web/electron/`), the mobile apps (`web/ios/`, `web/androi
 
 There are two deployment modes, and the trust model differs between them:
 
-- **Single-user local**: `omnigent server` on loopback with `OMNIGENT_LOCAL_SINGLE_USER=1`. Requests
-  without credentials are served as the reserved `local` user. This is intentional; there is one user.
-- **Multi-user server**: `OMNIGENT_AUTH_ENABLED=1`. Identity comes from the built-in `accounts` provider
-  (username and password, invite-only, the first user is admin), `oidc` (authorization code + PKCE), or
-  `header` (a trusted upstream proxy sets `X-Forwarded-Email` or `OMNIGENT_AUTH_HEADER`). Selection is in
-  `resolve_auth_source()` in `omnigent/server/auth.py`. **This is the mode we care most about.**
+- **Single-user local**: `omnigent server` on a loopback address with no auth configured sets
+  `OMNIGENT_LOCAL_SINGLE_USER=1` (`omnigent/cli.py`). Requests without credentials are served as the reserved
+  `local` user. This is intentional; there is one user.
+- **Multi-user server**: identity comes from the built-in `accounts` provider (username and password,
+  invite-only, the first user is admin), `oidc` (authorization code + PKCE), or `header` (a trusted upstream
+  proxy sets `X-Forwarded-Email` or `OMNIGENT_AUTH_HEADER`). `resolve_auth_source()` in
+  `omnigent/server/auth.py` picks one: an explicit `OMNIGENT_AUTH_PROVIDER` wins; otherwise
+  `OMNIGENT_AUTH_ENABLED=1` gives `oidc` when `OMNIGENT_OIDC_ISSUER` is set and `accounts` when it isn't;
+  otherwise it is `header`. `omnigent server` bound to a non-loopback address with no auth configured turns
+  on `accounts`. **This is the mode we care most about.**
 
 The roles, from most to least trusted:
 
@@ -51,13 +55,18 @@ The defects we want found cross one of these boundaries:
   connections or stored credentials (IDOR), or exceeding a grant (read to edit, edit to manage);
 - public access above the current `OMNIGENT_PUBLIC_SHARING_MAX_LEVEL`, which applies live to existing grants
   too, or a new grant that `OMNIGENT_PUBLIC_SHARING` or `OMNIGENT_SHARING_MODE` should have refused;
+- an unintended party claiming a grant made to an identity nobody holds yet, for example through an invite,
+  registration, an OIDC claim or a header value;
+- a web page the user visits reaching a loopback single-user server, for example past the WebSocket Origin
+  check (`omnigent/server/ws_origin.py`);
 - a host or sandbox tunnel acting for another user, binding to a session it does not own, or reusing a
   token beyond its scope;
 - one user's input running as script in another user's web UI session (stored XSS). In the Electron app,
   treat XSS that reaches Node, IPC or the agent browser as code execution on the desktop;
 - untrusted agent-visible content (prompt injection, a malicious repository, an MCP response) defeating a
   control Omnigent enforces: a DENY policy, an ASK approval that gets skipped or auto-approved, the
-  `linux_bwrap` / `darwin_seatbelt` sandbox, or the browser URL policy;
+  `linux_bwrap` / `darwin_seatbelt` sandbox, or the Electron agent browser's URL policy
+  (`web/electron/src/browserUrlPolicy.js`; there is no server-side URL policy);
 - server-side path traversal, archive extraction outside its target (`omnigent/spec/tar_utils.py`,
   `omnigent/tools/builtins/upload_file.py`, agent bundles), or SSRF from the server to internal addresses;
 - credentials (KMS-encrypted connections, the sandbox credential proxy, OAuth tokens) appearing in
@@ -69,7 +78,8 @@ Most:
 
 - `omnigent/server/auth.py`, `oidc.py`, `oidc_access.py`, `accounts_*.py`, `device_grant_store.py`, and
   `routes/auth.py`, `routes/accounts_auth.py`, `routes/device_auth.py`, `routes/client_credentials.py`:
-  authentication, cookies, password login, device grant, client credentials.
+  authentication, cookies, password login, device grant, client credentials; `ws_origin.py` for the
+  WebSocket Origin check.
 - `omnigent/server/routes/` and `omnigent/stores/`: the permission check on every session, host, file and
   connection route; `routes/sessions/routes_permissions.py` and `sharing_settings.py` for sharing.
 - `omnigent/server/routes/host_tunnel.py`, `runner_tunnel.py`, `omnigent/server/host_registry.py`,
@@ -83,7 +93,9 @@ Most:
   browser).
 
 Least: `dev/` (developer tooling, including the Rust `omnidev`), `examples/`, `tests/`, `scripts/`,
-`designs/`, `docs/`, `feature-map/`, `editors/`, `deploy/` (sample deployment manifests), and `.github/`.
+`designs/`, `docs/`, `feature-map/`, and the sample manifests under `deploy/`. Still in scope there: secret
+handling in `deploy/docker/` (`bootstrap.sh`, `entrypoint.py`, `docker-compose.yaml`) and `deploy/cloudflare/`,
+token handling in `editors/vscode/`, and `.github/` workflows that handle untrusted pull requests.
 
 ## How to exercise it
 
@@ -91,8 +103,9 @@ The image has the full Python test environment in `/src/.venv` (on `PATH`) and t
 `omnigent/server/static/web-ui`. There is no network, so use the mock-LLM tests rather than real models.
 
 - `omnigent server --help`; run a multi-user server locally with
-  `OMNIGENT_AUTH_ENABLED=1 omnigent server --host 127.0.0.1 --admin-password <pw>` and log in through
-  `/auth/login`.
+  `OMNIGENT_AUTH_ENABLED=1 OMNIGENT_ACCOUNTS_INIT_ADMIN_USERNAME=admin omnigent server --host 127.0.0.1
+  --admin-password <pw>`, then sign in on the web login page or with `POST /auth/login` (`GET /auth/login`
+  is the OIDC redirect).
 - Auth and permission tests: `tests/server/test_auth_mode.py`, `test_permissions.py`,
   `test_public_sharing_policy.py`, `test_oidc_access.py`, `test_device_auth.py`.
 - Server integration tests against a mock LLM: `tests/server/integration/` (for example
@@ -103,18 +116,21 @@ The image has the full Python test environment in `/src/.venv` (on `PATH`) and t
 
 ## How you rate severity
 
-- **Critical**: unauthenticated code execution on the server; unauthenticated access to any user's sessions
-  or credentials in a multi-user mode; one user running code on another user's host; XSS in the Electron
-  app that reaches code execution.
+- **Critical**: unauthenticated code execution on the server; in a multi-user mode, unauthenticated access to
+  a non-public session, access beyond a session's public grant, or access to any user's credentials; one
+  user running code on another user's host; XSS in the Electron app that reaches code execution.
 - **High**: an authenticated user reading or changing another user's sessions, files, hosts or
-  credentials; escalating a grant; host or tunnel impersonation; stored XSS that runs in another user's
-  web session; untrusted content bypassing a DENY policy, an ASK approval or the sandbox; server-side path
-  traversal that writes files.
+  credentials without a valid grant; escalating a grant; host or tunnel impersonation; stored XSS that runs
+  in another user's web session; untrusted content bypassing a DENY policy, an ASK approval or the sandbox;
+  server-side path traversal that writes files.
 - **Medium**: cross-user disclosure of metadata only (session titles, emails, host names); SSRF with no
-  response returned; secrets written to server logs that only the operator can read; read-only path
-  traversal limited to the server's own data directory.
+  response returned; secrets written to server logs that only the operator can read.
 - **Low**: denial of service by an authenticated user, missing hardening headers, and issues reachable
   only from a trusted role.
+
+Rate a file read or path traversal by what it exposes, not where the file lives. The server's data directory
+holds the runtime database, sessions, messages and stored tokens (`docs/DATA_DIR_LAYOUT.md`), so reading
+another user's sessions or credentials from it is High or Critical as above.
 
 ## Anything to leave alone
 
@@ -129,10 +145,11 @@ The image has the full Python test environment in `/src/.venv` (on `PATH`) and t
 - Agents running commands, reading files or using the network on their own host is the product. It is a
   finding only when a sandbox or policy that was configured to stop it fails.
 - Edit access to a session means driving its agent, which runs on the owner's host.
-- Named-group grants (for example `team.engineering`) are free-text principals that are not resolved
-  server-side. This is by design.
+- Omnigent has no group principals. A grant targets a literal identity string, and an owner granting a
+  session to any string, including one nobody holds yet, is the owner's choice. Someone else being able to
+  claim that identity is in scope (see above).
 - Admins and the server operator seeing every session, and anything that requires control of server
   config, `policy_modules` or the deployment environment.
 - Prompt injection on its own, when the agent only does what its configured permissions already allow.
-- Dependency CVEs that are not reachable from Omnigent code; Trivy and Dependabot track these
-  (`SECURITY.md`).
+- Dependency CVEs that are not reachable from Omnigent code; Trivy (`SECURITY.md`) and Dependabot
+  (`.github/dependabot.yml`) track these.

@@ -19,11 +19,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ELECTRON_SKIP_BINARY_DOWNLOAD=1 \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
-# ripgrep, bubblewrap and tmux are what CI installs for the tests: the Grep tool, the linux_bwrap sandbox
-# and harness terminals. git backs workspaces and worktrees.
+# The packages CI installs for the tests: ripgrep (the Grep tool), bubblewrap (the linux_bwrap sandbox), tmux
+# (harness terminals) and dbus-daemon + gnome-keyring (keyring tests). git backs workspaces and worktrees.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential ca-certificates curl git ripgrep bubblewrap tmux \
+        build-essential ca-certificates curl git ripgrep bubblewrap tmux dbus-daemon gnome-keyring \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
