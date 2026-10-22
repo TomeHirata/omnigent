@@ -518,8 +518,20 @@ _SESSION_HEADER = {"X-Omnigent-Session-Id": "conv_bound"}
         ("GET", "/v1/sessions/conv_bound", None),
         ("POST", "/v1/sessions/conv_bound/events", None),
         ("GET", "/v1/sessions/conv_bound/agent/contents", None),
+        ("GET", "/v1/sessions/conv_bound/agent/mcp-servers", None),
+        ("GET", "/v1/sessions/conv_bound/child_sessions", None),
+        ("PATCH", "/v1/sessions/conv_bound", None),
+        ("POST", "/v1/sessions/conv_bound/hooks/permission-request", None),
+        ("POST", "/v1/sessions/conv_bound/policies/evaluate", None),
+        (
+            "GET",
+            "/v1/sessions/conv_bound/resources/environments/env/filesystem/path/to/file",
+            None,
+        ),
+        ("POST", "/v1/sessions/conv_bound/resources/environments/env/shell", None),
         ("POST", "/v1/sessions", None),
         ("GET", f"/v1/runners/{_RUNNER}/status", None),
+        ("POST", f"/v1/runners/{_RUNNER}/token", None),
         ("GET", "/v1/sessions/conv_bound/owner", None),
         ("GET", "/v1/policy-registry", None),
         ("GET", "/api/version", None),
@@ -547,6 +559,16 @@ def test_runner_token_accepted_on_runner_routes(
         ("POST", "/auth/invite", None),
         ("GET", "/v1/sessions", None),
         ("GET", "/v1/sessions/conv_bound/stream", None),
+        ("PUT", "/v1/sessions/conv_bound/agent", None),
+        ("POST", "/v1/sessions/conv_bound/agent/mcp-servers", None),
+        ("PUT", "/v1/sessions/conv_bound/agent/mcp-servers/server", None),
+        ("DELETE", "/v1/sessions/conv_bound/agent/mcp-servers/server", None),
+        ("DELETE", "/v1/sessions/conv_bound", None),
+        ("POST", "/v1/sessions/conv_bound/switch-agent", None),
+        ("POST", "/v1/sessions/conv_bound/future-route", None),
+        ("POST", "/v1/sessions/conv_bound/agent/contents", None),
+        ("PATCH", "/v1/sessions/conv_bound/resources/new-resource", None),
+        ("POST", f"/v1/runners/{_RUNNER}/future-route", None),
         ("GET", "/v1/sessions/conv_other", None),
         ("POST", "/v1/sessions/conv_other/resources/environments/env/shell", None),
         ("GET", "/v1/hosts", None),
@@ -601,13 +623,12 @@ def test_runner_token_reaches_no_session_without_scope_lookup() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["accounts", "oidc"])
-async def test_runner_scope_denial_closes_websocket_before_dispatch(source):
+async def test_runner_scope_denial_closes_websocket_before_dispatch():
     from asgiref.testing import ApplicationCommunicator
 
     from omnigent.server.auth import AccountAuthenticationMiddleware
 
-    provider = _runner_provider(source=source)
+    provider = _runner_provider()
     token = provider.mint_runner_token("alice", 1800, runner_id=_RUNNER)
     assert token is not None
 
@@ -628,6 +649,20 @@ async def test_runner_scope_denial_closes_websocket_before_dispatch(source):
     assert closed["type"] == "websocket.close"
     assert closed["code"] == 1008
     await connection.wait(timeout=5)
+
+
+def test_runner_child_cursor_expires(monkeypatch):
+    from omnigent.server.auth import RunnerTokenConfinement
+
+    confinement = RunnerTokenConfinement(_RUNNER, None, b"cursor-test-secret")
+    now = 1_000_000_000
+    monkeypatch.setattr("cryptography.fernet.time.time", lambda: now)
+    cursor = confinement.child_cursor("parent", "hidden-child")
+    assert confinement.child_cursor("parent", cursor, decode=True) == "hidden-child"
+    now += 3601
+    with pytest.raises(OmnigentError) as denied:
+        confinement.child_cursor("parent", cursor, decode=True)
+    assert denied.value.code == ErrorCode.STALE_CURSOR
 
 
 def test_runner_session_scope_follows_nearest_runner_binding() -> None:

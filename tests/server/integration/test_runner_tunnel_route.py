@@ -2093,7 +2093,11 @@ async def test_mint_token_endpoint_missing_binding_token_rejected() -> None:
     assert response.status_code == 401
 
 
-async def test_mint_token_endpoint_header_mode_unsupported_returns_400() -> None:
+@pytest.mark.parametrize("credential_protocol", [None, RUNNER_CREDENTIAL_PROTOCOL])
+@pytest.mark.parametrize("builtin", [False, True])
+async def test_mint_token_endpoint_header_mode_unsupported_returns_400(
+    credential_protocol, builtin
+) -> None:
     """When the provider can't mint (header/proxy mode), the endpoint 400s.
 
     The binding token is valid and the owner resolves, but header/proxy
@@ -2105,16 +2109,20 @@ async def test_mint_token_endpoint_header_mode_unsupported_returns_400() -> None
     token = "managed-runner-binding-token"
     runner_id = token_bound_runner_id(token)
     app = _mint_route_app(
-        # Base provider: mint_runner_token uses the ABC default (None).
-        auth_provider=_CredentialHeaderAuthProvider(),
+        auth_provider=UnifiedAuthProvider("header")
+        if builtin
+        else _CredentialHeaderAuthProvider(),
         resolve_managed_runner_owner=(
             lambda rid: "owner@example.com" if rid == runner_id else None
         ),
     )
 
-    response = await _post_mint_token(app, runner_id, token=token, credential_protocol=None)
+    response = await _post_mint_token(
+        app, runner_id, token=token, credential_protocol=credential_protocol
+    )
 
     assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_input"
 
 
 async def test_ping_loop_restamps_runner_liveness(

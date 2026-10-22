@@ -377,6 +377,15 @@ def create_runner_tunnel_router(
                 "upgrade the runner to a supported credential protocol (scoped-v1)",
                 code=ErrorCode.RUNNER_UPGRADE_REQUIRED,
             )
+        if auth_provider.runner_token_scope is None and (
+            isinstance(auth_provider, UnifiedAuthProvider)
+            or type(auth_provider).mint_runner_token is AuthProvider.mint_runner_token
+        ):
+            # Proxy identity cannot be minted; callbacks use the binding token.
+            raise OmnigentError(
+                "runner token minting is unsupported in this auth mode",
+                code=ErrorCode.INVALID_INPUT,
+            )
         confined = credential_protocol == RUNNER_CREDENTIAL_PROTOCOL
         if confined and not (
             isinstance(auth_provider, UnifiedAuthProvider)
@@ -384,9 +393,7 @@ def create_runner_tunnel_router(
             and (mint_managed_runner_token is None or mint_scoped_managed_runner_token is not None)
         ):
             raise OmnigentError(
-                "upgrade the auth provider and managed issuer to a wired scoped-v1 "
-                "implementation; "
-                "a scoped request cannot use legacy credentials",
+                "auth provider cannot issue scoped-v1 runner credentials",
                 code=ErrorCode.RUNNER_UPGRADE_REQUIRED,
             )
         if not confined and not env_var_is_truthy(LEGACY_RUNNER_TOKENS_ENV, default=True):

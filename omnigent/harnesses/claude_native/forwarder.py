@@ -3528,17 +3528,8 @@ async def _create_clear_replacement_session(
     clear_resp = await client.patch(
         f"/v1/sessions/{url_component(old_session_id)}",
         json={
-            # The forwarder detaches after posting the old session's final events.
-            # Re-key the superseded session onto a DISTINCT "-cleared" bridge id.
-            # The new session keeps the original bridge id (set above) and owns
-            # the live terminal/pane in D(original); the old session must NOT
-            # share that dir, or resuming it (host wake-on-message /
-            # ``omnigent claude --resume``) would put a second forwarder on the
-            # live transcript (duplicate items) and trip the executor's
-            # "no longer active after /clear" guard. ``_auto_create_claude_terminal``
-            # recognises this exact marker and cold-resumes the old session in
-            # its own isolated D("{id}-cleared"); the executor spawn_env resolves
-            # the same label, so both agree.
+            # A distinct bridge id keeps a resumed old session from sharing the
+            # live transcript with the new session's forwarder.
             "labels": {BRIDGE_ID_LABEL_KEY: f"{old_session_id}-cleared"},
         },
     )

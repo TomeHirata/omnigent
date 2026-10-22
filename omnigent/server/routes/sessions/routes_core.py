@@ -2710,6 +2710,11 @@ def register_core_routes(
                     code=ErrorCode.FORBIDDEN,
                 )
         confinement = runner_token_confinement(request)
+        if confinement is not None and (set_project or set_share_workspace):
+            raise OmnigentError(
+                "runner credential cannot change project placement or sharing",
+                code=ErrorCode.RUNNER_SCOPE_DENIED,
+            )
         if confinement is not None and body.runner_id not in (None, "", confinement.runner_id):
             # Rebinding to another runner would execute this session's turns there.
             raise OmnigentError(

@@ -687,45 +687,43 @@ Update this top-level README with a row in the table above.
 
 ### Delegated runner credentials
 
-During the 0.20.x compatibility window, accounts/OIDC runners announcing
-`X-Omnigent-Runner-Credential-Protocol: scoped-v1` receive credentials confined
-to their runner's sessions and callbacks. Older runners keep receiving legacy
-owner-wide credentials by default. **Legacy issuance retains the original
-cross-runner/account exposure**; protocol negotiation is not proof that a
-sandbox is trustworthy. Upgrade/restart runners, then set
-`OMNIGENT_ALLOW_LEGACY_RUNNER_TOKENS=0` on the server to require confinement.
-Legacy issuance is deprecated and scheduled for removal in **0.21.0**.
-
-Unknown protocols and scoped requests without a wired built-in accounts/OIDC
-validator receive HTTP 426 (`runner_upgrade_required`), even during the
-compatibility window. Scoped requests never downgrade to legacy credentials.
-With legacy issuance disabled, missing protocols also receive 426. Existing legacy bearers retain their authority until expiry;
-password rotation or account deletion revokes both legacy and scoped bearers.
-Scoped denials return HTTP 403 (`runner_scope_denied`) without token renewal.
-Confined runners hide scheduling and account-wide agent discovery, skip global
-session/host discovery, and cannot change session sharing or use browser SSE.
-Their session-scoped agent routes and local child discovery remain available.
-
-Custom `AuthProvider`s retain their two-argument `mint_runner_token` contract
-for callers without a protocol header during this window. Declaring
-`runner_token_scope` alone does not enable scoped issuance: custom providers
-need a framework-verified validation integration, which is not provided here.
-A scoped request using one receives 426 before the issuer is called. Custom
-managed-token issuers for built-in accounts/OIDC must pair their legacy callback
-with `mint_scoped_managed_runner_token` under the same saved-authority lock.
-
-JSON creation by known owner-agent ID permits unbound top-level sessions for
-native `/clear` rotation, with no host launch. Multipart uploads require an
-in-scope parent to avoid adding agents to the owner catalog. Both stay on the
-creating runner; bootstrap
-scope is consumed before binding, transfer, or detach. Claude-native `/clear`
-finalizes before detach. If detach fails, its warning identifies the old session;
-an owner can clear that binding with `{"runner_id": ""}`.
-Inherited scope stops after 32 parent edges (33 indexed
-lookups). For deeper unbound sessions, or a failed initial binding, use owner
-credentials to bind explicitly with `PATCH /v1/sessions/{id}` and
-`{"runner_id": "<runner-id>"}`. A nearer conflicting binding still denies access;
-direct bindings and active bootstrap grants have no total nesting-depth limit.
+- During the **0.20.x compatibility window**, accounts/OIDC runners sending
+  `X-Omnigent-Runner-Credential-Protocol: scoped-v1` receive credentials confined
+  to their runner's sessions. Older runners receive legacy owner-wide credentials
+  by default. **Legacy issuance retains the original cross-runner/account
+  exposure.** Upgrade/restart runners, then set
+  `OMNIGENT_ALLOW_LEGACY_RUNNER_TOKENS=0` on the server. Legacy issuance is
+  deprecated and scheduled for removal in **0.21.0**.
+- Supporting servers never issue legacy credentials in response to `scoped-v1`.
+  Unknown protocols, unwired accounts/OIDC validators and legacy minting custom
+  providers receive HTTP 426 (`runner_upgrade_required`). Missing protocols also
+  receive 426 when legacy issuance is disabled. Header/proxy and non-minting
+  providers return HTTP 400 without a bearer; runners continue using their tunnel
+  binding token. Pre-protocol servers ignore the header and can still return
+  owner-wide credentials until upgraded. Existing legacy bearers retain authority
+  until expiry; account password rotation or deletion revokes both bearer types.
+- Scoped denials return HTTP 403 (`runner_scope_denied`) without token renewal.
+  An explicit route/method allowlist admits session callbacks and local resources.
+  Account-wide discovery, scheduling, browser SSE, sharing/project changes,
+  agent-bundle/MCP configuration writes and recursive session deletion are denied.
+  Owner-uploaded agents remain reusable and readable by known ID, including their
+  bundle contents, across the owner's runners; their definitions are read-only
+  to confined bearers. Failed child-spawn cleanup reports a warning if deletion
+  requires owner credentials. The owner must remove any orphaned session.
+- Custom `AuthProvider`s retain their two-argument `mint_runner_token` contract
+  for callers without a protocol header. Declaring `runner_token_scope` alone
+  does not enable scoped issuance. Built-in accounts/OIDC custom managed-token
+  issuers must pair their legacy callback with `mint_scoped_managed_runner_token`
+  under the same saved-authority lock.
+- JSON creation by known owner-agent ID permits an unbound top-level session for
+  native `/clear`, with no host launch. Multipart uploads require an in-scope
+  parent. Bootstrap scope is consumed before binding, transfer or detach.
+  `/clear` finalizes before detach; a failed detach is logged with the old session
+  ID. The owner can repair it with `PATCH /v1/sessions/{id}` and
+  `{"runner_id": ""}`, or restore a failed initial binding using
+  `{"runner_id": "<runner-id>"}`. Inherited scope stops after 32 parent edges;
+  deeper unbound sessions need an explicit owner binding. A nearer conflicting
+  binding always takes precedence.
 
 Confined child lists use encrypted cursors, bound to the runner and parent and
 valid for one hour. Treat `first_id` and `last_id` as opaque continuation tokens.

@@ -1128,6 +1128,8 @@ def test_runner_token_is_confined_to_its_runner_sessions(setup_app, monkeypatch,
     assert "private-child-preview" in visible_children.text
     conversations.replace_runner_id(child_id, other_runner_id)
     assert runner.get(f"/v1/sessions/{child_id}").status_code == 403
+    assert runner.delete(f"/v1/sessions/{bound}").status_code == 403
+    assert conversations.get_conversation(child_id) is not None
     children = runner.get(f"/v1/sessions/{bound}/child_sessions")
     assert children.status_code == 200, children.text
     assert child_id not in {row["id"] for row in children.json()["data"]}
@@ -1198,6 +1200,65 @@ def test_runner_token_is_confined_to_its_runner_sessions(setup_app, monkeypatch,
         files={"bundle": ("agent.tar.gz", build_agent_bundle(name="helper"), "application/gzip")},
     )
     assert sub_agent.status_code == 201, sub_agent.text
+
+
+@pytest.mark.parametrize("owner", ["alice", "admin"])
+def test_runner_reused_agent_is_read_only(setup_app, owner):
+    admin, alice, stores, _ = setup_app
+    owner_client = alice if owner == "alice" else admin
+    runner, bound, _ = _runner_for_session(owner_client, stores, owner)
+    origin = create_session(owner_client).json()["session_id"]
+    agent_id = owner_client.get(f"/v1/sessions/{origin}").json()["agent_id"]
+    reused = runner.post("/v1/sessions", json={"agent_id": agent_id})
+    assert reused.status_code == 201, reused.text
+    session_id = reused.json()["id"]
+    assert runner.get(f"/v1/sessions/{session_id}/agent/contents").status_code == 200
+    before = owner_client.get(f"/v1/sessions/{origin}/agent/contents").content
+    for method, suffix in (
+        ("PUT", "agent"),
+        ("POST", "agent/mcp-servers"),
+        ("PUT", "agent/mcp-servers/injected"),
+        ("DELETE", "agent/mcp-servers/injected"),
+        ("POST", "switch-agent"),
+    ):
+        response = runner.request(method, f"/v1/sessions/{session_id}/{suffix}", json={})
+        assert response.status_code == 403, response.text
+        assert response.json()["error"]["code"] == "runner_scope_denied"
+    assert owner_client.get(f"/v1/sessions/{origin}/agent/contents").content == before
+    for body in ({"project_id": "project_other"}, {"share_workspace_files": True}):
+        response = runner.patch(f"/v1/sessions/{bound}", json=body)
+        assert response.status_code == 403, response.text
+        assert response.json()["error"]["code"] == "runner_scope_denied"
+
+
+def test_oidc_runner_scope_denial_closes_real_websocket(setup_app):
+    from starlette.websockets import WebSocketDisconnect
+
+    from omnigent.runner.identity import OMNIGENT_INTERNAL_WS_ORIGIN
+    from omnigent.server.auth import AccountAuthenticationMiddleware, UnifiedAuthProvider
+    from tests.server.integration.oidc_fixtures import make_oidc_config
+
+    _, alice, stores, create_app = setup_app
+    created = create_session(alice)
+    assert created.status_code == 201, created.text
+    session_id = created.json()["session_id"]
+    provider = UnifiedAuthProvider("oidc", oidc_config=make_oidc_config())
+    app = create_app(**{**stores, "auth_provider": provider, "account_store": None})
+    assert not any(m.cls is AccountAuthenticationMiddleware for m in app.user_middleware)
+    token = provider.mint_runner_token("alice", 1800, runner_id="runner_test")
+    assert token is not None
+    with TestClient(app) as client:
+        with pytest.raises(WebSocketDisconnect) as denied:
+            with client.websocket_connect(
+                f"/v1/sessions/{session_id}/resources/terminals/terminal/attach",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Origin": OMNIGENT_INTERNAL_WS_ORIGIN,
+                },
+            ):
+                pytest.fail("a confined bearer must not attach to another runner")
+    assert denied.value.code == 1008
+    assert denied.value.reason == "runner_scope_denied"
 
 
 @pytest.mark.parametrize("order", ["asc", "desc"])

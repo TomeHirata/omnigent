@@ -44,8 +44,9 @@ be able to write resources without a separate Omnigent account.
   hidden, global session listing is empty, and host readiness is unavailable.
   Hosts and interactive user clients keep their own authority. States: own
   callback succeeds, another runner's session is denied, permission denials do
-  not renew credentials, sharing and browser SSE are denied, and strict mode
-  gives incompatible runners upgrade guidance.
+  not renew credentials, shared-agent writes and session deletion are denied,
+  and strict mode gives incompatible runners upgrade guidance. Header/proxy
+  providers decline minting without interrupting binding-token callbacks.
 - `embedded-resource-write`: an identity from a custom `AuthProvider` can
   create, rename, and reorder its own projects; unauthenticated and other users
   remain restricted.

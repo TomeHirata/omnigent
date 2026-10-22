@@ -860,19 +860,21 @@ def test_managed_mint_factory_declines_at_request_time_and_auth_sends_bare(
     """
     calls: list[int] = []
 
-    def _boot_blip_then_refuse(
-        mint_url: str, server_url: str, binding_token: str, **_kw: object
-    ) -> tuple[str, float]:
+    def _boot_blip_then_refuse(request: httpx.Request) -> httpx.Response:
         """Fail the boot probe with a connection error, then 400 every mint."""
         calls.append(1)
+        assert request.headers[RUNNER_CREDENTIAL_PROTOCOL_HEADER] == RUNNER_CREDENTIAL_PROTOCOL
         if len(calls) == 1:
             raise httpx.ConnectError("server not listening yet")
-        request = httpx.Request("POST", mint_url)
-        raise httpx.HTTPStatusError(
-            "no auth provider", request=request, response=httpx.Response(400, request=request)
-        )
+        return httpx.Response(400, json={"error": {"code": "invalid_input"}})
 
-    monkeypatch.setattr("omnigent.runner._entry._mint_managed_owner_token", _boot_blip_then_refuse)
+    real_client = httpx.Client
+    monkeypatch.setattr(
+        "omnigent.runner._entry.httpx.Client",
+        lambda **kwargs: real_client(
+            transport=httpx.MockTransport(_boot_blip_then_refuse), **kwargs
+        ),
+    )
 
     factory = _make_managed_mint_factory("https://s.example.com", "btok")
     assert factory is not None  # boot blip is transient → installed
@@ -886,6 +888,7 @@ def test_managed_mint_factory_declines_at_request_time_and_auth_sends_bare(
     request2 = httpx.Request("GET", "http://server/v1/responses/turn_1")
     sent2 = next(auth.auth_flow(request2))
     assert "Authorization" not in sent2.headers
+    assert factory.declined
     assert len(calls) == 2  # probe blip + the single definitive 400
 
 

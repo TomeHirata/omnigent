@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 import httpx
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query, Request, WebSocket
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
@@ -2326,6 +2326,16 @@ def create_app(
             )
 
     @app.exception_handler(OmnigentError)
+    async def _handle_connection_error(
+        request: Request | WebSocket,
+        exc: OmnigentError,
+    ) -> JSONResponse | None:
+        """Close rejected WebSockets; render HTTP failures as structured JSON."""
+        if isinstance(request, WebSocket):
+            await request.close(code=1008 if exc.http_status < 500 else 1011, reason=str(exc.code))
+            return None
+        return await _handle_omnigent_error(request, exc)
+
     async def _handle_omnigent_error(
         request: Request,
         exc: OmnigentError,

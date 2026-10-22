@@ -43,6 +43,7 @@ from enum import Enum
 from typing import TYPE_CHECKING, Protocol
 
 from starlette.requests import HTTPConnection
+from starlette.routing import compile_path
 
 from omnigent.errors import ERROR_CODE_HEADER, ErrorCode, OmnigentError
 from omnigent.stores.conversation_store import RUNNER_CREATOR_LABEL_KEY
@@ -108,7 +109,75 @@ LEGACY_RUNNER_TOKENS_ENV = "OMNIGENT_ALLOW_LEGACY_RUNNER_TOKENS"
 
 _RUNNER_CONFINEMENT_KEY = "omnigent.runner_confinement"
 _RUNNER_OPEN_PATHS = frozenset({"/health", "/api/version"})
-_RUNNER_READ_ONLY_PREFIXES = ("/v1/policy-registry",)
+_RUNNER_SESSION_CAPABILITIES = tuple(
+    (frozenset(methods.split()), compile_path("/v1/sessions/{session_id}" + suffix)[0])
+    for methods, suffix in (
+        ("GET PATCH", ""),
+        ("GET", "/items"),
+        ("GET", "/child_sessions"),
+        ("GET", "/agent"),
+        ("GET", "/agent/contents"),
+        ("GET", "/agent/mcp-servers"),
+        ("POST", "/mcp"),
+        ("POST", "/events"),
+        ("GET", "/labels"),
+        ("GET", "/owner"),
+        ("POST", "/agent-title"),
+        ("POST", "/auto-title"),
+        ("POST", "/model-override/reset"),
+        ("POST", "/fork"),
+        ("GET POST", "/comments"),
+        ("PATCH DELETE", "/comments/{comment_id}"),
+        ("POST", "/comments/send"),
+        ("POST", "/hooks/permission-request"),
+        ("POST", "/hooks/codex-elicitation-request"),
+        ("POST", "/hooks/antigravity-elicitation-request"),
+        ("POST", "/hooks/cursor-permission-request"),
+        ("POST", "/hooks/native-permission-request"),
+        ("POST", "/hooks/route-subagent"),
+        ("POST", "/hooks/route-turn"),
+        ("GET POST", "/policies"),
+        ("GET PATCH DELETE", "/policies/{policy_id}"),
+        ("POST", "/policies/evaluate"),
+        ("POST", "/browser/action_request"),
+        ("POST", "/browser/action_claim/{action_id}"),
+        ("POST", "/browser/action_result/{action_id}"),
+        ("POST", "/elicitations/{elicitation_id}/resolve"),
+        ("GET", "/elicitations/{elicitation_id}"),
+        ("GET PUT DELETE", "/codex_goal"),
+        ("PATCH", "/codex_goal/status"),
+        ("GET", "/resources"),
+        ("GET", "/resources/environments"),
+        ("GET", "/resources/environments/{environment_id}"),
+        ("GET POST", "/resources/terminals"),
+        ("GET DELETE", "/resources/terminals/{terminal_id}"),
+        ("POST", "/resources/terminals/{terminal_id}/transfer"),
+        ("WEBSOCKET", "/resources/terminals/{terminal_id}/attach"),
+        ("GET POST", "/resources/files"),
+        ("GET DELETE", "/resources/files/{file_id}"),
+        ("GET", "/resources/files/{file_id}/content"),
+        ("POST", "/resources/files:copy"),
+        ("GET", "/resources/environments/{environment_id}/filesystem"),
+        (
+            "GET PUT PATCH DELETE",
+            "/resources/environments/{environment_id}/filesystem/{path:path}",
+        ),
+        ("GET", "/resources/environments/{environment_id}/content-search"),
+        ("GET", "/resources/environments/{environment_id}/search"),
+        ("GET", "/resources/environments/{environment_id}/search/{path:path}"),
+        ("GET", "/resources/environments/{environment_id}/changes"),
+        ("GET", "/resources/environments/{environment_id}/diff/{path:path}"),
+        ("POST", "/resources/environments/{environment_id}/shell"),
+        ("GET", "/resources/github"),
+        ("GET", "/resources/github/changes"),
+        ("GET", "/resources/github/diff"),
+        ("GET", "/resources/github/diff/{path:path}"),
+        ("POST", "/resources/github/prs"),
+        ("POST", "/resources/github/preferences"),
+        ("GET POST", "/resources/github/labels"),
+        ("GET", "/resources/{resource_id}"),
+    )
+)
 _SESSION_ID_HEADER = "X-Omnigent-Session-Id"
 # Inspect the target plus at most 32 parent edges; deeper unbound sessions
 # need an explicit runner binding before a confined bearer can access them.
@@ -206,12 +275,13 @@ class RunnerTokenConfinement:
         outside it, whatever the owner's own authority.
         """
         path = connection.url.path
-        method = connection.scope.get("method")
+        method = (
+            "WEBSOCKET" if connection.scope["type"] == "websocket" else connection.scope["method"]
+        )
         if path in _RUNNER_OPEN_PATHS:
-            return True
-        for prefix in _RUNNER_READ_ONLY_PREFIXES:
-            if path == prefix or path.startswith(prefix + "/"):
-                return method == "GET"
+            return method == "GET"
+        if path == "/v1/policy-registry":
+            return method == "GET"
         segments = path.split("/")
         if len(segments) < 3 or segments[:2] != ["", "v1"]:
             return False
@@ -220,15 +290,32 @@ class RunnerTokenConfinement:
             if not rest:
                 # Creation is further confined by the create route itself.
                 return method == "POST"
-            # Browser streams mirror other runners; sharing is an owner operation.
-            if len(rest) >= 2 and rest[1] in ("stream", "permissions"):
-                return False
-            return bool(rest[0]) and self.allows_session(rest[0])
+            # Agent writes and recursive deletion can affect other runners.
+            for methods, pattern in _RUNNER_SESSION_CAPABILITIES:
+                match = pattern.fullmatch(path)
+                if method in methods and match is not None:
+                    return self.allows_session(match["session_id"])
+            return False
         if family == "runners":
-            return bool(rest) and rest[0] == self.runner_id
+            return (
+                len(rest) == 2
+                and rest[0] == self.runner_id
+                and (method, rest[1])
+                in {
+                    ("GET", "status"),
+                    ("POST", "token"),
+                    ("WEBSOCKET", "tunnel"),
+                }
+            )
         if family == "mcp":
             session_id = connection.headers.get(_SESSION_ID_HEADER)
-            return len(rest) == 1 and bool(session_id) and self.allows_session(session_id)
+            return (
+                method == "POST"
+                and len(rest) == 1
+                and bool(rest[0])
+                and bool(session_id)
+                and self.allows_session(session_id)
+            )
         return False
 
 
@@ -566,8 +653,7 @@ class AuthProvider(ABC):
         *,
         runner_id: str | None = None,  # noqa: ARG002
     ) -> str | None:
-        """
-        When *runner_id* is given, confine the bearer to that runner's sessions.
+        """Mint a runner bearer for *user_id*, confined to *runner_id* when given.
 
         Only the wired built-in validator supports scoped issuance. Until 0.21.0, calls
         without *runner_id* retain the legacy owner-wide contract when
