@@ -40,6 +40,7 @@ from omnigent.entities.conversation import (
     parse_item_data,
 )
 from omnigent.errors import ErrorCode, OmnigentError
+from omnigent.harness_plugins import NativeCodingAgent
 from omnigent.harnesses.codex_native.side_chat import is_side_chat_child
 from omnigent.host.frames import (
     HARNESS_NOT_CONFIGURED_ERROR_CODE as _HARNESS_NOT_CONFIGURED_ERROR_CODE,
@@ -54,6 +55,7 @@ from omnigent.host.frames import (
     workspace_missing_message as _workspace_missing_message,
 )
 from omnigent.mcp_selection import mcp_selection_revision, selected_mcp_spec
+from omnigent.native.input_diagnostics import input_attributes
 from omnigent.runner.identity import RUNNER_TUNNEL_TOKEN_HEADER, token_bound_runner_id
 from omnigent.runner.launch_failure import (
     CODEX_COMPACTION_MODEL_FAILED,
@@ -70,6 +72,7 @@ from omnigent.runner.transports.ws_tunnel.frames import (
 )
 from omnigent.runtime import (
     inflight_text,
+    pending_elicitations,
     pending_inputs,
     session_stream,
 )
@@ -180,6 +183,7 @@ from omnigent.server.routes._sessions.helpers import (
     _dispatch_skill_slash_command_to_runner,
     _evaluate_output_policy,
     _filesystem_attachment_in_history,
+    _filesystem_attachment_policy,
     _forward_session_change_to_runner,
     _get_runner_client,
     _get_runner_client_for_resource_access,
@@ -187,6 +191,7 @@ from omnigent.server.routes._sessions.helpers import (
     _is_codex_native_subagent,
     _is_devin_native_subagent,
     _launch_runner_on_host,
+    _native_coding_agent_for_session,
     _parse_background_tasks,
     _persist_external_acp_subagent_start,
     _persist_external_assistant_message,
@@ -206,6 +211,8 @@ from omnigent.server.routes._sessions.helpers import (
     _publish_compaction_failed,
     _publish_compaction_in_progress,
     _publish_elicitation_request_to_ancestors,
+    _publish_elicitation_resolved,
+    _publish_elicitation_resolved_to_ancestors,
     _publish_external_output_reasoning_delta,
     _publish_external_output_text_delta,
     _publish_external_tool_output_delta,
@@ -554,6 +561,17 @@ def _host_offline_message() -> str:
     )
 
 
+def _hostless_runner_gone_message(conv: Conversation, agent: NativeCodingAgent | None) -> str:
+    """Return the refusal text for a send whose host-less runner is gone."""
+    message = "No host can restart this session's runner, so your message was not sent."
+    if agent is None:
+        return f"{message} Resume the session from the machine that ran it."
+    return (
+        f"{message} Resume it from the machine that ran it with "
+        f"`{cli_invocation()} {agent.key} --resume {conv.id}`, then send the message again."
+    )
+
+
 # A client that keeps an unsent message and resends it when the host is back
 # sets this header; the server then refuses instead of recording a failed turn.
 HOST_OFFLINE_HOLD_HEADER = "x-omnigent-hold-when-host-offline"
@@ -628,6 +646,7 @@ async def _recover_retry_session(
         initializer=getattr(request.app.state, "runner_session_initializer", None),
         suppress_recovery_turn=was_connected or bool(saved_inputs),
         require_success=True,
+        trigger="retry_session",
     )
 
     if _is_native_terminal_session(conv):
@@ -1068,6 +1087,19 @@ def register_events_routes(
                 _EXTERNAL_ASSISTANT_MESSAGE_TYPE,
             ),
         )
+        if body.type == "message" and _is_native_terminal_session(conv):
+            _logger.info(
+                "Native input received before runner initialization",
+                extra=debug_event(
+                    "native_input_received",
+                    session_id=session_id,
+                    runner_id=conv.runner_id,
+                    turn_id=None,
+                    user_id=None,
+                    input_received_at_ms=time.time_ns() // 1_000_000,
+                    **input_attributes({"input_stable_id": body.data.get("stable_id")}),
+                ),
+            )
         if body.type in {
             _EXTERNAL_CODEX_APPROVAL_MODE_CHANGE_TYPE,
             _EXTERNAL_PERMISSION_MODE_CHANGE_TYPE,
@@ -1179,14 +1211,30 @@ def register_events_routes(
                     f"Invalid data payload for event type {body.type!r}: {exc}",
                     code=ErrorCode.INVALID_INPUT,
                 ) from exc
+        # Set when this message sends a file outside the default extensions, which
+        # the bound runtime must be able to deliver as a file.
+        outgoing_needs_delivery_capability = False
         if body.type in ("message", _SLASH_COMMAND_TYPE):
             from omnigent.inner.native_attachments import (
+                DELIVERY_KEY,
                 inline_filesystem_attachment_name,
                 requires_filesystem,
+                uses_filesystem_delivery,
             )
+            from omnigent.runtime.content_resolver import attachment_delivery
 
             content = body.data.get("content")
-            inline_name = inline_filesystem_attachment_name(content)
+            if isinstance(content, list):
+                # Only the upload's stored record decides delivery; a client's
+                # claim would put inline bytes on disk past the upload checks.
+                for block in content:
+                    if isinstance(block, dict):
+                        block.pop(DELIVERY_KEY, None)
+            policy = _filesystem_attachment_policy(request.app.state)
+            inline_name = inline_filesystem_attachment_name(
+                content,
+                lambda name, mime: attachment_delivery(name, mime, policy) == "filesystem",
+            )
             if inline_name is not None:
                 raise OmnigentError(
                     f"Attachment {inline_name!r} must be uploaded to the session's "
@@ -1195,6 +1243,7 @@ def register_events_routes(
                 )
             # Unsent uploads survive a switch or fork without appearing in history.
             if file_store is not None and isinstance(content, list):
+                filesystem_name: str | None = None
                 for block in content:
                     file_id = block.get("file_id") if isinstance(block, dict) else None
                     if not isinstance(file_id, str):
@@ -1202,9 +1251,14 @@ def register_events_routes(
                     stored = await asyncio.to_thread(file_store.get, file_id)
                     if stored is None or stored.session_id not in (None, session_id):
                         continue
-                    if stored.filename is not None and requires_filesystem(stored.filename):
-                        await _require_filesystem_attachment_harness(conv, stored.filename)
-                        break
+                    if stored.filename is not None and uses_filesystem_delivery(
+                        stored.filename, stored.source_metadata
+                    ):
+                        filesystem_name = filesystem_name or stored.filename
+                        if not requires_filesystem(stored.filename):
+                            outgoing_needs_delivery_capability = True
+                if filesystem_name is not None:
+                    await _require_filesystem_attachment_harness(conv, filesystem_name)
         # Fail fast on malformed tools at the boundary. The raw dicts
         # (not the parsed objects) are what the runner stores — the
         # parse call is purely a validator.
@@ -1264,8 +1318,9 @@ def register_events_routes(
             )
             and await startup.accepts(conv, request.app)
         ):
+            # Deferred authorization needs the identity even when attribution is hidden.
             saved = await startup.enqueue(
-                session_id, body, user_id=created_by, headers=request.headers, first=False
+                session_id, body, user_id=user_id, headers=request.headers, first=False
             )
             if conv.host_id is not None:
                 startup.host_changed(request.app, conv.host_id)
@@ -1545,6 +1600,7 @@ def register_events_routes(
                 conversation_store,
                 initializer=getattr(_app_state, "runner_session_initializer", None),
                 suppress_recovery_turn=True,
+                trigger="native_control",
             )
             await _ensure_runner_relay_ready(
                 session_id,
@@ -2042,7 +2098,29 @@ def register_events_routes(
                     "external_elicitation_resolved requires string data.elicitation_id.",
                     code=ErrorCode.INVALID_INPUT,
                 )
+            entry = pending_elicitations.lookup(elicitation_id, conversation_id=session_id)
+            if entry is not None and entry[1].get("params", {}).get("target_session_id") not in (
+                None,
+                session_id,
+            ):
+                raise OmnigentError(
+                    "Elicitation does not belong to this session.",
+                    code=ErrorCode.INVALID_INPUT,
+                )
             _signal_harness_elicitation_resolved_by_id(session_id, elicitation_id)
+            if (
+                entry is not None and entry[1].get("params", {}).get("native_delivery") is not None
+            ) or pending_elicitations.native_resolution_for(
+                session_id, elicitation_id
+            ) == "unanswered":
+                # The attempted web verdict may differ from the terminal's answer.
+                _publish_elicitation_resolved(session_id, elicitation_id)
+                await asyncio.to_thread(
+                    _publish_elicitation_resolved_to_ancestors,
+                    conversation_store,
+                    session_id,
+                    elicitation_id,
+                )
             return {"queued": False}
         if body.type in (_EXTERNAL_SESSION_STATUS_TYPE, _SUBAGENT_STATUS_TYPE):
             status = body.data.get("status")
@@ -2897,6 +2975,20 @@ def register_events_routes(
                         "Wait for it to reconnect and send the message again.",
                         code=ErrorCode.RUNNER_UNAVAILABLE,
                     )
+                if (
+                    conv.host_id is None
+                    and conv.runner_id is not None
+                    and conv.kind != "sub_agent"
+                    and (conv.labels or {}).get(SIDE_CHAT_LABEL_KEY) != "1"
+                    and not exit_cause
+                ):
+                    # A runner bound without a host (a local terminal) can't be relaunched;
+                    # refuse so the client keeps the message.
+                    agent = await asyncio.to_thread(_native_coding_agent_for_session, conv)
+                    raise OmnigentError(
+                        _hostless_runner_gone_message(conv, agent),
+                        code=ErrorCode.RUNNER_UNAVAILABLE,
+                    )
                 if host_offline and _client_holds_host_offline_sends(request.headers):
                     # Nothing reaches the harness, so nothing is recorded; the
                     # client keeps the message and resends it after reconnect.
@@ -3073,6 +3165,8 @@ def register_events_routes(
                 content=content if isinstance(content, list) else [],
             )
             if attachment is not None:
+                from omnigent.inner.native_attachments import CAP_FILESYSTEM_ATTACHMENT_DELIVERY
+
                 await asyncio.to_thread(
                     require_filesystem_attachment_runtime,
                     host_id=conv.host_id,
@@ -3080,6 +3174,13 @@ def register_events_routes(
                     host_registry=getattr(request.app.state, "host_registry", None),
                     tunnel_registry=getattr(request.app.state, "tunnel_registry", None),
                     runner_router=runner_router,
+                    # Retained files only need restoring; files sent now must
+                    # also reach the harness as files.
+                    capability=(
+                        CAP_FILESYSTEM_ATTACHMENT_DELIVERY
+                        if outgoing_needs_delivery_capability
+                        else None
+                    ),
                 )
         native_terminal_ready = False
         initializer = getattr(request.app.state, "runner_session_initializer", None)
@@ -3099,6 +3200,7 @@ def register_events_routes(
                 conversation_store,
                 initializer=initializer,
                 suppress_recovery_turn=True,
+                trigger="web_message",
             )
         await _ensure_runner_relay_ready(
             session_id,
