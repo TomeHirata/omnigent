@@ -26,7 +26,9 @@
  *
  * It also lists sessions with unseen agent output — the same read-state
  * behind the sidebar's unread dot — previewing the latest reply. Opening
- * the session or "Mark as read" clears a row.
+ * the session or "Mark as read" clears a row. So does replying from the
+ * expanded card, which posts the same user message the chat composer
+ * does; the agent's answer re-surfaces the row as a new unread reply.
  *
  * Every kind renders as the same card: a one-line row (kind tile, label,
  * session title — preview, time, unread dot) that expands in place. All
@@ -48,6 +50,7 @@ import { useQueries, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangleIcon,
   ArrowRightIcon,
+  ArrowUpIcon,
   CheckIcon,
   CircleAlertIcon,
   CircleCheckIcon,
@@ -63,6 +66,10 @@ import { PageScroll } from "@/components/PageScroll";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Textarea } from "@/components/ui/textarea";
+import { showToast } from "@/components/ui/toast";
+import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
+import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { useSidebarData } from "@/hooks/useSidebarData";
 import {
   isConversationUnseen,
@@ -84,11 +91,13 @@ import {
   writeInboxFilter,
   type InboxFilter,
 } from "@/lib/inboxFilterPreferences";
+import { isComposerSendKey, readSubmitWithModEnter } from "@/lib/composerSendShortcutPreferences";
 import { latestOutputPreview } from "@/lib/lastAssistantText";
+import { isEditorLevel } from "@/lib/permissionsApi";
 import { relativeTime } from "@/lib/relativeTime";
 import { Link } from "@/lib/routing";
 import { useOmnigentAnalytics } from "@/lib/analytics";
-import { approve, fetchSessionItemsPage, getSession } from "@/lib/sessionsApi";
+import { approve, fetchSessionItemsPage, getSession, postEvent } from "@/lib/sessionsApi";
 import { userColor, userInitials } from "@/lib/userBadge";
 import { cn } from "@/lib/utils";
 import { conversationDisplayLabel, getConversationAgentType } from "@/shell/sidebarNav";
@@ -103,6 +112,9 @@ type RespondedMap = Record<
     attempt?: string;
   }
 >;
+
+/** A reply POST in flight or refused; a session with no entry is idle. */
+type ReplyStatus = { state: "sending" } | { state: "failed"; message: string };
 
 const INBOX_TABS: { value: InboxFilter; label: string }[] = [
   { value: "all", label: "All" },
@@ -163,6 +175,14 @@ export function InboxPage() {
   // approval. Keying by id (not index) keeps a user's explicit toggles
   // stable when new items shift positions.
   const [expandedOverrides, setExpandedOverrides] = useState<Record<string, boolean>>({});
+  // Keyed by session id at page level: a collapsed card unmounts its body,
+  // and the draft must survive the toggle.
+  const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
+  const [replyStatuses, setReplyStatuses] = useState<Record<string, ReplyStatus>>({});
+  const [submitWithModEnter] = useState(readSubmitWithModEnter);
+  const isMobileViewport = useIsMobileViewport();
+  const isCoarsePointer = useIsCoarsePointer();
+  const preventsKeyboardSubmit = isMobileViewport || isCoarsePointer;
 
   const { hasNextPage, isFetchingNextPage, fetchNextPage } = conversationsQuery;
   const rows = allRows.filter((c) => (c.pending_elicitations_count ?? 0) > 0);
@@ -503,6 +523,37 @@ export function InboxPage() {
       setExpandedOverrides(({ [entry.key]: _cleared, ...rest }) => rest);
       markConversationRead(sessionId, item.row.updated_at);
     };
+    // The server refuses user messages below edit access.
+    const canReply = isEditorLevel(item.row.permission_level);
+    const replyDraft = replyDrafts[sessionId] ?? "";
+    const replyStatus = replyStatuses[sessionId];
+    const replySending = replyStatus?.state === "sending";
+    const sendReply = () => {
+      if (!replyDraft.trim() || replySending) return;
+      // One telemetry point for both the button and the keyboard shortcut.
+      trackClick("inbox.unread.reply", "button");
+      setReplyStatuses((prev) => ({ ...prev, [sessionId]: { state: "sending" } }));
+      postEvent(sessionId, {
+        type: "message",
+        data: { role: "user", content: [{ type: "input_text", text: replyDraft }] },
+      })
+        .then((result) => {
+          if (result.denied) throw new Error("A policy blocked this reply.");
+          if (!result.queued) throw new Error("The session didn’t accept this reply.");
+          setReplyDrafts(({ [sessionId]: _sent, ...rest }) => rest);
+          setReplyStatuses(({ [sessionId]: _settled, ...rest }) => rest);
+          // Replying is reading: the row clears now, and the agent's answer
+          // re-surfaces it as a fresh unread reply.
+          markRead();
+          void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+          showToast(`Reply sent to ${title}`);
+        })
+        .catch((error: unknown) => {
+          // Keep the draft so the user can retry or open the session instead.
+          const message = error instanceof Error ? error.message : String(error);
+          setReplyStatuses((prev) => ({ ...prev, [sessionId]: { state: "failed", message } }));
+        });
+    };
     return (
       <InboxCard
         key={entry.key}
@@ -528,6 +579,21 @@ export function InboxPage() {
             <p className="mt-2 text-ui font-medium break-words whitespace-pre-wrap">{preview}</p>
           )}
         </div>
+        {canReply && (
+          <InboxReplyField
+            label={`Reply to ${title}`}
+            value={replyDraft}
+            onChange={(value) => {
+              setReplyDrafts((prev) => ({ ...prev, [sessionId]: value }));
+              setReplyStatuses(({ [sessionId]: _stale, ...rest }) => rest);
+            }}
+            onSubmit={sendReply}
+            sending={replySending}
+            error={replyStatus?.state === "failed" ? replyStatus.message : undefined}
+            submitWithModEnter={submitWithModEnter}
+            preventsKeyboardSubmit={preventsKeyboardSubmit}
+          />
+        )}
         <InboxActions>
           <Button
             variant="outline"
@@ -539,7 +605,12 @@ export function InboxPage() {
             <CheckIcon className="size-3.5" />
             Mark as read
           </Button>
-          <Button asChild size="xs" className={PRIMARY_ACTION}>
+          <Button
+            asChild
+            variant={canReply ? "outline" : "default"}
+            size="xs"
+            className={canReply ? OUTLINE_ACTION : PRIMARY_ACTION}
+          >
             {/* Opening is reading. Mark it here: a freshly mounted chat keeps an
                 explicit "Mark as unread" override, so it wouldn't clear this row. */}
             <Link to={`/c/${sessionId}`} onClick={markRead} componentId="inbox.unread.open_session">
@@ -547,6 +618,21 @@ export function InboxPage() {
               <ArrowRightIcon className="size-3.5" />
             </Link>
           </Button>
+          {canReply && (
+            <Button
+              size="xs"
+              className={PRIMARY_ACTION}
+              disabled={!replyDraft.trim() || replySending}
+              onClick={sendReply}
+            >
+              {replySending ? (
+                <Loader2Icon className="size-3.5 animate-spin" />
+              ) : (
+                <ArrowUpIcon className="size-3.5" />
+              )}
+              Send
+            </Button>
+          )}
         </InboxActions>
       </InboxCard>
     );
@@ -766,4 +852,58 @@ function SessionLine({ title, detail }: { title: string; detail?: string }) {
 
 function InboxActions({ children }: { children: ReactNode }) {
   return <div className="flex items-center justify-end gap-1 pt-0.5">{children}</div>;
+}
+
+/** The expanded unread card's reply box; its Send button lives in the action row. */
+function InboxReplyField({
+  label,
+  value,
+  onChange,
+  onSubmit,
+  sending,
+  error,
+  submitWithModEnter,
+  preventsKeyboardSubmit,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+  sending: boolean;
+  error?: string;
+  submitWithModEnter: boolean;
+  preventsKeyboardSubmit: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-1.5">
+      <Textarea
+        aria-label={label}
+        aria-invalid={error !== undefined}
+        placeholder="Reply…"
+        value={value}
+        disabled={sending}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          // Same send chord as the chat composer, including the Mod+Enter preference.
+          if (
+            !isComposerSendKey(
+              { ...event, isComposing: event.nativeEvent.isComposing },
+              submitWithModEnter,
+              preventsKeyboardSubmit,
+            )
+          ) {
+            return;
+          }
+          event.preventDefault();
+          onSubmit();
+        }}
+        className="max-h-48 min-h-14 resize-none"
+      />
+      {error && (
+        <p role="alert" className="text-sm text-destructive">
+          {error}
+        </p>
+      )}
+    </div>
+  );
 }

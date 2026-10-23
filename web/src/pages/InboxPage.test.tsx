@@ -8,7 +8,8 @@ import { SidebarDataProvider } from "@/hooks/useSidebarData";
 // The page composes several live data sources, so we mock at their seams:
 //  - `useConversations` (the session list + its paging drain),
 //  - `useCommentInbox` (the comment side of the inbox),
-//  - `getSession` / `approve` (per-session snapshot fetch + the verdict POST).
+//  - `getSession` / `approve` (per-session snapshot fetch + the verdict POST),
+//  - `postEvent` (the reply POST).
 // The pure assembly helper `collectInboxItems` and the display helpers are
 // left REAL, so raw events follow the production parse path. Native delivery
 // tests also use the real ApprovalCard; other prompts use an Accept-button stub.
@@ -25,6 +26,7 @@ import * as commentInboxHook from "@/hooks/useCommentInbox";
 import * as sessionsApi from "@/lib/sessionsApi";
 import type { CommentInbox } from "@/hooks/useCommentInbox";
 import {
+  isConversationUnseen,
   isExplicitlyUnread,
   resetReadStateForTests,
   seedReadState,
@@ -72,6 +74,7 @@ vi.mock("@/lib/sessionsApi", () => ({
   getSession: vi.fn(),
   approve: vi.fn(),
   fetchSessionItemsPage: vi.fn(),
+  postEvent: vi.fn(),
 }));
 
 function conversation(overrides: Partial<Conversation> = {}): Conversation {
@@ -145,6 +148,7 @@ beforeEach(() => {
     {} as Awaited<ReturnType<typeof sessionsApi.approve>>,
   );
   vi.mocked(sessionsApi.fetchSessionItemsPage).mockResolvedValue({ items: [], hasMore: false });
+  vi.mocked(sessionsApi.postEvent).mockResolvedValue({ queued: true });
 });
 
 afterEach(() => {
@@ -673,6 +677,135 @@ describe("InboxPage unread sessions", () => {
     fireEvent.click(within(item).getByRole("button", { name: /Unread Session/ }));
     fireEvent.click(within(item).getByRole("button", { name: /Mark as read/ }));
     await waitFor(() => expect(screen.queryByTestId("inbox-unread")).not.toBeInTheDocument());
+  });
+});
+
+describe("InboxPage replies", () => {
+  function expandUnread(): HTMLElement {
+    const item = screen.getByTestId("inbox-unread");
+    fireEvent.click(within(item).getByRole("button", { name: /Unread Session/ }));
+    return item;
+  }
+
+  it("posts the reply as a user message, then clears the row", async () => {
+    // WHY: replying is reading — the row clears like Mark as read, and the
+    // agent's answer brings it back as a new unread reply.
+    const toasts: unknown[] = [];
+    const onToast = (e: Event) => toasts.push((e as CustomEvent).detail.content);
+    window.addEventListener("omnigent:toast", onToast);
+    const row = unreadConversation();
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    renderPage();
+
+    await screen.findByTestId("inbox-unread");
+    const item = expandUnread();
+    const send = within(item).getByRole("button", { name: "Send" });
+    expect(send).toBeDisabled();
+    fireEvent.change(within(item).getByRole("textbox", { name: "Reply to Unread Session" }), {
+      target: { value: "Ship it" },
+    });
+    fireEvent.click(send);
+
+    await waitFor(() => expect(screen.queryByTestId("inbox-unread")).not.toBeInTheDocument());
+    expect(sessionsApi.postEvent).toHaveBeenCalledWith("sess_unread", {
+      type: "message",
+      data: { role: "user", content: [{ type: "input_text", text: "Ship it" }] },
+    });
+    expect(toasts).toEqual(["Reply sent to Unread Session"]);
+    window.removeEventListener("omnigent:toast", onToast);
+  });
+
+  it("sends on Enter and leaves Shift+Enter to the textarea", async () => {
+    const row = unreadConversation();
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    renderPage();
+
+    await screen.findByTestId("inbox-unread");
+    const box = within(expandUnread()).getByRole("textbox", { name: /Reply to/ });
+    fireEvent.change(box, { target: { value: "Line one" } });
+    fireEvent.keyDown(box, { key: "Enter", shiftKey: true });
+    expect(sessionsApi.postEvent).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(sessionsApi.postEvent).toHaveBeenCalledTimes(1));
+  });
+
+  it("keeps the draft and the row when the reply is refused", async () => {
+    // WHY: a failed send has no server-side record, so the inbox must hand
+    // the text back rather than drop it with the row.
+    const row = unreadConversation();
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    vi.mocked(sessionsApi.postEvent).mockRejectedValueOnce(
+      new Error("No host can restart this session's runner, so your message was not sent."),
+    );
+    renderPage();
+
+    await screen.findByTestId("inbox-unread");
+    const item = expandUnread();
+    const box = within(item).getByRole("textbox", { name: /Reply to/ });
+    fireEvent.change(box, { target: { value: "Try again" } });
+    fireEvent.click(within(item).getByRole("button", { name: "Send" }));
+
+    expect(await within(item).findByRole("alert")).toHaveTextContent(
+      "No host can restart this session's runner",
+    );
+    expect(box).toHaveValue("Try again");
+    expect(box).toBeEnabled();
+    expect(isConversationUnseen(row.id, row.updated_at, row.status)).toBe(true);
+
+    // Editing the draft clears the stale error.
+    fireEvent.change(box, { target: { value: "Try again now" } });
+    expect(within(item).queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("reports a policy-denied reply instead of clearing the row", async () => {
+    const row = unreadConversation();
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    vi.mocked(sessionsApi.postEvent).mockResolvedValueOnce({ queued: false, denied: true });
+    renderPage();
+
+    await screen.findByTestId("inbox-unread");
+    const item = expandUnread();
+    fireEvent.change(within(item).getByRole("textbox", { name: /Reply to/ }), {
+      target: { value: "rm -rf /" },
+    });
+    fireEvent.click(within(item).getByRole("button", { name: "Send" }));
+
+    expect(await within(item).findByRole("alert")).toHaveTextContent(
+      "A policy blocked this reply.",
+    );
+    expect(screen.getByTestId("inbox-unread")).toBeInTheDocument();
+  });
+
+  it("keeps a draft across collapsing and re-expanding the card", async () => {
+    const row = unreadConversation();
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    renderPage();
+
+    await screen.findByTestId("inbox-unread");
+    const item = expandUnread();
+    fireEvent.change(within(item).getByRole("textbox", { name: /Reply to/ }), {
+      target: { value: "Half-written" },
+    });
+    const toggle = within(item).getByRole("button", { name: /Unread Session/ });
+    fireEvent.click(toggle);
+    expect(within(item).queryByRole("textbox")).not.toBeInTheDocument();
+    fireEvent.click(toggle);
+
+    expect(within(item).getByRole("textbox", { name: /Reply to/ })).toHaveValue("Half-written");
+  });
+
+  it("offers no reply box on a session shared read-only", async () => {
+    // WHY: the server refuses user messages below edit access.
+    const row = unreadConversation({ permission_level: 1 });
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    renderPage();
+
+    await screen.findByTestId("inbox-unread");
+    const item = expandUnread();
+    expect(within(item).queryByRole("textbox")).not.toBeInTheDocument();
+    expect(within(item).queryByRole("button", { name: "Send" })).not.toBeInTheDocument();
+    expect(within(item).getByRole("link", { name: /Open session/ })).toBeInTheDocument();
   });
 });
 
