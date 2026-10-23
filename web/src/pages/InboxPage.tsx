@@ -26,9 +26,8 @@
  *
  * It also lists sessions with unseen agent output — the same read-state
  * behind the sidebar's unread dot — previewing the latest reply. Opening
- * the session or "Mark as read" clears a row. The expanded card can reply
- * like the chat composer. Sending leaves the read baseline alone because
- * `updated_at` is whole-second; the running turn hides the row instead.
+ * the session or "Mark as read" clears a row. The card can also reply; a send
+ * leaves the whole-second read baseline alone and lets the running turn hide it.
  *
  * Every kind renders as the same card: a one-line row (kind tile, label,
  * session title — preview, time, unread dot) that expands in place. All
@@ -280,7 +279,9 @@ export function InboxPage() {
       const query = previewQueries[index];
       return (
         unreadItems[index]!.row.status !== status.rowStatus ||
-        (query?.isPending === false && (query.data?.key ?? null) !== status.outputKey)
+        (query?.isPending === false &&
+          !query.isError &&
+          (query.data?.key ?? null) !== status.outputKey)
       );
     })
     .map(([sessionId]) => sessionId);
@@ -600,10 +601,10 @@ export function InboxPage() {
       // One telemetry point for both the button and the keyboard shortcut.
       trackClick("inbox.unread.reply", "button");
       // Like the composer: an untouched retry reuses the failed id; editing drops it.
-      const stableId =
-        replyStatus?.state === "failed"
-          ? replyStatus.retryStableId
-          : randomUUID().replace(/-/g, "");
+      const retriesFailedSend = replyStatus?.state === "failed";
+      const stableId = retriesFailedSend
+        ? replyStatus.retryStableId
+        : randomUUID().replace(/-/g, "");
       const outputKey = output?.key ?? null;
       const rowStatus = item.row.status;
       setReplyStatuses((prev) => ({ ...prev, [sessionId]: { state: "sending" } }));
@@ -634,10 +635,13 @@ export function InboxPage() {
             return;
           }
           setReplyDrafts(({ [sessionId]: _sent, ...rest }) => rest);
-          setReplyStatuses((prev) => ({
-            ...prev,
-            [sessionId]: { state: "sent", outputKey, rowStatus },
-          }));
+          // A retry may be deduped against a send that already ran, which starts
+          // no turn to settle the note, so it settles at once.
+          setReplyStatuses(({ [sessionId]: _previous, ...rest }) =>
+            retriesFailedSend
+              ? rest
+              : { ...rest, [sessionId]: { state: "sent", outputKey, rowStatus } },
+          );
           // Replying is reading: undo only an explicit "Mark as unread".
           clearUnreadOverride(sessionId);
           void queryClient.invalidateQueries({ queryKey: ["conversations"] });
@@ -727,9 +731,8 @@ export function InboxPage() {
               "aria-disabled:pointer-events-none aria-disabled:opacity-50",
             )}
           >
-            {/* Opening is reading. Mark it here: a freshly mounted chat keeps an
-                explicit "Mark as unread" override, so it wouldn't clear this row.
-                Locked while a reply sends, like Mark as read. */}
+            {/* Opening is reading; mark it here because chat keeps an explicit
+                unread override. Locked while a reply sends. */}
             <Link
               to={`/c/${sessionId}`}
               aria-disabled={replySending}
