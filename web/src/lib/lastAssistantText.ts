@@ -88,9 +88,28 @@ export function latestOutputPreview(
   items: readonly unknown[],
   maxChars: number = DEFAULT_MAX_CHARS,
 ): string | undefined {
+  return latestOutput(items, maxChars)?.preview;
+}
+
+/**
+ * {@link latestOutputPreview} plus a key naming the output item, so a caller
+ * can tell a new reply from the one it already showed even when both land in
+ * the same `updated_at` second.
+ *
+ * :param items: Raw session items, oldest-to-newest.
+ * :param maxChars: Preview character budget (default 160).
+ * :returns: The preview and its item key (the item id, else the text), or
+ *     `undefined` when no item carries output text.
+ */
+export function latestOutput(
+  items: readonly unknown[],
+  maxChars: number = DEFAULT_MAX_CHARS,
+): { key: string; preview: string } | undefined {
   for (let i = items.length - 1; i >= 0; i--) {
     const text = extractAssistantText(items[i]) ?? extractErrorText(items[i]);
-    if (text !== undefined) return previewText(text, maxChars);
+    if (text === undefined) continue;
+    const id = (items[i] as Record<string, unknown>).id;
+    return { key: typeof id === "string" ? id : text, preview: previewText(text, maxChars) };
   }
   return undefined;
 }

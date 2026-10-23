@@ -26,9 +26,12 @@
  *
  * It also lists sessions with unseen agent output — the same read-state
  * behind the sidebar's unread dot — previewing the latest reply. Opening
- * the session or "Mark as read" clears a row. So does replying from the
- * expanded card, which posts the same user message the chat composer
- * does; the agent's answer re-surfaces the row as a new unread reply.
+ * the session or "Mark as read" clears a row. The expanded card can also
+ * reply, posting the same user message the chat composer does. A reply
+ * leaves the read baseline alone: `updated_at` has whole-second precision,
+ * so a baseline moved on send would also swallow an answer or failure
+ * recorded in that second. The running turn hides the row instead, and its
+ * output brings it back.
  *
  * Every kind renders as the same card: a one-line row (kind tile, label,
  * session title — preview, time, unread dot) that expands in place. All
@@ -72,6 +75,7 @@ import { useIsCoarsePointer } from "@/hooks/useIsCoarsePointer";
 import { useIsMobileViewport } from "@/hooks/useIsMobileViewport";
 import { useSidebarData } from "@/hooks/useSidebarData";
 import {
+  clearUnreadOverride,
   isConversationUnseen,
   markConversationRead,
   useUnseenTick,
@@ -92,15 +96,24 @@ import {
   type InboxFilter,
 } from "@/lib/inboxFilterPreferences";
 import { isComposerSendKey, readSubmitWithModEnter } from "@/lib/composerSendShortcutPreferences";
-import { latestOutputPreview } from "@/lib/lastAssistantText";
+import { latestOutput } from "@/lib/lastAssistantText";
 import { isEditorLevel } from "@/lib/permissionsApi";
+import { randomUUID } from "@/lib/randomUUID";
 import { relativeTime } from "@/lib/relativeTime";
 import { Link } from "@/lib/routing";
 import { useOmnigentAnalytics } from "@/lib/analytics";
-import { approve, fetchSessionItemsPage, getSession, postEvent } from "@/lib/sessionsApi";
+import {
+  ApiError,
+  HOST_OFFLINE_CODE,
+  approve,
+  fetchSessionItemsPage,
+  getSession,
+  postEvent,
+} from "@/lib/sessionsApi";
 import { userColor, userInitials } from "@/lib/userBadge";
 import { cn } from "@/lib/utils";
 import { conversationDisplayLabel, getConversationAgentType } from "@/shell/sidebarNav";
+import { describeSendFailure } from "@/store/chatStore";
 
 /** Optimistic verdicts keyed by elicitation id, mirroring the chat store's flip. */
 type RespondedMap = Record<
@@ -113,8 +126,20 @@ type RespondedMap = Record<
   }
 >;
 
-/** A reply POST in flight or refused; a session with no entry is idle. */
-type ReplyStatus = { state: "sending" } | { state: "failed"; message: string };
+/**
+ * A session's reply state; a session with no entry is idle. `retryStableId`
+ * is set only when the POST's outcome is unknown, so an untouched retry is
+ * deduped by the server instead of running twice. `outputKey` is the latest
+ * output when the reply went out: the card shows "sent" until that changes.
+ */
+type ReplyStatus =
+  | { state: "sending" }
+  | { state: "failed"; message: string; retryStableId?: string }
+  | { state: "sent"; outputKey: string | null };
+
+// The server's hold message promises a resend the Inbox doesn't do.
+const HOST_OFFLINE_REPLY_MESSAGE =
+  "The host for this session is offline, so the reply wasn’t sent. Try again once it reconnects.";
 
 const INBOX_TABS: { value: InboxFilter; label: string }[] = [
   { value: "all", label: "All" },
@@ -231,16 +256,14 @@ export function InboxPage() {
       queryKey: ["inbox-unread-preview", row.id, row.updated_at],
       queryFn: async () => {
         const page = await fetchSessionItemsPage(row.id, { limit: PREVIEW_SCAN_ITEMS });
-        return latestOutputPreview(page.items, PREVIEW_MAX_CHARS) ?? null;
+        return latestOutput(page.items, PREVIEW_MAX_CHARS) ?? null;
       },
       enabled: showUnread,
       staleTime: Infinity,
       retry: 1,
     })),
   });
-  const previewBySession = new Map(
-    unreadItems.map(({ row }, i) => [row.id, previewQueries[i]?.data ?? undefined]),
-  );
+  const previewBySession = new Map(unreadItems.map(({ row }, i) => [row.id, previewQueries[i]]));
 
   const visibleApprovals = showApprovals ? items : [];
   const visibleComments = showUnread ? commentInbox.items : [];
@@ -517,10 +540,15 @@ export function InboxPage() {
     const { item } = entry;
     const sessionId = item.row.id;
     const isError = item.kind === "error";
-    const preview = previewBySession.get(sessionId);
+    const previewQuery = previewBySession.get(sessionId);
+    const output = previewQuery?.data ?? undefined;
+    const preview = output?.preview;
     const markRead = () => {
-      // Drop the toggle so a later reply re-surfaces the row collapsed.
+      // Drop the toggle so a later reply re-surfaces the row collapsed, and
+      // the reply state so it can't come back stale with the row.
       setExpandedOverrides(({ [entry.key]: _cleared, ...rest }) => rest);
+      setReplyDrafts(({ [sessionId]: _draft, ...rest }) => rest);
+      setReplyStatuses(({ [sessionId]: _status, ...rest }) => rest);
       markConversationRead(sessionId, item.row.updated_at);
     };
     // The server refuses user messages below edit access.
@@ -528,31 +556,70 @@ export function InboxPage() {
     const replyDraft = replyDrafts[sessionId] ?? "";
     const replyStatus = replyStatuses[sessionId];
     const replySending = replyStatus?.state === "sending";
+    // A preview still loading for the new `updated_at` counts as no answer yet.
+    const replyAwaitingAnswer =
+      replyStatus?.state === "sent" &&
+      (previewQuery?.isPending !== false || (output?.key ?? null) === replyStatus.outputKey);
+    const showReplyField = canReply && !replyAwaitingAnswer;
+    const sendIsPrimary = showReplyField && replyDraft.trim() !== "";
     const sendReply = () => {
       if (!replyDraft.trim() || replySending) return;
       // One telemetry point for both the button and the keyboard shortcut.
       trackClick("inbox.unread.reply", "button");
+      const stableId =
+        (replyStatus?.state === "failed" ? replyStatus.retryStableId : undefined) ??
+        randomUUID().replace(/-/g, "");
+      const outputKey = output?.key ?? null;
       setReplyStatuses((prev) => ({ ...prev, [sessionId]: { state: "sending" } }));
-      postEvent(sessionId, {
-        type: "message",
-        data: { role: "user", content: [{ type: "input_text", text: replyDraft }] },
-      })
-        .then((result) => {
-          if (result.denied) throw new Error("A policy blocked this reply.");
-          if (!result.queued) throw new Error("The session didn’t accept this reply.");
+      void postEvent(
+        sessionId,
+        {
+          type: "message",
+          data: {
+            role: "user",
+            content: [{ type: "input_text", text: replyDraft }],
+            stable_id: stableId,
+          },
+        },
+        // Otherwise an offline host gets a failed turn recorded while the
+        // POST still answers `queued`, and the reply would read as sent.
+        { holdWhenHostOffline: true },
+      ).then(
+        (result) => {
+          if (result.denied) {
+            setReplyStatuses((prev) => ({
+              ...prev,
+              [sessionId]: { state: "failed", message: "A policy blocked this reply." },
+            }));
+            return;
+          }
           setReplyDrafts(({ [sessionId]: _sent, ...rest }) => rest);
-          setReplyStatuses(({ [sessionId]: _settled, ...rest }) => rest);
-          // Replying is reading: the row clears now, and the agent's answer
-          // re-surfaces it as a fresh unread reply.
-          markRead();
+          setReplyStatuses((prev) => ({ ...prev, [sessionId]: { state: "sent", outputKey } }));
+          // The baseline stays put (see the module docs); only an explicit
+          // "Mark as unread" is undone, since replying is reading.
+          clearUnreadOverride(sessionId);
           void queryClient.invalidateQueries({ queryKey: ["conversations"] });
           showToast(`Reply sent to ${title}`);
-        })
-        .catch((error: unknown) => {
+        },
+        (error: unknown) => {
           // Keep the draft so the user can retry or open the session instead.
-          const message = error instanceof Error ? error.message : String(error);
-          setReplyStatuses((prev) => ({ ...prev, [sessionId]: { state: "failed", message } }));
-        });
+          const message =
+            error instanceof ApiError && error.code === HOST_OFFLINE_CODE
+              ? HOST_OFFLINE_REPLY_MESSAGE
+              : describeSendFailure(error).message;
+          // A coded refusal is final. Only an unknown outcome retries under the
+          // same id, so a reply that did land isn't run twice.
+          const refused = error instanceof ApiError && error.code !== null;
+          setReplyStatuses((prev) => ({
+            ...prev,
+            [sessionId]: {
+              state: "failed",
+              message,
+              ...(refused ? {} : { retryStableId: stableId }),
+            },
+          }));
+        },
+      );
     };
     return (
       <InboxCard
@@ -579,7 +646,13 @@ export function InboxPage() {
             <p className="mt-2 text-ui font-medium break-words whitespace-pre-wrap">{preview}</p>
           )}
         </div>
-        {canReply && (
+        {replyAwaitingAnswer && (
+          <p role="status" className="flex items-center gap-1.5 text-sm text-muted-foreground">
+            <CheckIcon aria-hidden className="size-3.5 shrink-0" />
+            Reply sent. The agent’s answer will show up here.
+          </p>
+        )}
+        {showReplyField && (
           <InboxReplyField
             label={`Reply to ${title}`}
             value={replyDraft}
@@ -605,11 +678,12 @@ export function InboxPage() {
             <CheckIcon className="size-3.5" />
             Mark as read
           </Button>
+          {/* One live primary action: Send once there's a draft, else Open session. */}
           <Button
             asChild
-            variant={canReply ? "outline" : "default"}
+            variant={sendIsPrimary ? "outline" : "default"}
             size="xs"
-            className={canReply ? OUTLINE_ACTION : PRIMARY_ACTION}
+            className={sendIsPrimary ? OUTLINE_ACTION : PRIMARY_ACTION}
           >
             {/* Opening is reading. Mark it here: a freshly mounted chat keeps an
                 explicit "Mark as unread" override, so it wouldn't clear this row. */}
@@ -618,10 +692,11 @@ export function InboxPage() {
               <ArrowRightIcon className="size-3.5" />
             </Link>
           </Button>
-          {canReply && (
+          {showReplyField && (
             <Button
+              variant={sendIsPrimary ? "default" : "outline"}
               size="xs"
-              className={PRIMARY_ACTION}
+              className={sendIsPrimary ? PRIMARY_ACTION : OUTLINE_ACTION}
               disabled={!replyDraft.trim() || replySending}
               onClick={sendReply}
             >
@@ -881,7 +956,9 @@ function InboxReplyField({
         aria-invalid={error !== undefined}
         placeholder="Reply…"
         value={value}
-        disabled={sending}
+        // Read-only rather than disabled, so focus stays put for a retry.
+        readOnly={sending}
+        aria-busy={sending}
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={(event) => {
           // Same send chord as the chat composer, including the Mod+Enter preference.

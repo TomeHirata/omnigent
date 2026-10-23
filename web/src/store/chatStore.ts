@@ -8870,7 +8870,7 @@ const RUNNER_UNAVAILABLE_TERSE_MESSAGE = "No runner bound for session";
  * Keep the runner-unavailable code and any phase-specific detail. Replace
  * only the server's no-context message with friendly copy.
  */
-function describeSendFailure(err: unknown): { message: string; code: string } {
+export function describeSendFailure(err: unknown): { message: string; code: string } {
   if (err instanceof ApiError && err.code === RUNNER_UNAVAILABLE_CODE) {
     const informative = err.message && err.message !== RUNNER_UNAVAILABLE_TERSE_MESSAGE;
     return {
