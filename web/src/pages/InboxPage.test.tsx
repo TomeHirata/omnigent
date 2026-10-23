@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 vi.mock("@/hooks/useScopeCache", () => import("@/test/mockScopeCache"));
 import { SidebarDataProvider } from "@/hooks/useSidebarData";
@@ -740,6 +740,7 @@ describe("InboxPage replies", () => {
     const toasts: unknown[] = [];
     const onToast = (e: Event) => toasts.push((e as CustomEvent).detail.content);
     window.addEventListener("omnigent:toast", onToast);
+    onTestFinished(() => window.removeEventListener("omnigent:toast", onToast));
     const row = unreadConversation();
     sessionItems(assistantReply("Refactor done."));
     renderWithRows([row]);
@@ -766,7 +767,6 @@ describe("InboxPage replies", () => {
     expect(toasts).toEqual(["Reply sent to Unread Session"]);
     // The baseline didn't move: only the session's next output decides.
     expect(isConversationUnseen(row.id, row.updated_at, row.status)).toBe(true);
-    window.removeEventListener("omnigent:toast", onToast);
   });
 
   it("brings the row back when the replied turn fails in the same second", async () => {
@@ -815,6 +815,22 @@ describe("InboxPage replies", () => {
     expect(await within(answered).findByText("Shipped.")).toBeInTheDocument();
     expect(within(answered).queryByRole("status")).not.toBeInTheDocument();
     expect(within(answered).getByRole("textbox", { name: /Reply to/ })).toHaveValue("");
+  });
+
+  it("shows a same-second answer even when the running turn is never seen", async () => {
+    // WHY: with no status change and no new `updated_at`, nothing would
+    // refetch the preview; the post-send re-check catches the answer.
+    const row = unreadConversation();
+    await sendFromDoneRow(row);
+
+    sessionItems(
+      { ...assistantReply("Refactor done."), id: "item_done" },
+      { ...assistantReply("Shipped."), id: "item_answer" },
+    );
+
+    const item = screen.getByTestId("inbox-unread");
+    expect(await within(item).findByText("Shipped.", {}, { timeout: 4_000 })).toBeInTheDocument();
+    expect(within(item).queryByRole("status")).not.toBeInTheDocument();
   });
 
   it("drops the sent note when the turn fails without writing an error item", async () => {
@@ -902,10 +918,19 @@ describe("InboxPage replies", () => {
     expect(box).not.toBeDisabled();
     const send = within(item).getByRole("button", { name: "Send" });
     expect(send).toBeDisabled();
-    // Mark as read would drop reply state the pending POST is about to write.
+    // Leaving would drop reply state the pending POST is about to write.
     expect(within(item).getByRole("button", { name: /Mark as read/ })).toBeDisabled();
+    expect(within(item).getByRole("link", { name: /Open session/ })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
     fireEvent.keyDown(box, { key: "Enter" });
     fireEvent.click(send);
+    // Alt+Enter's fallback edits even a read-only box; it must not unlock it.
+    expect(fireEvent.keyDown(box, { key: "Enter", altKey: true })).toBe(false);
+    fireEvent.change(box, { target: { value: "Ship it twice" } });
+    expect(box).toHaveValue("Ship it");
+    expect(send).toBeDisabled();
     expect(sessionsApi.postEvent).toHaveBeenCalledTimes(1);
   });
 
@@ -962,10 +987,8 @@ describe("InboxPage replies", () => {
   });
 
   it("retries an untouched failed reply under the same stable id, an edited one under a new id", async () => {
-    // WHY: the server dedupes a send it already saved and still forwards it,
-    // so reusing the id keeps a reply that landed from running twice, whether
-    // the failure was a lost response or a refusal after saving. An edited
-    // body under the old id would run without being persisted.
+    // WHY: an untouched retry reuses the id so the server dedupes a reply that
+    // already landed, after a lost response or a refusal after saving.
     const row = unreadConversation();
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
     vi.mocked(sessionsApi.postEvent)

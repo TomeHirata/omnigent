@@ -138,6 +138,10 @@ type ReplyStatus =
   | { state: "failed"; message: string; retryStableId: string }
   | { state: "sent"; outputKey: string | null; rowStatus: string | undefined };
 
+// An answer saved in the reply's own `updated_at` second leaves the row
+// unchanged, so the preview is refetched once after that second has passed.
+const SAME_SECOND_RECHECK_MS = 2000;
+
 // The server's hold message promises a resend the Inbox doesn't do.
 const HOST_OFFLINE_REPLY_MESSAGE =
   "The host for this session is offline, so the reply wasn’t sent. Try again once it reconnects.";
@@ -266,10 +270,8 @@ export function InboxPage() {
   });
   const previewBySession = new Map(unreadItems.map(({ row }, i) => [row.id, previewQueries[i]]));
 
-  // A sent reply settles once its turn moves the row on: the row hides while
-  // the turn runs (or is read elsewhere), its status changes, or new output
-  // loads. Its previews refetch then, since the answer can land in a second
-  // whose preview was fetched before it.
+  // Settle once the row hides, changes status, or loads new output; then
+  // refetch, since the answer may share a cached second.
   const settledReplyIds = Object.entries(replyStatuses)
     .filter(([sessionId, status]) => {
       if (status.state !== "sent") return false;
@@ -597,9 +599,7 @@ export function InboxPage() {
       if (!replyDraft.trim() || replySending || previewLoading) return;
       // One telemetry point for both the button and the keyboard shortcut.
       trackClick("inbox.unread.reply", "button");
-      // Like the composer, an untouched retry reuses the failed attempt's id:
-      // the server dedupes a send it already saved and still forwards it, so a
-      // reply that landed doesn't run twice. Editing the draft drops the id.
+      // Like the composer: an untouched retry reuses the failed id; editing drops it.
       const stableId =
         replyStatus?.state === "failed"
           ? replyStatus.retryStableId
@@ -641,6 +641,9 @@ export function InboxPage() {
           // Replying is reading: undo only an explicit "Mark as unread".
           clearUnreadOverride(sessionId);
           void queryClient.invalidateQueries({ queryKey: ["conversations"] });
+          setTimeout(() => {
+            void queryClient.invalidateQueries({ queryKey: ["inbox-unread-preview", sessionId] });
+          }, SAME_SECOND_RECHECK_MS);
           showToast(`Reply sent to ${title}`);
         },
         (error: unknown) => {
@@ -719,11 +722,26 @@ export function InboxPage() {
             asChild
             variant={sendIsPrimary ? "outline" : "default"}
             size="xs"
-            className={sendIsPrimary ? OUTLINE_ACTION : PRIMARY_ACTION}
+            className={cn(
+              sendIsPrimary ? OUTLINE_ACTION : PRIMARY_ACTION,
+              "aria-disabled:pointer-events-none aria-disabled:opacity-50",
+            )}
           >
             {/* Opening is reading. Mark it here: a freshly mounted chat keeps an
-                explicit "Mark as unread" override, so it wouldn't clear this row. */}
-            <Link to={`/c/${sessionId}`} onClick={markRead} componentId="inbox.unread.open_session">
+                explicit "Mark as unread" override, so it wouldn't clear this row.
+                Locked while a reply sends, like Mark as read. */}
+            <Link
+              to={`/c/${sessionId}`}
+              aria-disabled={replySending}
+              onClick={(event) => {
+                if (replySending) {
+                  event.preventDefault();
+                  return;
+                }
+                markRead();
+              }}
+              componentId="inbox.unread.open_session"
+            >
               Open session
               <ArrowRightIcon className="size-3.5" />
             </Link>
@@ -995,8 +1013,16 @@ function InboxReplyField({
         // Read-only rather than disabled, so focus stays put for a retry.
         readOnly={sending}
         aria-busy={sending}
-        onChange={(event) => onChange(event.target.value)}
+        // `setRangeText` (Alt+Enter's fallback) ignores `readonly`, and an edit
+        // would drop the sending state, so the box takes no input while it sends.
+        onChange={(event) => {
+          if (!sending) onChange(event.target.value);
+        }}
         onKeyDown={(event) => {
+          if (sending) {
+            if (event.key === "Enter") event.preventDefault();
+            return;
+          }
           const keyEvent = { ...event, isComposing: event.nativeEvent.isComposing };
           // Alt+Enter is a newline in the composer too; browsers insert nothing for it.
           if (isComposerAltNewlineKey(keyEvent)) {
