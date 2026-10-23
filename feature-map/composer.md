@@ -78,7 +78,8 @@ and steers messages while the agent is busy.
   Escape discards it. The button is absent when neither the browser nor the
   server can transcribe.
 - `send-shortcut`: Enter or Mod+Enter, chosen in settings; only one gesture sends.
-  Shift+Enter and Alt/Option+Enter insert a newline in both composers.
+  Shift+Enter and Alt/Option+Enter insert a newline in both composers. The
+  Inbox reply box follows the same shortcut.
 - `list-formatting`: typing `-`, `*`, `1.` or `1)` then Space at the start of a
   line indents it as a list item; the newline gesture continues the list
   (numbers increment) and ends it after an empty item.

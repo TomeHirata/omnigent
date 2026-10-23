@@ -44,7 +44,7 @@
 
 import type { Query } from "@tanstack/react-query";
 import type { Session } from "@/lib/types";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useQueries, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangleIcon,
@@ -91,12 +91,13 @@ import {
   writeInboxFilter,
   type InboxFilter,
 } from "@/lib/inboxFilterPreferences";
-import { insertComposerText } from "@/components/composer/ChatComposer";
 import {
   isComposerAltNewlineKey,
   isComposerSendKey,
   readSubmitWithModEnter,
 } from "@/lib/composerSendShortcutPreferences";
+import { insertComposerText } from "@/lib/composerText";
+import { isImeCompositionKeyEvent } from "@/lib/ime";
 import { latestOutput } from "@/lib/lastAssistantText";
 import { isEditorLevel } from "@/lib/permissionsApi";
 import { randomUUID } from "@/lib/randomUUID";
@@ -635,8 +636,8 @@ export function InboxPage() {
             return;
           }
           setReplyDrafts(({ [sessionId]: _sent, ...rest }) => rest);
-          // A retry may be deduped against a send that already ran, which starts
-          // no turn to settle the note, so it settles at once.
+          // A retry may or may not start a turn (the server dedupes one that
+          // already ran), so it gets no note that might never settle.
           setReplyStatuses(({ [sessionId]: _previous, ...rest }) =>
             retriesFailedSend
               ? rest
@@ -1006,11 +1007,16 @@ function InboxReplyField({
   submitWithModEnter: boolean;
   preventsKeyboardSubmit: boolean;
 }) {
+  const errorId = useId();
+  // Safari confirms an IME candidate with an Enter that isn't flagged as
+  // composing, so track composition like the chat composer does.
+  const isComposingRef = useRef(false);
   return (
     <div className="flex flex-col gap-1.5">
       <Textarea
         aria-label={label}
         aria-invalid={error !== undefined}
+        aria-describedby={error === undefined ? undefined : errorId}
         placeholder="Reply…"
         value={value}
         // Read-only rather than disabled, so focus stays put for a retry.
@@ -1026,6 +1032,7 @@ function InboxReplyField({
             if (event.key === "Enter") event.preventDefault();
             return;
           }
+          if (isImeCompositionKeyEvent(event, isComposingRef.current)) return;
           const keyEvent = { ...event, isComposing: event.nativeEvent.isComposing };
           // Alt+Enter is a newline in the composer too; browsers insert nothing for it.
           if (isComposerAltNewlineKey(keyEvent)) {
@@ -1040,10 +1047,16 @@ function InboxReplyField({
           event.preventDefault();
           onSubmit();
         }}
+        onCompositionStart={() => {
+          isComposingRef.current = true;
+        }}
+        onCompositionEnd={() => {
+          isComposingRef.current = false;
+        }}
         className="max-h-48 min-h-14 resize-none"
       />
       {error && (
-        <p role="alert" className="text-sm text-destructive">
+        <p id={errorId} role="alert" className="text-sm text-destructive">
           {error}
         </p>
       )}

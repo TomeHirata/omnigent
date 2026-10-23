@@ -999,6 +999,29 @@ describe("InboxPage replies", () => {
     expect(sessionsApi.postEvent).not.toHaveBeenCalled();
   });
 
+  it("never sends the Enter that confirms an IME candidate", async () => {
+    // WHY: Safari confirms a candidate with an Enter that isn't flagged as
+    // composing (keyCode 229), which would send a half-typed reply.
+    const row = unreadConversation();
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    renderPage();
+
+    await screen.findByTestId("inbox-unread");
+    const item = expandUnread();
+    const box = within(item).getByRole("textbox", { name: /Reply to/ });
+    fireEvent.change(box, { target: { value: "にほんご" } });
+    await waitFor(() => expect(within(item).getByRole("button", { name: "Send" })).toBeEnabled());
+
+    fireEvent.keyDown(box, { key: "Enter", keyCode: 229 });
+    fireEvent.compositionStart(box);
+    fireEvent.keyDown(box, { key: "Enter" });
+    fireEvent.compositionEnd(box);
+    expect(sessionsApi.postEvent).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(sessionsApi.postEvent).toHaveBeenCalledTimes(1));
+  });
+
   it("locks the reply while it sends, keeping focus and refusing a second send", async () => {
     const row = unreadConversation();
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
