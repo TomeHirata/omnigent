@@ -26,12 +26,9 @@
  *
  * It also lists sessions with unseen agent output — the same read-state
  * behind the sidebar's unread dot — previewing the latest reply. Opening
- * the session or "Mark as read" clears a row. The expanded card can also
- * reply, posting the same user message the chat composer does. A reply
- * leaves the read baseline alone: `updated_at` has whole-second precision,
- * so a baseline moved on send would also swallow an answer or failure
- * recorded in that second. The running turn hides the row instead, and its
- * output brings it back.
+ * the session or "Mark as read" clears a row. The expanded card can reply
+ * like the chat composer. Sending leaves the read baseline alone because
+ * `updated_at` is whole-second; the running turn hides the row instead.
  *
  * Every kind renders as the same card: a one-line row (kind tile, label,
  * session title — preview, time, unread dot) that expands in place. All
@@ -95,10 +92,16 @@ import {
   writeInboxFilter,
   type InboxFilter,
 } from "@/lib/inboxFilterPreferences";
-import { isComposerSendKey, readSubmitWithModEnter } from "@/lib/composerSendShortcutPreferences";
+import { insertComposerText } from "@/components/composer/ChatComposer";
+import {
+  isComposerAltNewlineKey,
+  isComposerSendKey,
+  readSubmitWithModEnter,
+} from "@/lib/composerSendShortcutPreferences";
 import { latestOutput } from "@/lib/lastAssistantText";
 import { isEditorLevel } from "@/lib/permissionsApi";
 import { randomUUID } from "@/lib/randomUUID";
+import { describeSendFailure } from "@/lib/sendFailure";
 import { relativeTime } from "@/lib/relativeTime";
 import { Link } from "@/lib/routing";
 import { useOmnigentAnalytics } from "@/lib/analytics";
@@ -113,7 +116,6 @@ import {
 import { userColor, userInitials } from "@/lib/userBadge";
 import { cn } from "@/lib/utils";
 import { conversationDisplayLabel, getConversationAgentType } from "@/shell/sidebarNav";
-import { describeSendFailure } from "@/store/chatStore";
 
 /** Optimistic verdicts keyed by elicitation id, mirroring the chat store's flip. */
 type RespondedMap = Record<
@@ -127,15 +129,14 @@ type RespondedMap = Record<
 >;
 
 /**
- * A session's reply state; a session with no entry is idle. `retryStableId`
- * is set only when the POST's outcome is unknown, so an untouched retry is
- * deduped by the server instead of running twice. `outputKey` is the latest
- * output when the reply went out: the card shows "sent" until that changes.
+ * Per-session reply state; absent means idle. `retryStableId` names the failed
+ * attempt for an untouched retry; `outputKey` and `rowStatus` are the row's
+ * latest output and status at send time.
  */
 type ReplyStatus =
   | { state: "sending" }
-  | { state: "failed"; message: string; retryStableId?: string }
-  | { state: "sent"; outputKey: string | null };
+  | { state: "failed"; message: string; retryStableId: string }
+  | { state: "sent"; outputKey: string | null; rowStatus: string | undefined };
 
 // The server's hold message promises a resend the Inbox doesn't do.
 const HOST_OFFLINE_REPLY_MESSAGE =
@@ -264,6 +265,36 @@ export function InboxPage() {
     })),
   });
   const previewBySession = new Map(unreadItems.map(({ row }, i) => [row.id, previewQueries[i]]));
+
+  // A sent reply settles once its turn moves the row on: the row hides while
+  // the turn runs (or is read elsewhere), its status changes, or new output
+  // loads. Its previews refetch then, since the answer can land in a second
+  // whose preview was fetched before it.
+  const settledReplyIds = Object.entries(replyStatuses)
+    .filter(([sessionId, status]) => {
+      if (status.state !== "sent") return false;
+      const index = unreadItems.findIndex(({ row }) => row.id === sessionId);
+      if (index === -1) return true;
+      const query = previewQueries[index];
+      return (
+        unreadItems[index]!.row.status !== status.rowStatus ||
+        (query?.isPending === false && (query.data?.key ?? null) !== status.outputKey)
+      );
+    })
+    .map(([sessionId]) => sessionId);
+  const settledReplyKey = settledReplyIds.join("\n");
+  useEffect(() => {
+    if (!settledReplyKey) return;
+    const settled = settledReplyKey.split("\n");
+    for (const sessionId of settled) {
+      void queryClient.invalidateQueries({ queryKey: ["inbox-unread-preview", sessionId] });
+    }
+    setReplyStatuses((prev) =>
+      Object.fromEntries(
+        Object.entries(prev).filter(([sessionId]) => !settled.includes(sessionId)),
+      ),
+    );
+  }, [settledReplyKey, queryClient]);
 
   const visibleApprovals = showApprovals ? items : [];
   const visibleComments = showUnread ? commentInbox.items : [];
@@ -556,20 +587,25 @@ export function InboxPage() {
     const replyDraft = replyDrafts[sessionId] ?? "";
     const replyStatus = replyStatuses[sessionId];
     const replySending = replyStatus?.state === "sending";
-    // A preview still loading for the new `updated_at` counts as no answer yet.
     const replyAwaitingAnswer =
-      replyStatus?.state === "sent" &&
-      (previewQuery?.isPending !== false || (output?.key ?? null) === replyStatus.outputKey);
+      replyStatus?.state === "sent" && !settledReplyIds.includes(sessionId);
+    // A send needs the current output to tell the agent's answer from it.
+    const previewLoading = previewQuery?.isPending !== false;
     const showReplyField = canReply && !replyAwaitingAnswer;
     const sendIsPrimary = showReplyField && replyDraft.trim() !== "";
     const sendReply = () => {
-      if (!replyDraft.trim() || replySending) return;
+      if (!replyDraft.trim() || replySending || previewLoading) return;
       // One telemetry point for both the button and the keyboard shortcut.
       trackClick("inbox.unread.reply", "button");
+      // Like the composer, an untouched retry reuses the failed attempt's id:
+      // the server dedupes a send it already saved and still forwards it, so a
+      // reply that landed doesn't run twice. Editing the draft drops the id.
       const stableId =
-        (replyStatus?.state === "failed" ? replyStatus.retryStableId : undefined) ??
-        randomUUID().replace(/-/g, "");
+        replyStatus?.state === "failed"
+          ? replyStatus.retryStableId
+          : randomUUID().replace(/-/g, "");
       const outputKey = output?.key ?? null;
+      const rowStatus = item.row.status;
       setReplyStatuses((prev) => ({ ...prev, [sessionId]: { state: "sending" } }));
       void postEvent(
         sessionId,
@@ -589,14 +625,20 @@ export function InboxPage() {
           if (result.denied) {
             setReplyStatuses((prev) => ({
               ...prev,
-              [sessionId]: { state: "failed", message: "A policy blocked this reply." },
+              [sessionId]: {
+                state: "failed",
+                message: "A policy blocked this reply.",
+                retryStableId: stableId,
+              },
             }));
             return;
           }
           setReplyDrafts(({ [sessionId]: _sent, ...rest }) => rest);
-          setReplyStatuses((prev) => ({ ...prev, [sessionId]: { state: "sent", outputKey } }));
-          // The baseline stays put (see the module docs); only an explicit
-          // "Mark as unread" is undone, since replying is reading.
+          setReplyStatuses((prev) => ({
+            ...prev,
+            [sessionId]: { state: "sent", outputKey, rowStatus },
+          }));
+          // Replying is reading: undo only an explicit "Mark as unread".
           clearUnreadOverride(sessionId);
           void queryClient.invalidateQueries({ queryKey: ["conversations"] });
           showToast(`Reply sent to ${title}`);
@@ -607,16 +649,9 @@ export function InboxPage() {
             error instanceof ApiError && error.code === HOST_OFFLINE_CODE
               ? HOST_OFFLINE_REPLY_MESSAGE
               : describeSendFailure(error).message;
-          // A coded refusal is final. Only an unknown outcome retries under the
-          // same id, so a reply that did land isn't run twice.
-          const refused = error instanceof ApiError && error.code !== null;
           setReplyStatuses((prev) => ({
             ...prev,
-            [sessionId]: {
-              state: "failed",
-              message,
-              ...(refused ? {} : { retryStableId: stableId }),
-            },
+            [sessionId]: { state: "failed", message, retryStableId: stableId },
           }));
         },
       );
@@ -672,6 +707,7 @@ export function InboxPage() {
             variant="outline"
             size="xs"
             className={OUTLINE_ACTION}
+            disabled={replySending}
             onClick={markRead}
             componentId="inbox.unread.mark_read"
           >
@@ -697,7 +733,7 @@ export function InboxPage() {
               variant={sendIsPrimary ? "default" : "outline"}
               size="xs"
               className={sendIsPrimary ? PRIMARY_ACTION : OUTLINE_ACTION}
-              disabled={!replyDraft.trim() || replySending}
+              disabled={!replyDraft.trim() || replySending || previewLoading}
               onClick={sendReply}
             >
               {replySending ? (
@@ -961,14 +997,15 @@ function InboxReplyField({
         aria-busy={sending}
         onChange={(event) => onChange(event.target.value)}
         onKeyDown={(event) => {
+          const keyEvent = { ...event, isComposing: event.nativeEvent.isComposing };
+          // Alt+Enter is a newline in the composer too; browsers insert nothing for it.
+          if (isComposerAltNewlineKey(keyEvent)) {
+            event.preventDefault();
+            insertComposerText(event.currentTarget, "\n");
+            return;
+          }
           // Same send chord as the chat composer, including the Mod+Enter preference.
-          if (
-            !isComposerSendKey(
-              { ...event, isComposing: event.nativeEvent.isComposing },
-              submitWithModEnter,
-              preventsKeyboardSubmit,
-            )
-          ) {
+          if (!isComposerSendKey(keyEvent, submitWithModEnter, preventsKeyboardSubmit)) {
             return;
           }
           event.preventDefault();

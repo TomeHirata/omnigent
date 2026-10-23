@@ -76,25 +76,10 @@ export function extractErrorText(item: unknown): string | undefined {
 }
 
 /**
- * Preview of a session's latest output for the Inbox: the newest assistant
- * text or error headline, whichever comes last, condensed via
- * {@link previewText}.
- *
- * :param items: Raw session items, oldest-to-newest.
- * :param maxChars: Preview character budget (default 160).
- * :returns: The preview, or `undefined` when no item carries output text.
- */
-export function latestOutputPreview(
-  items: readonly unknown[],
-  maxChars: number = DEFAULT_MAX_CHARS,
-): string | undefined {
-  return latestOutput(items, maxChars)?.preview;
-}
-
-/**
- * {@link latestOutputPreview} plus a key naming the output item, so a caller
- * can tell a new reply from the one it already showed even when both land in
- * the same `updated_at` second.
+ * A session's latest output for the Inbox: the newest assistant text or error
+ * headline, whichever comes last, condensed via {@link previewText}, plus a
+ * key naming that item so a caller can tell a new reply from the one it
+ * already showed even when both land in the same `updated_at` second.
  *
  * :param items: Raw session items, oldest-to-newest.
  * :param maxChars: Preview character budget (default 160).

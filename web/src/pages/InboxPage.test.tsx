@@ -689,10 +689,13 @@ describe("InboxPage replies", () => {
     return item;
   }
 
-  function typeAndSend(item: HTMLElement, text: string): HTMLElement {
+  /** Types a reply and sends it once the preview has loaded and Send is live. */
+  async function typeAndSend(item: HTMLElement, text: string): Promise<HTMLElement> {
     const box = within(item).getByRole("textbox", { name: /Reply to/ });
     fireEvent.change(box, { target: { value: text } });
-    fireEvent.click(within(item).getByRole("button", { name: "Send" }));
+    const send = within(item).getByRole("button", { name: "Send" });
+    await waitFor(() => expect(send).toBeEnabled());
+    fireEvent.click(send);
     return box;
   }
 
@@ -723,6 +726,16 @@ describe("InboxPage replies", () => {
     });
   }
 
+  /** Sends "Ship it" from a Done row whose preview shows "Refactor done.". */
+  async function sendFromDoneRow(initial: Conversation) {
+    sessionItems({ ...assistantReply("Refactor done."), id: "item_done" });
+    const pushRows = renderWithRows([initial]);
+    await within(await screen.findByTestId("inbox-unread")).findByText(/Refactor done\./);
+    await typeAndSend(expandUnread(), "Ship it");
+    await within(screen.getByTestId("inbox-unread")).findByRole("status");
+    return pushRows;
+  }
+
   it("posts the reply as a user message and waits for the agent's answer", async () => {
     const toasts: unknown[] = [];
     const onToast = (e: Event) => toasts.push((e as CustomEvent).detail.content);
@@ -734,7 +747,7 @@ describe("InboxPage replies", () => {
     await within(await screen.findByTestId("inbox-unread")).findByText(/Refactor done\./);
     const item = expandUnread();
     expect(within(item).getByRole("button", { name: "Send" })).toBeDisabled();
-    typeAndSend(item, "Ship it");
+    await typeAndSend(item, "Ship it");
 
     expect(await within(item).findByRole("status")).toHaveTextContent("Reply sent.");
     expect(within(item).queryByRole("textbox")).not.toBeInTheDocument();
@@ -760,17 +773,12 @@ describe("InboxPage replies", () => {
     // WHY: `updated_at` has whole-second precision, so a baseline moved to
     // "now" on send would read a failure recorded in that second as seen.
     const row = unreadConversation();
-    sessionItems(assistantReply("Refactor done."));
-    const pushRows = renderWithRows([row]);
-    await within(await screen.findByTestId("inbox-unread")).findByText(/Refactor done\./);
-    typeAndSend(expandUnread(), "Ship it");
-    await within(screen.getByTestId("inbox-unread")).findByRole("status");
+    const pushRows = await sendFromDoneRow(row);
 
-    sessionItems(assistantReply("Refactor done."), {
-      id: "item_failed",
-      type: "error",
-      message: "The host is offline.",
-    });
+    sessionItems(
+      { ...assistantReply("Refactor done."), id: "item_done" },
+      { id: "item_failed", type: "error", message: "The host is offline." },
+    );
     pushRows([{ ...row, status: "failed", updated_at: Math.floor(Date.now() / 1000) }]);
 
     const failed = screen.getByTestId("inbox-unread");
@@ -780,35 +788,70 @@ describe("InboxPage replies", () => {
     expect(within(failed).getByRole("textbox", { name: /Reply to/ })).toHaveValue("");
   });
 
-  it("keeps the sent note through the reply's own update until the answer", async () => {
+  it("shows an answer that lands in the second whose preview was already fetched", async () => {
     // WHY: persisting the reply bumps `updated_at` before the runner reports
-    // running; only a new output item means the agent answered.
+    // running, and the preview for that second is cached with the old output.
+    // An answer in the same second must still replace it.
     const row = unreadConversation();
-    sessionItems(assistantReply("Refactor done."));
-    const pushRows = renderWithRows([row]);
-    await within(await screen.findByTestId("inbox-unread")).findByText(/Refactor done\./);
-    typeAndSend(expandUnread(), "Ship it");
-    await within(screen.getByTestId("inbox-unread")).findByRole("status");
+    const pushRows = await sendFromDoneRow(row);
+    const replySecond = row.updated_at + 1;
 
-    pushRows([{ ...row, updated_at: row.updated_at + 1 }]);
+    pushRows([{ ...row, updated_at: replySecond }]);
     await waitFor(() => expect(sessionsApi.fetchSessionItemsPage).toHaveBeenCalledTimes(2));
     await act(async () => {});
     expect(within(screen.getByTestId("inbox-unread")).getByRole("status")).toHaveTextContent(
       "Reply sent.",
     );
 
-    pushRows([{ ...row, status: "running", updated_at: row.updated_at + 2 }]);
+    pushRows([{ ...row, status: "running", updated_at: replySecond }]);
     await waitFor(() => expect(screen.queryByTestId("inbox-unread")).not.toBeInTheDocument());
 
-    sessionItems(assistantReply("Refactor done."), {
-      ...assistantReply("Shipped."),
-      id: "item_answer",
-    });
-    pushRows([{ ...row, status: "idle", updated_at: row.updated_at + 3 }]);
+    sessionItems(
+      { ...assistantReply("Refactor done."), id: "item_done" },
+      { ...assistantReply("Shipped."), id: "item_answer" },
+    );
+    pushRows([{ ...row, status: "idle", updated_at: replySecond }]);
     const answered = await screen.findByTestId("inbox-unread");
     expect(await within(answered).findByText("Shipped.")).toBeInTheDocument();
     expect(within(answered).queryByRole("status")).not.toBeInTheDocument();
     expect(within(answered).getByRole("textbox", { name: /Reply to/ })).toHaveValue("");
+  });
+
+  it("drops the sent note when the turn fails without writing an error item", async () => {
+    const row = unreadConversation();
+    const pushRows = await sendFromDoneRow(row);
+
+    pushRows([{ ...row, status: "failed" }]);
+
+    const failed = screen.getByTestId("inbox-unread");
+    await waitFor(() => expect(failed).toHaveAttribute("data-kind", "error"));
+    expect(within(failed).queryByRole("status")).not.toBeInTheDocument();
+    expect(within(failed).getByRole("textbox", { name: /Reply to/ })).toBeInTheDocument();
+  });
+
+  it("holds Send until the row's preview has loaded", async () => {
+    // WHY: the send records the current output to tell the answer from it.
+    let loadPreview!: (page: { items: never[]; hasMore: boolean }) => void;
+    vi.mocked(sessionsApi.fetchSessionItemsPage).mockReturnValueOnce(
+      new Promise((resolve) => {
+        loadPreview = resolve;
+      }),
+    );
+    const row = unreadConversation();
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    renderPage();
+
+    await screen.findByTestId("inbox-unread");
+    const item = expandUnread();
+    const box = within(item).getByRole("textbox", { name: /Reply to/ });
+    fireEvent.change(box, { target: { value: "Ship it" } });
+    const send = within(item).getByRole("button", { name: "Send" });
+    expect(send).toBeDisabled();
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(sessionsApi.postEvent).not.toHaveBeenCalled();
+
+    await act(async () => loadPreview({ items: [], hasMore: false }));
+    await waitFor(() => expect(send).toBeEnabled());
   });
 
   it("sends on Enter and leaves Shift+Enter to the textarea", async () => {
@@ -817,13 +860,32 @@ describe("InboxPage replies", () => {
     renderPage();
 
     await screen.findByTestId("inbox-unread");
-    const box = within(expandUnread()).getByRole("textbox", { name: /Reply to/ });
+    const item = expandUnread();
+    const box = within(item).getByRole("textbox", { name: /Reply to/ });
     fireEvent.change(box, { target: { value: "Line one" } });
+    await waitFor(() => expect(within(item).getByRole("button", { name: "Send" })).toBeEnabled());
     fireEvent.keyDown(box, { key: "Enter", shiftKey: true });
     expect(sessionsApi.postEvent).not.toHaveBeenCalled();
 
     fireEvent.keyDown(box, { key: "Enter" });
     await waitFor(() => expect(sessionsApi.postEvent).toHaveBeenCalledTimes(1));
+  });
+
+  it("inserts a newline on Alt+Enter instead of sending", async () => {
+    const row = unreadConversation();
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    renderPage();
+
+    await screen.findByTestId("inbox-unread");
+    const box = within(expandUnread()).getByRole<HTMLTextAreaElement>("textbox", {
+      name: /Reply to/,
+    });
+    fireEvent.change(box, { target: { value: "firstsecond" } });
+    box.setSelectionRange(5, 5);
+
+    expect(fireEvent.keyDown(box, { key: "Enter", altKey: true })).toBe(false);
+    expect(box).toHaveValue("first\nsecond");
+    expect(sessionsApi.postEvent).not.toHaveBeenCalled();
   });
 
   it("locks the reply while it sends, keeping focus and refusing a second send", async () => {
@@ -834,12 +896,14 @@ describe("InboxPage replies", () => {
 
     await screen.findByTestId("inbox-unread");
     const item = expandUnread();
-    const box = typeAndSend(item, "Ship it");
+    const box = await typeAndSend(item, "Ship it");
 
     expect(box).toHaveAttribute("readonly");
     expect(box).not.toBeDisabled();
     const send = within(item).getByRole("button", { name: "Send" });
     expect(send).toBeDisabled();
+    // Mark as read would drop reply state the pending POST is about to write.
+    expect(within(item).getByRole("button", { name: /Mark as read/ })).toBeDisabled();
     fireEvent.keyDown(box, { key: "Enter" });
     fireEvent.click(send);
     expect(sessionsApi.postEvent).toHaveBeenCalledTimes(1);
@@ -857,7 +921,7 @@ describe("InboxPage replies", () => {
 
     await screen.findByTestId("inbox-unread");
     const item = expandUnread();
-    const box = typeAndSend(item, "Try again");
+    const box = await typeAndSend(item, "Try again");
 
     expect(await within(item).findByRole("alert")).toHaveTextContent(
       "No host can restart this session's runner",
@@ -887,7 +951,7 @@ describe("InboxPage replies", () => {
 
     await screen.findByTestId("inbox-unread");
     const item = expandUnread();
-    const box = typeAndSend(item, "Wake up");
+    const box = await typeAndSend(item, "Wake up");
 
     const alert = await within(item).findByRole("alert");
     expect(alert).toHaveTextContent(
@@ -897,33 +961,42 @@ describe("InboxPage replies", () => {
     expect(box).toHaveValue("Wake up");
   });
 
-  it("retries an unclear send under the same stable id, a refused one under a new id", async () => {
-    // WHY: a send whose response was lost may have landed; reusing its id lets
-    // the server dedupe the retry instead of running the reply twice.
+  it("retries an untouched failed reply under the same stable id, an edited one under a new id", async () => {
+    // WHY: the server dedupes a send it already saved and still forwards it,
+    // so reusing the id keeps a reply that landed from running twice, whether
+    // the failure was a lost response or a refusal after saving. An edited
+    // body under the old id would run without being persisted.
     const row = unreadConversation();
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
     vi.mocked(sessionsApi.postEvent)
       .mockRejectedValueOnce(new TypeError("Failed to fetch"))
       .mockRejectedValueOnce(
-        new sessionsApi.ApiError("Runner refused the message", 409, "conflict"),
+        new sessionsApi.ApiError("The runner didn't come online", 503, "runner_unavailable"),
       )
+      .mockRejectedValueOnce(new Error("still down"))
       .mockResolvedValueOnce({ queued: true });
     renderPage();
 
     await screen.findByTestId("inbox-unread");
     const item = expandUnread();
-    typeAndSend(item, "Ship it");
+    const box = await typeAndSend(item, "Ship it");
     expect(await within(item).findByRole("alert")).toHaveTextContent("Failed to fetch");
     fireEvent.click(within(item).getByRole("button", { name: "Send" }));
-    expect(await within(item).findByRole("alert")).toHaveTextContent("Runner refused the message");
+    expect(await within(item).findByRole("alert")).toHaveTextContent(
+      "The runner didn't come online",
+    );
     fireEvent.click(within(item).getByRole("button", { name: "Send" }));
-    await waitFor(() => expect(sessionsApi.postEvent).toHaveBeenCalledTimes(3));
+    expect(await within(item).findByRole("alert")).toHaveTextContent("still down");
+    fireEvent.change(box, { target: { value: "Ship it now" } });
+    fireEvent.click(within(item).getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(sessionsApi.postEvent).toHaveBeenCalledTimes(4));
 
     const stableIds = vi
       .mocked(sessionsApi.postEvent)
       .mock.calls.map(([, event]) => (event.data as { stable_id: string }).stable_id);
     expect(stableIds[1]).toBe(stableIds[0]);
-    expect(stableIds[2]).not.toBe(stableIds[1]);
+    expect(stableIds[2]).toBe(stableIds[0]);
+    expect(stableIds[3]).not.toBe(stableIds[0]);
   });
 
   it("reports a policy-denied reply and keeps the draft and the row", async () => {
@@ -934,7 +1007,7 @@ describe("InboxPage replies", () => {
 
     await screen.findByTestId("inbox-unread");
     const item = expandUnread();
-    const box = typeAndSend(item, "rm -rf /");
+    const box = await typeAndSend(item, "rm -rf /");
 
     expect(await within(item).findByRole("alert")).toHaveTextContent(
       "A policy blocked this reply.",
@@ -968,7 +1041,7 @@ describe("InboxPage replies", () => {
 
     await screen.findByTestId("inbox-unread");
     const item = expandUnread();
-    typeAndSend(item, "Never mind");
+    await typeAndSend(item, "Never mind");
     await within(item).findByRole("alert");
     fireEvent.click(within(item).getByRole("button", { name: /Mark as read/ }));
     await waitFor(() => expect(screen.queryByTestId("inbox-unread")).not.toBeInTheDocument());
