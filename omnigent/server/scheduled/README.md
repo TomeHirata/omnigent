@@ -217,10 +217,11 @@ target, which may have been edited since the claim.
 | No session on the run | `failed`: launch starts only after the session is attached. |
 | Connected host, neither the prompt nor agent output in the transcript, and no active turn | `failed`: the prompt was never sent. |
 | Connected host, prompt delivered | `failed` if the session failed. `succeeded` if it is idle and its newest output is the agent's reply. Otherwise `running`. |
-| Managed sandbox whose launch already failed | `failed` |
+| Managed sandbox whose launch already failed | Tear down any sandbox registered under the run's host ID, then `failed`. |
 | Managed sandbox with its host bound | `running` while the prompt is pending, otherwise the outcome of a delivered prompt as above. |
 | Managed sandbox still provisioning on this server | `None`: check again on a later sweep. |
-| Managed sandbox with no host bound and no local launch | Tear down the sandbox registered under the run's host ID, fail the saved prompt, then `failed`. |
+| Managed sandbox with no host bound and no local launch, within the shutdown drain after the lease expired | `None`: a replica that lost the lease while shutting down may still bind the sandbox (`shutdown_drain_s`). |
+| Managed sandbox with no host bound and no local launch, after that | Tear down the sandbox registered under the run's host ID, fail the saved prompt, then `failed`. |
 | Session deleted | Tear down any sandbox for a managed run, then `failed`. |
 
 An `idle` status alone does not mean the turn finished: a session can be idle
