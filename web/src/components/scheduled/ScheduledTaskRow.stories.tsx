@@ -20,6 +20,7 @@ function task(overrides: Partial<ScheduledTask> = {}): ScheduledTask {
     modelOverride: null,
     reasoningEffort: null,
     permissionMode: null,
+    reuseConversation: false,
     workspace: null,
     hostId: null,
     executionTarget: "connected_host",

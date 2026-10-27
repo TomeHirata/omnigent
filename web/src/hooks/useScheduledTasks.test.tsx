@@ -45,6 +45,7 @@ const TASK: api.ScheduledTask = {
   modelOverride: null,
   reasoningEffort: null,
   permissionMode: null,
+  reuseConversation: false,
   workspace: null,
   hostId: null,
   executionTarget: "connected_host",

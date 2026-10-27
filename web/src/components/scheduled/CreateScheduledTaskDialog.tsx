@@ -18,6 +18,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import {
@@ -232,6 +233,8 @@ export function CreateScheduledTaskDialog({
   // Id of the existing project picked, captured at pick time so a later rename
   // can't redirect the save; null for a newly typed name.
   const [pickedProjectId, setPickedProjectId] = useState<string | null>(null);
+  const [reuseConversation, setReuseConversation] = useState(false);
+  const [resetConversation, setResetConversation] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [scheduleUnsupported, setScheduleUnsupported] = useState(false);
 
@@ -260,6 +263,8 @@ export function CreateScheduledTaskDialog({
         setSandboxMode(editingTask.executionTarget === "managed_sandbox");
         setProjectChoice(null);
         setPickedProjectId(null);
+        setReuseConversation(editingTask.reuseConversation);
+        setResetConversation(false);
       } else {
         setName(initialName ?? "");
         setPrompt(initialPrompt ?? "");
@@ -267,6 +272,8 @@ export function CreateScheduledTaskDialog({
         setPickedModel("");
         setPickedEffort("");
         setPickedPermission("");
+        setReuseConversation(false);
+        setResetConversation(false);
         setSchedule(DEFAULT_SCHEDULE_MODEL);
         setScheduleUnsupported(false);
         setHostId("");
@@ -380,6 +387,13 @@ export function CreateScheduledTaskDialog({
         ...(!sandboxMode && hostId !== "" && workspace.trim() !== ""
           ? { workspace: workspace.trim() }
           : {}),
+        ...(editingTask
+          ? editingTask.reuseConversation !== reuseConversation
+            ? { reuseConversation }
+            : {}
+          : reuseConversation
+            ? { reuseConversation }
+            : {}),
       };
       const projectInput = await projectChangeInput(
         // Saving over a deleted project clears it, matching the "No project" shown.
@@ -406,6 +420,7 @@ export function CreateScheduledTaskDialog({
             ...input,
             ...overrides,
             ...projectInput,
+            ...(reuseConversation && resetConversation ? { resetConversation: true } : {}),
             // Only on a real switch: sending the unchanged agent is a server-side
             // no-op, but omitting it keeps the PATCH honest about what changed.
             ...(agentChanged && effectiveAgentId !== null ? { agentId: effectiveAgentId } : {}),
@@ -588,6 +603,39 @@ export function CreateScheduledTaskDialog({
               This schedule can&apos;t be edited in this form yet.
             </p>
           )}
+
+          <div className="flex flex-col gap-1.5" data-testid="task-reuse-conversation-field">
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="task-reuse-conversation"
+                checked={reuseConversation}
+                onCheckedChange={(checked) => setReuseConversation(checked === true)}
+                data-testid="task-reuse-conversation"
+                componentId="tasks.scheduled.reuse_conversation"
+              />
+              <label htmlFor="task-reuse-conversation" className="cursor-pointer text-sm">
+                Continue the same conversation each run
+              </label>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              Each run after the first sends the prompt into the previous run&apos;s session, so the
+              agent keeps its context. A run is skipped while the previous one is still working.
+            </p>
+            {isEdit && reuseConversation && editingTask?.lastRunConversationId && (
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="task-reset-conversation"
+                  checked={resetConversation}
+                  onCheckedChange={(checked) => setResetConversation(checked === true)}
+                  data-testid="task-reset-conversation"
+                  componentId="tasks.scheduled.reset_conversation"
+                />
+                <label htmlFor="task-reset-conversation" className="cursor-pointer text-sm">
+                  Start a new conversation on the next run
+                </label>
+              </div>
+            )}
+          </div>
 
           {/* Timezone is inferred from the browser (localTimezone via Intl) and
               intentionally has no visible control. It is still sent in the create
