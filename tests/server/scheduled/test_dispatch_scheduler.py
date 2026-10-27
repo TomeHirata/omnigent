@@ -17,7 +17,7 @@ from omnigent.server.scheduled.dispatch_scheduler import (
     StartupLease,
     StartupLeaseLost,
 )
-from omnigent.server.scheduled.schedule import occurrence_host_id
+from omnigent.server.scheduled.schedule import occurrence_host_id, sandbox_host_id
 from omnigent.stores.scheduled_task_store.sqlalchemy_store import SqlAlchemyScheduledTaskStore
 from tests._helpers.polling import poll_until_async
 from tests.server.scheduled.test_scheduler import FakeClock
@@ -2048,3 +2048,86 @@ async def test_run_now_keeps_a_recorded_request_when_starting_it_here_fails(stor
         await scheduler.stop()
     [(_snapshot, lease)] = [call.args for call in fire.await_args_list]
     assert lease.run.id == run.id
+
+
+async def test_pending_runs_cost_each_poll_one_page_and_still_make_progress(store) -> None:
+    # Each sandbox request has its own host, so ownership differs per request.
+    task = _task(store, execution_target="managed_sandbox")
+    clock = FakeClock(task.created_at + 60)
+
+    def request(key):
+        host_id = occurrence_host_id(task, key)
+        return store.request_manual_run(
+            task, now=task.created_at, trigger_key=key, host_id=host_id
+        )
+
+    unowned = [request(f"manual:{i}") for i in range(5)]
+    owned = request("manual:owned")
+    owned_host = owned.host_id
+    pages = []
+    list_pending_runs = store.list_pending_runs
+
+    def recording_list(**kwargs):
+        pages.append(kwargs["after"])
+        return list_pending_runs(**kwargs)
+
+    store.list_pending_runs = recording_list
+
+    async def owns_host(_workspace_id, host_id):
+        return host_id == owned_host
+
+    fire = AsyncMock()
+    scheduler = PersistentTaskScheduler(
+        store, fire, AsyncMock(), owns_host=owns_host, now=clock.now, batch_size=2
+    )
+    polls = 0
+    while not fire.await_count:
+        polls += 1
+        assert polls <= 4
+        pages.clear()
+        await scheduler.poll_once()
+        await _drain(scheduler)
+        # Requests owned by other replicas never cost a poll more than one page.
+        assert len(pages) == 1
+    [(_snapshot, lease)] = [call.args for call in fire.await_args_list]
+    assert lease.run.id == owned.id
+    assert {run.id for run in list_pending_runs()} == {run.id for run in unowned}
+
+
+async def test_run_now_moves_to_the_new_host_owner_after_a_target_change(store) -> None:
+    task = _task(store, host_id=uuid.uuid4().hex, workspace="/repo")
+    clock = FakeClock(task.created_at + 60)
+    old_host = task.host_id
+    asked = {"old": [], "new": []}
+    fired = {"old": AsyncMock(), "new": AsyncMock()}
+    new_host = None
+
+    def replica(name, owns):
+        async def owns_host(_workspace_id, host_id):
+            asked[name].append(host_id)
+            return owns(host_id)
+
+        return PersistentTaskScheduler(
+            store, fired[name], AsyncMock(), owns_host=owns_host, now=clock.now
+        )
+
+    old_owner = replica("old", lambda host_id: host_id == old_host)
+    new_owner = replica("new", lambda host_id: host_id == new_host)
+    # Recorded on the old host; neither replica polls before the edit.
+    run = await new_owner.run_now(task)
+    assert run.host_id == old_host
+    store.update(task.id, execution_target="managed_sandbox", host_id=None, workspace=None)
+    new_host = sandbox_host_id(task.id, task.workspace_id, run.trigger_key)
+
+    # The old owner's claim moves the request to the sandbox host instead of starting it.
+    await old_owner.poll_once()
+    await _drain(old_owner)
+    await new_owner.poll_once()
+    await _drain(new_owner)
+
+    assert old_host in asked["old"]
+    assert new_host in asked["new"]
+    fired["old"].assert_not_awaited()
+    [(snapshot, lease)] = [call.args for call in fired["new"].await_args_list]
+    assert snapshot.execution_target == "managed_sandbox"
+    assert (lease.run.id, lease.run.host_id) == (run.id, new_host)

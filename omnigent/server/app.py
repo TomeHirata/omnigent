@@ -1882,11 +1882,8 @@ def create_app(
                 app_state=app_inst.state,
             )
             if not automations_v2_enabled:
-                # The manual "run now" trigger reuses the same fire path (dispatch /
-                # preflight / in-flight guard) as the scheduler; it only differs in
-                # allowing a paused task to fire. Exposed on app.state for the
-                # POST /v1/scheduled-tasks/{id}/run route. The database scheduler
-                # handles Run now itself.
+                # Legacy Run now uses this fire path, including for paused tasks.
+                # The database scheduler handles Run now itself.
                 app_inst.state.scheduled_task_run_now = build_run_now(fire_deps)
                 scheduled_task_scheduler = ScheduledTaskScheduler(
                     store=scheduled_task_store,

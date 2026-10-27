@@ -126,10 +126,32 @@ _IN_FLIGHT_TASKS: set[tuple[int, str]] = set()
 # orchestration can be unit-tested without a live host/runner.
 LaunchDispatch = Callable[[Conversation, ScheduledTask], Awaitable[None]]
 ConnectedHostPreflight = Callable[[ScheduledTask], Awaitable[None]]
-# ``launch_start(conv, task, host_id)`` — start provisioning a sandbox in the
-# background once the managed fire's prompt is saved. ``host_id`` is the host
-# identity the sandbox registers under, or ``None`` to mint one.
-ManagedLaunchStart = Callable[[Conversation, ScheduledTask, str | None], asyncio.Task[None]]
+
+
+@dataclass(frozen=True)
+class _LaunchErrorCodes:
+    """Error codes for a managed launch that fails before or after its host is bound."""
+
+    before_binding: str
+    after_binding: str
+
+
+# Legacy timers keep one code for every managed launch failure.
+_LEGACY_LAUNCH_ERRORS = _LaunchErrorCodes("launch_failed", "launch_failed")
+# Claimed runs record the failure stage: creating the sandbox, or starting its runner.
+_STAGED_LAUNCH_ERRORS = _LaunchErrorCodes("sandbox_create_failed", "runner_start_failed")
+
+# How long a claimed managed fire waits for its sandbox to register and bind.
+SANDBOX_REGISTRATION_TIMEOUT_S = 12 * 60
+# How long an abandoned launch gets to stop before its sandbox is torn down.
+_ABANDONED_LAUNCH_SETTLE_S = 30.0
+
+# ``launch_start(conv, task, host_id, error_codes)`` — start provisioning a sandbox
+# in the background once the managed fire's prompt is saved. ``host_id`` is the
+# host identity the sandbox registers under, or ``None`` to mint one.
+ManagedLaunchStart = Callable[
+    [Conversation, ScheduledTask, str | None, _LaunchErrorCodes], asyncio.Task[None]
+]
 
 
 class _FireResult(Enum):
@@ -272,7 +294,7 @@ class _NewRunRecorder:
         # Started only after the run exists, so a fast launch failure has a
         # running run to fail.
         try:
-            start(conv, task, None)
+            start(conv, task, None, _LEGACY_LAUNCH_ERRORS)
         except Exception as exc:
             _logger.exception(
                 "scheduled fire: managed launch did not start for task %s (session %s)",
@@ -1331,7 +1353,12 @@ def _make_managed_sandbox_start(deps: FireDeps) -> ManagedLaunchStart:
     failure fails both the saved prompt and the fire's run.
     """
 
-    def _start(conv: Conversation, task: ScheduledTask, host_id: str | None) -> asyncio.Task[None]:
+    def _start(
+        conv: Conversation,
+        task: ScheduledTask,
+        host_id: str | None,
+        error_codes: _LaunchErrorCodes,
+    ) -> asyncio.Task[None]:
         from omnigent.server.routes.sessions import (
             _publish_sandbox_status,
             _run_managed_launch,
@@ -1365,7 +1392,10 @@ def _make_managed_sandbox_start(deps: FireDeps) -> ManagedLaunchStart:
                 )
             except Exception as exc:
                 await _fail_running_run(
-                    deps, conv.id, f"managed sandbox failed to launch: {exc}", "launch_failed"
+                    deps,
+                    conv.id,
+                    f"managed sandbox failed to launch: {exc}",
+                    _launch_error_code(tracker, conv.id, error_codes),
                 )
                 raise
             launch = tracker.get(conv.id)
@@ -1374,7 +1404,7 @@ def _make_managed_sandbox_start(deps: FireDeps) -> ManagedLaunchStart:
                     deps,
                     conv.id,
                     f"managed sandbox launch failed: {launch.error}",
-                    "launch_failed",
+                    _launch_error_code(tracker, conv.id, error_codes),
                 )
 
         return _start_managed_launch_task(
@@ -1386,6 +1416,17 @@ def _make_managed_sandbox_start(deps: FireDeps) -> ManagedLaunchStart:
         )
 
     return _start
+
+
+def _launch_error_code(
+    tracker: ManagedLaunchTracker, session_id: str, codes: _LaunchErrorCodes
+) -> str:
+    launch = tracker.get(session_id)
+    return (
+        codes.after_binding
+        if launch is not None and launch.bound.is_set()
+        else codes.before_binding
+    )
 
 
 async def _fail_running_run(
@@ -1410,10 +1451,18 @@ async def _fail_running_run(
 class _ClaimedRunRecorder:
     """Persistent dispatch: record progress on the claimed run, under its startup lease."""
 
-    def __init__(self, deps: FireDeps, task: ScheduledTask, lease: StartupLease) -> None:
+    def __init__(
+        self,
+        deps: FireDeps,
+        task: ScheduledTask,
+        lease: StartupLease,
+        *,
+        registration_timeout_s: float = SANDBOX_REGISTRATION_TIMEOUT_S,
+    ) -> None:
         self._deps = deps
         self._task = task
         self._lease = lease
+        self._registration_timeout_s = registration_timeout_s
 
     async def check(self) -> None:
         await self._lease.check()
@@ -1453,7 +1502,7 @@ class _ClaimedRunRecorder:
         # The sandbox registers under the run's host ID, so host-ID routing sends
         # its connection back to the replica that owns this run.
         try:
-            launch_task = start(conv, task, self._lease.run.host_id)
+            launch_task = start(conv, task, self._lease.run.host_id, _STAGED_LAUNCH_ERRORS)
         except Exception as exc:
             _logger.exception(
                 "scheduled fire: managed launch did not start for task %s (session %s)",
@@ -1461,18 +1510,28 @@ class _ClaimedRunRecorder:
                 conv.id,
             )
             reason = f"managed sandbox failed to launch: {exc}"
-            if self._deps.startup_inputs is not None:
-                await self._deps.startup_inputs.record_launch_failure(conv.id, reason)
+            await self._fail_saved_prompt(conv.id, reason)
             await self.finish(
-                "failed", conversation_id=conv.id, error=reason, error_code="launch_failed"
+                "failed",
+                conversation_id=conv.id,
+                error=reason,
+                error_code=_STAGED_LAUNCH_ERRORS.before_binding,
             )
             return
         # The saved prompt alone is not a handoff: until the session records its
         # host, no other replica can finish the launch or deliver the prompt.
-        error = await _wait_for_managed_binding(self._deps, conv.id, launch_task)
+        try:
+            async with asyncio.timeout(self._registration_timeout_s):
+                error = await _wait_for_managed_binding(self._deps, conv.id, launch_task)
+        except TimeoutError:
+            await self._abandon_unregistered_sandbox(conv.id, launch_task)
+            return
         if error is not None:
             await self.finish(
-                "failed", conversation_id=conv.id, error=error, error_code="launch_failed"
+                "failed",
+                conversation_id=conv.id,
+                error=error,
+                error_code=_STAGED_LAUNCH_ERRORS.before_binding,
             )
             return
         await self.finish("running", conversation_id=conv.id)
@@ -1480,7 +1539,31 @@ class _ClaimedRunRecorder:
         # while the launch's own check still found no running run to fail.
         error = _managed_launch_failure(self._deps.managed_launches, conv.id, launch_task)
         if error is not None:
-            await _fail_running_run(self._deps, conv.id, error, "launch_failed")
+            await _fail_running_run(
+                self._deps, conv.id, error, _STAGED_LAUNCH_ERRORS.after_binding
+            )
+
+    async def _fail_saved_prompt(self, conversation_id: str, reason: str) -> None:
+        if self._deps.startup_inputs is not None:
+            await self._deps.startup_inputs.record_launch_failure(conversation_id, reason)
+
+    async def _abandon_unregistered_sandbox(
+        self, conversation_id: str, launch_task: asyncio.Task[None]
+    ) -> None:
+        """Fail a sandbox that never registered: its prompt, its launch, then the sandbox."""
+        reason = f"the sandbox did not register within {self._registration_timeout_s:g} seconds"
+        # Fail the prompt first, so a host that binds during cleanup delivers nothing,
+        # and the cancelled launch finds no pending prompt to fail with its own reason.
+        await self._fail_saved_prompt(conversation_id, reason)
+        launch_task.cancel()
+        await asyncio.wait({launch_task}, timeout=_ABANDONED_LAUNCH_SETTLE_S)
+        await _terminate_run_sandbox(self._deps, self._lease.run.host_id)
+        await self.finish(
+            "failed",
+            conversation_id=conversation_id,
+            error=reason,
+            error_code="sandbox_registration_timeout",
+        )
 
 
 async def _wait_for_managed_binding(
@@ -1582,14 +1665,18 @@ class ClaimedRunExecutor:
         *,
         fire_identity: FireIdentity | None = None,
         launch_dispatch: LaunchDispatch | None = None,
+        registration_timeout_s: float = SANDBOX_REGISTRATION_TIMEOUT_S,
     ) -> None:
         self._deps = deps
         self._fire_identity = fire_identity
         self._fire_dispatch = _build_fire_dispatch(deps, launch_dispatch)
+        self._registration_timeout_s = registration_timeout_s
 
     async def fire(self, task: ScheduledTask, lease: StartupLease) -> None:
         """``on_fire``: start the claimed run and record its startup outcome."""
-        recorder = _ClaimedRunRecorder(self._deps, task, lease)
+        recorder = _ClaimedRunRecorder(
+            self._deps, task, lease, registration_timeout_s=self._registration_timeout_s
+        )
         async with contextlib.AsyncExitStack() as stack:
             try:
                 await self._enter_owner_identity(stack, task)
@@ -1737,13 +1824,17 @@ class ClaimedRunExecutor:
         return "failed"
 
     async def _terminate_sandbox(self, host_id: str | None) -> None:
-        """Tear down the sandbox registered under a run's host ID, if one exists."""
-        from omnigent.server.managed_hosts import terminate_managed_host
+        await _terminate_run_sandbox(self._deps, host_id)
 
-        if host_id is None or self._deps.host_store is None:
-            return
-        host = await asyncio.to_thread(self._deps.host_store.get_host, host_id)
-        # Only a server-managed sandbox is torn down, never a user's own host.
-        if host is None or host.sandbox_provider is None:
-            return
-        await terminate_managed_host(host, self._deps.host_store, self._deps.sandbox_config)
+
+async def _terminate_run_sandbox(deps: FireDeps, host_id: str | None) -> None:
+    """Tear down the sandbox registered under a run's host ID, if one exists."""
+    from omnigent.server.managed_hosts import terminate_managed_host
+
+    if host_id is None or deps.host_store is None:
+        return
+    host = await asyncio.to_thread(deps.host_store.get_host, host_id)
+    # Only a server-managed sandbox is torn down, never a user's own host.
+    if host is None or host.sandbox_provider is None:
+        return
+    await terminate_managed_host(host, deps.host_store, deps.sandbox_config)

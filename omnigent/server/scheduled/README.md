@@ -44,7 +44,9 @@ flowchart TD
 `scheduled` run with its own `manual:<id>` trigger key, and derives the run's host
 ID like any occurrence. If this replica owns that host and has startup capacity,
 it claims the run and starts it right away. Otherwise the host's owner claims it
-on its next poll. The claim moves the run to `starting` with a lease, so Run now
+on a later poll. Each poll reads one page (`batch_size`) of pending runs, resuming
+where the previous poll stopped and wrapping at the end, so requests for other
+replicas' hosts cost each poll at most one page. The claim moves the run to `starting` with a lease, so Run now
 gets the same executor, heartbeats and recovery as a scheduled occurrence.
 
 Run now works on paused tasks and never moves `next_run_at`. Each request is its
@@ -177,10 +179,13 @@ each step on the claimed run instead of inserting a new one:
    run's `host_id`, so the sandbox's connection routes to the replica that owns
    that ID. It records `running` once the session row stores the sandbox's
    host. Until then no other replica can finish the launch or deliver the
-   prompt.
+   prompt. A sandbox that has not bound within 12 minutes is abandoned: the
+   saved prompt fails, the launch is cancelled, the sandbox is torn down, and
+   the run fails with `sandbox_registration_timeout`.
 5. A known failure records `failed` with the same `error_code` the legacy path
-   uses, e.g. `host_offline` or `launch_failed`. An unsupported target records
-   `skipped`.
+   uses, e.g. `host_offline` or `launch_failed`. A managed launch records its
+   stage instead: `sandbox_create_failed` before the host binds, or
+   `runner_start_failed` after. An unsupported target records `skipped`.
 
 It also stamps `last_run_at` and `last_run_conversation_id` on the task, as legacy
 fires do. Both paths create sessions with the same helper, so per-task session

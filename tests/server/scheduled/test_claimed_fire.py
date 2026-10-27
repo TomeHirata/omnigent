@@ -347,13 +347,58 @@ async def test_managed_fire_hands_off_once_the_sandbox_host_is_bound(
         assert (run.status, run.conversation_id) == ("running", conversations.ids[0])
         assert startup.launch_failures == []
     else:
-        assert (run.status, run.error_code) == ("failed", "launch_failed")
-        reason = {
-            "failed_after_binding": "harness not configured",
-            "tracker_failed": "provider refused",
-            "raised": "allocation failed",
+        # The failure stage: creating the sandbox, or starting its runner once bound.
+        error_code, reason = {
+            "failed_after_binding": ("runner_start_failed", "harness not configured"),
+            "tracker_failed": ("sandbox_create_failed", "provider refused"),
+            "raised": ("sandbox_create_failed", "allocation failed"),
         }[outcome]
+        assert (run.status, run.error_code) == ("failed", error_code)
         assert reason in (run.error or "")
+
+
+async def test_sandbox_that_never_registers_is_abandoned_and_torn_down(store, monkeypatch) -> None:
+    from omnigent.server import managed_hosts
+    from omnigent.server.routes import sessions
+
+    claimed = _claim(store, execution_target="managed_sandbox", host_id=None, workspace=None)
+    host_id = claimed.lease.run.host_id
+    terminate = AsyncMock()
+    monkeypatch.setattr(managed_hosts, "terminate_managed_host", terminate)
+    startup = FakeStartupInputs()
+    cancelled = asyncio.Event()
+
+    async def launch(**kwargs: Any) -> None:
+        try:
+            await asyncio.Event().wait()  # Provisioning never finishes.
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr(sessions, "_run_managed_launch", AsyncMock(side_effect=launch))
+    hosts = FakeHostStore({host_id: _FakeHost(host_id, "local", sandbox_provider="agent_sandbox")})
+    executor = ClaimedRunExecutor(
+        _deps(
+            store,
+            host_store=hosts,
+            sandbox_config=_managed_sandbox_config(),
+            managed_launches=ManagedLaunchTracker(),
+            startup_inputs=startup,
+        ),
+        registration_timeout_s=0.2,
+    )
+    try:
+        await asyncio.wait_for(executor.fire(claimed.task, claimed.lease), 10)
+    finally:
+        await _drain_managed_launches()
+
+    [run] = _runs(store, claimed.task)
+    assert (run.status, run.error_code) == ("failed", "sandbox_registration_timeout")
+    assert cancelled.is_set()
+    assert terminate.await_args.args[0] is hosts.hosts[host_id]
+    # The saved prompt fails with the timeout first. The cancelled launch's later
+    # attempt finds nothing pending, so a generic shutdown reason never shows.
+    assert "did not register within 0.2 seconds" in startup.launch_failures[0][1]
 
 
 async def test_lost_lease_during_the_binding_wait_leaves_the_launch_running(

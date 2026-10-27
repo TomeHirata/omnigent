@@ -401,6 +401,7 @@ class PersistentTaskScheduler:
         self._cleanup_cursor: DeletedTaskCursor | None = None
         self._recovery_cursor: DispatchCursor | None = None
         self._recovery_cutoff: int | None = None
+        self._pending_cursor: TaskCursor | None = None
 
     @property
     def is_started(self) -> bool:
@@ -431,6 +432,7 @@ class PersistentTaskScheduler:
         self._recovery = None
         self._recovery_cursor = None
         self._recovery_cutoff = None
+        self._pending_cursor = None
 
     async def _run(self) -> None:
         while True:
@@ -499,29 +501,32 @@ class PersistentTaskScheduler:
         return run
 
     async def _claim_pending(self) -> None:
-        """Start Run now requests whose host this replica owns."""
-        cursor: TaskCursor | None = None
-        while not self._stopped and len(self._startups) < self._max_startups:
-            runs = await asyncio.to_thread(
-                self._store.list_pending_runs, after=cursor, limit=self._batch_size
-            )
-            for run in runs:
-                if self._stopped or len(self._startups) >= self._max_startups:
-                    return
-                cursor = (run.workspace_id, run.id)
-                try:
-                    if await self._owns_host(run.workspace_id, run.host_id):
-                        await self._start_pending(run)
-                except Exception:
-                    _logger.exception(
-                        "Could not start a requested run %s; will check it again on a later poll",
-                        run.id,
-                        extra=_run_event(
-                            "scheduled_task_operation_failed", run, operation="claim"
-                        ),
-                    )
-            if len(runs) < self._batch_size:
+        """Start Run now requests whose host this replica owns, one page per poll.
+
+        The cursor persists across polls and wraps at the end, so requests owned
+        by other replicas cost each poll at most one page.
+        """
+        if self._stopped or len(self._startups) >= self._max_startups:
+            return
+        runs = await asyncio.to_thread(
+            self._store.list_pending_runs, after=self._pending_cursor, limit=self._batch_size
+        )
+        for run in runs:
+            if self._stopped or len(self._startups) >= self._max_startups:
+                # Resume here next poll, so no request is skipped.
                 return
+            self._pending_cursor = (run.workspace_id, run.id)
+            try:
+                if await self._owns_host(run.workspace_id, run.host_id):
+                    await self._start_pending(run)
+            except Exception:
+                _logger.exception(
+                    "Could not start a requested run %s; will check it again on a later poll",
+                    run.id,
+                    extra=_run_event("scheduled_task_operation_failed", run, operation="claim"),
+                )
+        if len(runs) < self._batch_size:
+            self._pending_cursor = None
 
     async def _start_pending(self, run: ScheduledTaskRun) -> None:
         now = int(self._now())
