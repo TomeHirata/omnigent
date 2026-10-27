@@ -9,6 +9,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ScheduledTaskRow } from "./ScheduledTaskRow";
+import type * as RoutingModule from "@/lib/routing";
 import type { ScheduledTask } from "@/lib/scheduledTasksApi";
 
 // Capture navigate() calls; the row uses `@/lib/routing`'s useNavigate, which
@@ -16,7 +17,7 @@ import type { ScheduledTask } from "@/lib/scheduledTasksApi";
 // a full router history.
 const navigate = vi.fn();
 vi.mock("@/lib/routing", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/lib/routing")>();
+  const actual = await importOriginal<typeof RoutingModule>();
   return { ...actual, useNavigate: () => navigate };
 });
 

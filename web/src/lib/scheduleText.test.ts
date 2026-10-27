@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  describeRunError,
+  describeRunFailure,
   describeSchedule,
   formatClockTime,
   formatNextRunAt,
@@ -493,39 +493,46 @@ describe("formatRunTimestamp", () => {
   });
 });
 
-describe("describeRunError", () => {
-  it("maps known fire-path error codes to human copy", () => {
-    expect(describeRunError("no_online_host", "skipped")).toBe(
-      "Host was offline at fire time. Run skipped.",
-    );
-    expect(describeRunError("incomplete", "failed")).toBe(
-      "The host went away mid-run. Run left incomplete.",
-    );
-    expect(describeRunError("launch_failed", "failed")).toBe("The agent session failed to launch");
+describe("describeRunFailure", () => {
+  it("names the stage each fire-path error code stopped at", () => {
+    expect(describeRunFailure("reauthorization_required", "failed").stage).toBe("Owner");
+    expect(describeRunFailure("host_offline", "failed")).toEqual({
+      stage: "Host",
+      reason: "The host was offline.",
+    });
+    expect(describeRunFailure("session_create_failed", "failed").stage).toBe("Session");
+    expect(describeRunFailure("sandbox_create_failed", "failed").stage).toBe("Sandbox");
+    expect(describeRunFailure("sandbox_registration_timeout", "failed").stage).toBe("Sandbox");
+    expect(describeRunFailure("runner_start_failed", "failed").stage).toBe("Runner");
+    expect(describeRunFailure("startup_expired", "failed").stage).toBe("Startup");
+    expect(describeRunFailure("incomplete", "failed").stage).toBe("Running");
   });
 
-  it("maps permanent-misconfig codes to config-fixing copy (now recorded as failed)", () => {
-    expect(describeRunError("invalid_input", "failed")).toBe(
-      "This task's model or workspace is invalid. Edit the task to fix it.",
-    );
-    const missingCopy = "This task is missing its host or workspace. Edit the task to fix it.";
-    expect(describeRunError("missing_workspace", "failed")).toBe(missingCopy);
-    expect(describeRunError("missing_host_id", "failed")).toBe(missingCopy);
-    expect(describeRunError("missing_execution_input", "failed")).toBe(missingCopy);
+  it("points settings failures at editing the automation", () => {
+    const missing = describeRunFailure("missing_host_id", "failed");
+    expect(missing.stage).toBe("Settings");
+    expect(missing.reason).toContain("Edit the automation");
+    expect(describeRunFailure("missing_workspace", "failed")).toEqual(missing);
+    expect(describeRunFailure("missing_execution_input", "failed")).toEqual(missing);
+    expect(describeRunFailure("invalid_input", "failed").reason).toContain("Edit the automation");
   });
 
-  it("keeps host-availability codes as skipped copy", () => {
-    expect(describeRunError("host_offline", "skipped")).toBe(
-      "The pinned host was offline. Run skipped.",
-    );
-    expect(describeRunError("default_workspace_unresolved", "skipped")).toBe(
-      "Couldn't resolve a workspace on the host. Run skipped.",
-    );
+  it("falls back to a status-worded reason with no stage for unknown or missing codes", () => {
+    expect(describeRunFailure("some_new_code", "skipped")).toEqual({
+      stage: null,
+      reason: "Run skipped.",
+    });
+    expect(describeRunFailure(null, "failed")).toEqual({ stage: null, reason: "Run failed." });
+    expect(describeRunFailure(undefined, "incomplete")).toEqual({
+      stage: null,
+      reason: "Run failed.",
+    });
   });
 
-  it("falls back to a status-keyed generic for an unknown / null code", () => {
-    expect(describeRunError("some_new_code", "skipped")).toBe("Run skipped");
-    expect(describeRunError(null, "failed")).toBe("Run failed");
-    expect(describeRunError(undefined, "skipped")).toBe("Run skipped");
+  it("does not treat inherited object keys as codes", () => {
+    expect(describeRunFailure("toString", "failed")).toEqual({
+      stage: null,
+      reason: "Run failed.",
+    });
   });
 });

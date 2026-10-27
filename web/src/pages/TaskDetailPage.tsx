@@ -46,12 +46,14 @@ import { useNow } from "@/hooks/useNow";
 import { useAvailableAgents } from "@/hooks/useAvailableAgents";
 import { useHosts } from "@/hooks/useHosts";
 import {
-  describeRunError,
+  describeRunFailure,
   describeSchedule,
   formatNextRunAt,
   formatRunDuration,
   formatRunTimestamp,
 } from "@/lib/scheduleText";
+import { useServerInfo } from "@/lib/CapabilitiesContext";
+import { sandboxOptionLabel } from "@/lib/capabilities";
 import { ScheduledTaskApiError } from "@/lib/scheduledTasksApi";
 import type { ScheduledTaskRun } from "@/lib/scheduledTasksApi";
 import { cn } from "@/lib/utils";
@@ -166,16 +168,20 @@ export function TaskDetailPage() {
   // default (host) rather than blanking the field.
   const { data: agents } = useAvailableAgents();
   const { data: hosts } = useHosts();
+  const info = useServerInfo();
+  const sandboxLabel = sandboxOptionLabel(info !== "loading" ? info.sandbox_provider : null);
   const agentLabel = useMemo(() => {
     if (!task) return "";
     return agents?.find((a) => a.id === task.agentId)?.display_name ?? task.agentId;
   }, [agents, task]);
   const hostLabel = useMemo(() => {
     if (!task) return "";
-    // Null hostId = the server resolves the connected host at fire time.
-    if (task.hostId == null) return "Auto (connected host)";
+    if (task.executionTarget === "managed_sandbox") return sandboxLabel;
+    // Null hostId = the server resolves the connected host at fire time. Same
+    // wording as the edit dialog's host picker.
+    if (task.hostId == null) return "Resolve at fire time";
     return hosts?.find((h) => h.host_id === task.hostId)?.name ?? task.hostId;
-  }, [hosts, task]);
+  }, [hosts, sandboxLabel, task]);
 
   if (isLoading) {
     return (
@@ -392,7 +398,7 @@ function BackLink() {
       className="inline-flex items-center gap-1 text-sm text-muted-foreground transition-colors hover:text-foreground"
     >
       <ChevronLeftIcon className="size-4" />
-      Scheduled tasks
+      Automations
     </Link>
   );
 }
@@ -458,8 +464,8 @@ function useRunUnread(run: ScheduledTaskRun): boolean {
  * - LEADING: a single status icon chosen by priority (see `RunStatusIcon`) —
  *   failed triangle > skipped circle-slash > succeeded-unread blue dot >
  *   succeeded-read grey dot — each with an explanatory tooltip.
- * - BODY: the fire timestamp (bold), the duration (muted), and — for
- *   skipped/failed — an errorCode-derived message. No fabricated summary.
+ * - BODY: the fire timestamp, the duration (muted), and — for skipped/failed —
+ *   the stage the fire stopped at and why, derived from `errorCode`.
  *
  * When the run produced a conversation the ENTIRE row is the click target
  * (a real `<Link>`: keyboard-focusable, Enter/Space activate natively) that
@@ -472,6 +478,8 @@ function RunRow({ run, now }: { run: ScheduledTaskRun; now: Date }) {
   const duration = formatRunDuration(run.firedAt, run.finishedAt);
   // Unread only applies to a succeeded run that produced a conversation.
   const unread = useRunUnread(run);
+  const failure = isUnsuccessfulRun(run) ? describeRunFailure(run.errorCode, run.status) : null;
+  const inFlightLabel = IN_FLIGHT_RUN_LABELS[run.status];
 
   const body = (
     <>
@@ -486,12 +494,31 @@ function RunRow({ run, now }: { run: ScheduledTaskRun; now: Date }) {
               {duration}
             </span>
           )}
+          {inFlightLabel && (
+            <span className="text-xs text-muted-foreground" data-testid="run-status-label">
+              {inFlightLabel}
+            </span>
+          )}
         </span>
+        {failure && (
+          <span className="text-xs text-muted-foreground" data-testid="run-failure">
+            {failure.stage && (
+              <span className="font-medium text-foreground/80" data-testid="run-failure-stage">
+                {failure.stage}
+              </span>
+            )}
+            {failure.stage && " · "}
+            {failure.reason}
+          </span>
+        )}
       </span>
     </>
   );
 
-  const commonClassName = "flex items-center gap-3 rounded-lg px-2 py-2";
+  const commonClassName = cn(
+    "flex gap-3 rounded-lg px-2 py-2",
+    failure ? "items-start" : "items-center",
+  );
 
   // Clickable when the run has a conversation to open. A real <Link> (anchor)
   // is focusable and Enter/Space-activatable for free; the hover highlight +
@@ -502,7 +529,7 @@ function RunRow({ run, now }: { run: ScheduledTaskRun; now: Date }) {
         <Link
           to={`/c/${run.conversationId}`}
           data-testid="run-open"
-          aria-label="Open conversation"
+          aria-label="Open session"
           className={cn(
             commonClassName,
             "cursor-pointer transition-colors hover:bg-muted focus-visible:bg-muted focus-visible:outline-none",
@@ -529,17 +556,17 @@ function RunRow({ run, now }: { run: ScheduledTaskRun; now: Date }) {
 
 /**
  * The leading LEFT status icon for a run. Exactly one renders, by priority:
- *   1. failed              → amber warning triangle, tooltip = errorCode message.
- *   2. skipped             → muted calendar-off icon, tooltip = skip reason.
- *   3. running             → spinning loader icon, tooltip = "Running".
+ *   1. failed / incomplete → amber warning triangle, tooltip = "Failed".
+ *   2. skipped             → muted calendar-off icon, tooltip = "Skipped".
+ *   3. starting / running  → spinning loader icon, tooltip = the status.
  *   4. succeeded + UNREAD  → blue filled dot, tooltip = "Unread".
  *   5. succeeded + READ / no conversation → muted grey dot, tooltip = "Completed".
- *   6. scheduled/incomplete → muted grey dot, no tooltip (not terminal).
+ *   6. scheduled           → muted grey dot, no tooltip (not started yet).
  */
 function RunStatusIcon({ run, unread }: { run: ScheduledTaskRun; unread: boolean }) {
-  if (run.status === "failed") {
+  if (run.status === "failed" || run.status === "incomplete") {
     return (
-      <IndicatorWithTooltip tooltip={describeRunError(run.errorCode, "failed")}>
+      <IndicatorWithTooltip tooltip="Failed">
         <TriangleAlertIcon
           data-testid="run-status-icon"
           data-run-icon="failed"
@@ -551,7 +578,7 @@ function RunStatusIcon({ run, unread }: { run: ScheduledTaskRun; unread: boolean
   }
   if (run.status === "skipped") {
     return (
-      <IndicatorWithTooltip tooltip={describeRunError(run.errorCode, "skipped")}>
+      <IndicatorWithTooltip tooltip="Skipped">
         <CalendarOffIcon
           data-testid="run-status-icon"
           data-run-icon="skipped"
@@ -561,12 +588,12 @@ function RunStatusIcon({ run, unread }: { run: ScheduledTaskRun; unread: boolean
       </IndicatorWithTooltip>
     );
   }
-  if (run.status === "running") {
+  if (run.status === "starting" || run.status === "running") {
     return (
-      <IndicatorWithTooltip tooltip="Running">
+      <IndicatorWithTooltip tooltip={run.status === "starting" ? "Starting" : "Running"}>
         <Loader2Icon
           data-testid="run-status-icon"
-          data-run-icon="running"
+          data-run-icon={run.status}
           className="size-3.5 shrink-0 animate-spin text-muted-foreground"
         />
       </IndicatorWithTooltip>
@@ -600,6 +627,19 @@ function RunStatusIcon({ run, unread }: { run: ScheduledTaskRun; unread: boolean
     return <IndicatorWithTooltip tooltip="Completed">{dot}</IndicatorWithTooltip>;
   }
   return dot;
+}
+
+// A run that hasn't finished says what it's doing; the spinner alone doesn't
+// tell a run still starting its sandbox from one whose agent is working.
+const IN_FLIGHT_RUN_LABELS: Partial<Record<ScheduledTaskRun["status"], string>> = {
+  scheduled: "Queued",
+  starting: "Starting",
+  running: "Running",
+};
+
+/** Whether a run ended without succeeding, so its row explains why. */
+function isUnsuccessfulRun(run: ScheduledTaskRun): boolean {
+  return run.status === "failed" || run.status === "skipped" || run.status === "incomplete";
 }
 
 /** Wrap a status indicator in the shared Tooltip (app already provides the

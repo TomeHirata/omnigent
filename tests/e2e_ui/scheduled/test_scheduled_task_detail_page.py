@@ -11,17 +11,14 @@ Covers the core detail-page render + interaction path for a scheduled task:
   and the run-history section renders a run row.
 
 The seeded task pins no host, so a manual Run now with no online host records
-a ``skipped`` run (post the unresolved-host reclassification on this branch).
-This exercises the end-to-end render path without needing a live host or an
-agent turn, exactly like ``test_scheduled_task_row_run_controls`` in the sibling
-test file.
+a ``failed`` run (``no_online_host``). This exercises the end-to-end render
+path without needing a live host or an agent turn, exactly like
+``test_scheduled_task_row_run_controls`` in the sibling test file.
 
 **Icon / tooltip semantics are NOT re-tested here.** The CalendarOff-for-skipped
 icon, the amber triangle for failed runs, the unread blue dot, and all tooltip
-text are already covered by:
-
-* 20 RTL unit tests in ``web/src/pages/TaskDetailPage.test.tsx``
-* 31 backend unit tests in ``tests/server/scheduled/test_fire.py``
+text are already covered by the RTL unit tests in
+``web/src/pages/TaskDetailPage.test.tsx``.
 
 This E2E test focuses on the render + navigation + run-now → run-row journey
 that only the live server path can exercise.
@@ -35,6 +32,9 @@ from playwright.sync_api import Page, expect
 from tests.e2e_ui.scheduled.test_scheduled_tasks_page import (
     _builtin_agent_id,
     _create_task,
+    # Autouse: the session-wide live server would otherwise keep these tests'
+    # tasks, and the list-page tests count rows.
+    _delete_scheduled_tasks_created_by_test,  # noqa: F401
     _row_by_name,
 )
 
@@ -82,10 +82,10 @@ def test_scheduled_task_detail_page_renders_header_and_sections(
     # Prompt section.
     expect(page.get_by_test_id("task-detail-prompt")).to_be_visible()
 
-    # Configuration block: the agent label resolves; the host defaults to
-    # "Auto (connected host)" when no host_id is pinned.
+    # Configuration block: the agent label resolves; the host reads
+    # "Resolve at fire time" when no host_id is pinned.
     expect(page.get_by_test_id("task-detail-agent")).to_be_visible()
-    expect(page.get_by_test_id("task-detail-host")).to_contain_text("Auto (connected host)")
+    expect(page.get_by_test_id("task-detail-host")).to_contain_text("Resolve at fire time")
 
     # Back link navigates back to the list.
     expect(page.get_by_test_id("task-detail-back")).to_be_visible()
@@ -97,15 +97,14 @@ def test_scheduled_task_detail_page_run_now_records_run_row(
 ) -> None:
     """Run now from the detail header fires the task and a run row appears.
 
-    The seeded task has no host, so the fire resolves to a ``skipped`` run
-    (no online host at fire time). This exercises the real
+    The seeded task has no host, so the fire records a ``failed`` run (no
+    online host at fire time). This exercises the real
     ``POST /v1/scheduled-tasks/{id}/run`` path from the detail page and
-    confirms the run-history section renders a row — a status icon + timestamp
-    — once the background fire lands.
+    confirms the run-history row shows the stage and reason the server's
+    error code maps to, once the background fire lands.
 
     Icon / tooltip semantics (CalendarOff for skipped, amber triangle for
-    failed, etc.) are covered by the RTL unit tests; this test only asserts
-    that A run row is rendered, not which icon it carries.
+    failed, etc.) are covered by the RTL unit tests.
     """
     agent_id = _builtin_agent_id(live_server, "hello_world")
     task_id = _create_task(
@@ -148,9 +147,10 @@ def test_scheduled_task_detail_page_run_now_records_run_row(
     assert _has_run(), "Run now did not record a run within the timeout"
 
     # After the run is written the page's polling query (useScheduledTaskRuns)
-    # re-fetches and the run-history section renders at least one row.
-    # The exact status (skipped/failed/running) depends on host availability;
-    # we only assert a row rendered — the status icon is unit-tested.
+    # re-fetches and the run-history row explains the failure.
     expect(page.get_by_test_id("task-detail-runs")).to_be_visible(timeout=30_000)
-    runs_section = page.get_by_test_id("task-detail-runs")
-    expect(runs_section.get_by_test_id("task-detail-run").first).to_be_visible(timeout=30_000)
+    run_row = page.get_by_test_id("task-detail-runs").get_by_test_id("task-detail-run").first
+    expect(run_row).to_have_attribute("data-run-status", "failed", timeout=30_000)
+    expect(run_row.get_by_test_id("run-failure")).to_have_text(
+        "Host · None of your hosts was online."
+    )

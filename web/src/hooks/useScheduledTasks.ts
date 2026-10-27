@@ -68,7 +68,7 @@ export function useScheduledTasks() {
  * considered stale and refetches immediately — a task edited elsewhere won't
  * show a frozen list snapshot. `enabled` gates the fetch (e.g. a missing id).
  */
-export function useScheduledTask(id: string, enabled: boolean = true) {
+export function useScheduledTask(id: string, enabled = true) {
   const queryClient = useQueryClient();
   return useQuery<ScheduledTask>({
     queryKey: scheduledTaskKey(id),
@@ -84,7 +84,7 @@ export function useScheduledTask(id: string, enabled: boolean = true) {
 // Statuses a run can still move OUT of. Everything else (succeeded / failed /
 // skipped, plus any status this client doesn't know) is treated as settled, so
 // an unrecognised value can never strand the poll below in an infinite loop.
-const ACTIVE_RUN_STATUSES = new Set(["running", "scheduled"]);
+const ACTIVE_RUN_STATUSES = new Set(["scheduled", "starting", "running"]);
 
 /** Live-refresh cadence for a task's run history while anything is in flight. */
 const RUNS_REFETCH_INTERVAL_MS = 4_000;

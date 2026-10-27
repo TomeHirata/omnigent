@@ -17,11 +17,12 @@ import { TaskDetailPage } from "./TaskDetailPage";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import * as hooks from "@/hooks/useScheduledTasks";
 import { ScheduledTaskApiError } from "@/lib/scheduledTasksApi";
+import type * as RoutingModule from "@/lib/routing";
 import type { ScheduledTask, ScheduledTaskRun } from "@/lib/scheduledTasksApi";
 
 const navigate = vi.fn();
 vi.mock("@/lib/routing", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/lib/routing")>();
+  const actual = await importOriginal<typeof RoutingModule>();
   return {
     ...actual,
     useNavigate: () => navigate,
@@ -199,8 +200,14 @@ describe("header, prompt, configuration", () => {
     expect(screen.getByTestId("task-detail-schedule").textContent).toContain("Weekdays at 8:00 AM");
     expect(screen.getByTestId("task-detail-agent")).toHaveTextContent("Polly");
     // Null hostId → resolve-at-fire label, not blank.
-    expect(screen.getByTestId("task-detail-host")).toHaveTextContent("Auto (connected host)");
+    expect(screen.getByTestId("task-detail-host")).toHaveTextContent("Resolve at fire time");
     expect(screen.getByTestId("task-detail-state-pill")).toHaveTextContent("Active");
+  });
+
+  it("names the sandbox for a task that runs in a new sandbox each time", () => {
+    setTask(task({ executionTarget: "managed_sandbox" }));
+    renderPage();
+    expect(screen.getByTestId("task-detail-host")).toHaveTextContent("New Sandbox");
   });
 
   it("resolves a pinned host id to its name", () => {
@@ -455,10 +462,8 @@ describe("run history", () => {
     const row = screen.getByTestId("task-detail-run");
     expect(row).toHaveAttribute("data-run-status", "succeeded");
     expect(within(row).getByTestId("run-duration")).toHaveTextContent("1m 42s");
-    // No "Open conversation" link text — the whole row is the affordance now.
-    expect(within(row).queryByTestId("run-open-conversation")).toBeNull();
-    // No detail line below the timestamp (removed in FIX 1).
-    expect(within(row).queryByTestId("run-error-detail")).toBeNull();
+    // A success has nothing to explain below the timestamp.
+    expect(within(row).queryByTestId("run-failure")).toBeNull();
     // Read success → a muted grey dot (left column), not the blue unread one.
     await waitFor(() => expect(row).toHaveAttribute("data-run-unread", "false"));
     const dot = within(row).getByTestId("run-status-dot");
@@ -545,13 +550,13 @@ describe("run history", () => {
     expect(dot.className).toContain("bg-muted-foreground/40");
   });
 
-  it("renders a FAILED run with an amber warning-triangle icon whose tooltip carries the error", async () => {
+  it("renders a FAILED run with an amber triangle and the stage and reason it stopped at", async () => {
     setTask(task());
     setRuns([
       run({
         id: "run_fail",
         status: "failed",
-        errorCode: "agent_error",
+        errorCode: "sandbox_registration_timeout",
         conversationId: null,
       }),
     ]);
@@ -560,11 +565,45 @@ describe("run history", () => {
     const icon = within(row).getByTestId("run-status-icon");
     expect(icon).toHaveAttribute("data-run-icon", "failed");
     expect(icon.getAttribute("class") ?? "").toContain("text-amber-500");
-    // No inline detail line — the error message lives only in the icon tooltip.
-    expect(within(row).queryByTestId("run-error-detail")).toBeNull();
-    // The errorCode message is the icon's tooltip (Radix opens on focus).
+    expect(within(row).getByTestId("run-failure-stage")).toHaveTextContent("Sandbox");
+    expect(within(row).getByTestId("run-failure")).toHaveTextContent(
+      "Sandbox · The sandbox didn't connect in time.",
+    );
     fireEvent.focus(icon);
-    await waitFor(() => expect(screen.getAllByText("Run failed").length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByText("Failed").length).toBeGreaterThan(0));
+  });
+
+  it("names no stage for an unknown error code but still gives a reason", () => {
+    setTask(task());
+    setRuns([run({ status: "failed", errorCode: "some_new_code", conversationId: null })]);
+    renderPage();
+    const row = screen.getByTestId("task-detail-run");
+    expect(within(row).queryByTestId("run-failure-stage")).toBeNull();
+    expect(within(row).getByTestId("run-failure")).toHaveTextContent("Run failed.");
+  });
+
+  it("keeps a failed run that created a session linked to it", () => {
+    setTask(task());
+    setRuns([run({ status: "failed", errorCode: "runner_start_failed", conversationId: "c_7" })]);
+    renderPage();
+    const row = screen.getByTestId("task-detail-run");
+    expect(within(row).getByTestId("run-open")).toHaveAttribute("href", "/c/c_7");
+    expect(within(row).getByTestId("run-failure")).toHaveTextContent(
+      "Runner · The agent didn't start.",
+    );
+  });
+
+  it("shows a starting run with a spinner", async () => {
+    setTask(task());
+    setRuns([run({ status: "starting", firedAt: null, finishedAt: null, conversationId: null })]);
+    renderPage();
+    const icon = within(screen.getByTestId("task-detail-run")).getByTestId("run-status-icon");
+    expect(icon).toHaveAttribute("data-run-icon", "starting");
+    expect(
+      within(screen.getByTestId("task-detail-run")).getByTestId("run-status-label"),
+    ).toHaveTextContent("Starting");
+    fireEvent.focus(icon);
+    await waitFor(() => expect(screen.getAllByText("Starting").length).toBeGreaterThan(0));
   });
 
   it("renders a skipped run with a muted calendar-off icon and is NOT clickable", async () => {
@@ -584,15 +623,11 @@ describe("run history", () => {
     const icon = within(row).getByTestId("run-status-icon");
     expect(icon).toHaveAttribute("data-run-icon", "skipped");
     expect(icon.getAttribute("class") ?? "").toContain("text-muted-foreground");
-    // No inline detail line — skip reason lives only in the icon tooltip.
-    expect(within(row).queryByTestId("run-error-detail")).toBeNull();
-    // The skip reason is the icon's tooltip (Radix opens on focus).
-    fireEvent.focus(icon);
-    await waitFor(() =>
-      expect(
-        screen.getAllByText("Host was offline at fire time. Run skipped.").length,
-      ).toBeGreaterThan(0),
+    expect(within(row).getByTestId("run-failure")).toHaveTextContent(
+      "Host · None of your hosts was online.",
     );
+    fireEvent.focus(icon);
+    await waitFor(() => expect(screen.getAllByText("Skipped").length).toBeGreaterThan(0));
     // No conversation → NOT a clickable row (no anchor, no hover/pointer), and
     // no finished timestamps → no duration.
     expect(within(row).queryByTestId("run-open")).toBeNull();

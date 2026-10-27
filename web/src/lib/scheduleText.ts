@@ -18,6 +18,7 @@
 // calls for.
 
 import { RRule, rrulestr } from "rrule";
+import type { ScheduledTaskRunStatus } from "./scheduledTasksApi";
 
 // A fixed, far-past UTC anchor for occurrence generation. The scheduled-task
 // RRULEs carry no DTSTART (the time-of-day lives in BYHOUR/BYMINUTE), and
@@ -196,57 +197,92 @@ export function formatRunDuration(
 }
 
 /**
- * Human-readable, one-line explanation for a run that did not succeed, derived
- * from the server's machine-readable `errorCode` (see the fire path's
- * `_CannotLaunchScheduledFire` codes in `omnigent/server/scheduled/fire.py` and
- * the reconciler's `incomplete`). Used as the run's detail line for
- * `skipped` / `failed` runs — never fabricated summary text.
- *
- * Unknown / null codes fall back to a generic message keyed on the run status
- * so a new server-side code still renders something honest rather than blank.
+ * Where a run stopped and why, for the run history. `stage` names the step of
+ * the fire that failed, so a failure can be attributed without reading logs;
+ * it is `null` when the code doesn't identify one.
+ */
+export interface RunFailure {
+  stage: string | null;
+  reason: string;
+}
+
+// Keyed by the `error_code` the fire path, the persistent scheduler and the
+// stale-run reconciler record (`omnigent/server/scheduled/`). Validation
+// failures carry an `ErrorCode` value, e.g. `invalid_input`.
+const RUN_FAILURES: Readonly<Record<string, RunFailure>> = {
+  owner_deleted: { stage: "Owner", reason: "The owner's account was removed." },
+  owner_identity_unavailable: {
+    stage: "Owner",
+    reason: "Couldn't act as the owner. The next run tries again.",
+  },
+  reauthorization_required: {
+    stage: "Owner",
+    reason: "The owner's authorization for this automation is no longer valid.",
+  },
+  invalid_input: {
+    stage: "Settings",
+    reason: "The agent, model or workspace is invalid. Edit the automation to fix it.",
+  },
+  not_found: {
+    stage: "Settings",
+    reason: "The agent or workspace no longer exists. Edit the automation to fix it.",
+  },
+  forbidden: { stage: "Settings", reason: "You no longer have access to the agent or workspace." },
+  missing_host_id: {
+    stage: "Settings",
+    reason: "No host or workspace is set. Edit the automation to fix it.",
+  },
+  missing_workspace: {
+    stage: "Settings",
+    reason: "No host or workspace is set. Edit the automation to fix it.",
+  },
+  missing_execution_input: {
+    stage: "Settings",
+    reason: "No host or workspace is set. Edit the automation to fix it.",
+  },
+  unsupported_target: { stage: "Settings", reason: "This target can't run automatically." },
+  no_online_host: { stage: "Host", reason: "None of your hosts was online." },
+  host_offline: { stage: "Host", reason: "The host was offline." },
+  host_not_found: { stage: "Host", reason: "The host no longer exists." },
+  host_not_owned: { stage: "Host", reason: "The host isn't yours." },
+  host_authority_revoked: { stage: "Host", reason: "The host was registered by another account." },
+  host_registry_unavailable: { stage: "Host", reason: "The server couldn't look up hosts." },
+  existing_sandbox_not_allowed: {
+    stage: "Host",
+    reason: "Automations can't use an existing sandbox. Choose a new sandbox for each run.",
+  },
+  default_workspace_unresolved: {
+    stage: "Host",
+    reason: "Couldn't find the host's home directory.",
+  },
+  managed_sandbox_unavailable: { stage: "Sandbox", reason: "This server has no sandboxes." },
+  session_create_failed: { stage: "Session", reason: "Couldn't create the session." },
+  owner_grant_failed: {
+    stage: "Session",
+    reason: "Couldn't give the owner access to the session.",
+  },
+  sandbox_create_failed: { stage: "Sandbox", reason: "Couldn't create the sandbox." },
+  sandbox_registration_timeout: { stage: "Sandbox", reason: "The sandbox didn't connect in time." },
+  runner_start_failed: { stage: "Runner", reason: "The agent didn't start." },
+  launch_failed: { stage: "Launch", reason: "The agent session failed to launch." },
+  startup_expired: { stage: "Startup", reason: "The run stopped before the agent started." },
+  incomplete: { stage: "Running", reason: "The agent stopped reporting before the run finished." },
+};
+
+/**
+ * Describe a run that did not succeed from its `errorCode`. An unknown or
+ * missing code still gets a reason, worded from the run's status, so a code
+ * added on the server later renders something rather than nothing.
  *
  * @param errorCode The run's `errorCode`, or `null`.
  * @param status The run's status, used only for the fallback wording.
  */
-export function describeRunError(
+export function describeRunFailure(
   errorCode: string | null | undefined,
-  status: "skipped" | "failed" | (string & {}),
-): string {
-  switch (errorCode) {
-    case "no_online_host":
-      return "Host was offline at fire time. Run skipped.";
-    case "host_offline":
-      return "The pinned host was offline. Run skipped.";
-    case "host_not_found":
-      return "The pinned host no longer exists. Run skipped.";
-    case "host_not_owned":
-      return "The pinned host isn't available to you. Run skipped.";
-    case "host_registry_unavailable":
-      return "No host was reachable at fire time. Run skipped.";
-    case "default_workspace_unresolved":
-      return "Couldn't resolve a workspace on the host. Run skipped.";
-    // Permanent misconfiguration codes — the stored task spec fails every
-    // occurrence (recorded as "failed", not "skipped"). Copy points the user at
-    // fixing the task's configuration rather than waiting for a host.
-    case "invalid_input":
-      return "This task's model or workspace is invalid. Edit the task to fix it.";
-    case "missing_workspace":
-    case "missing_host_id":
-    case "missing_execution_input":
-      return "This task is missing its host or workspace. Edit the task to fix it.";
-    case "unsupported_target":
-      return "This task's target can't be run automatically";
-    case "session_create_failed":
-      return "Couldn't start the agent session";
-    case "owner_grant_failed":
-      return "Couldn't authorize the agent session";
-    case "launch_failed":
-      return "The agent session failed to launch";
-    case "incomplete":
-      return "The host went away mid-run. Run left incomplete.";
-    default:
-      return status === "skipped" ? "Run skipped" : "Run failed";
-  }
+  status: ScheduledTaskRunStatus,
+): RunFailure {
+  if (errorCode != null && Object.hasOwn(RUN_FAILURES, errorCode)) return RUN_FAILURES[errorCode];
+  return { stage: null, reason: status === "skipped" ? "Run skipped." : "Run failed." };
 }
 
 /** Parse an RRULE string into an `RRule`, or `null` if it can't be parsed. */
