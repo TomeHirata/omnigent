@@ -672,6 +672,19 @@ async def test_recovery_cleans_up_the_sandbox_of_a_deleted_session(store, monkey
     terminate.assert_awaited_once()
 
 
+def _draining_sandbox_config(shutdown_drain_s: float) -> Any:
+    from omnigent.server.managed_hosts import ManagedSandboxConfig, ManagedSandboxDeployment
+
+    return ManagedSandboxDeployment.single(
+        ManagedSandboxConfig(
+            server_url="https://server.example.com",
+            launcher_factory=lambda: pytest.fail("recovery never launches a sandbox"),
+            token_ttl_s=90000,
+        ),
+        shutdown_drain_s=shutdown_drain_s,
+    )
+
+
 async def test_recovery_fails_a_failed_managed_launch_and_tears_down_its_sandbox(
     store, monkeypatch
 ) -> None:
@@ -681,6 +694,8 @@ async def test_recovery_fails_a_failed_managed_launch_and_tears_down_its_sandbox
     monkeypatch.setattr(managed_hosts, "terminate_managed_host", terminate)
     task = _saved_task(store, execution_target="managed_sandbox")
     run = _expired_run(task)
+    # Still inside another replica's shutdown drain: a known failure doesn't wait it out.
+    clock = FakeClock(run.lease_expires_at + 1)
     # The sandbox bound after its prompt had already failed, so it can never deliver it.
     conversations = _RecoveryConversationStore(
         _FakeConversation(
@@ -690,7 +705,14 @@ async def test_recovery_fails_a_failed_managed_launch_and_tears_down_its_sandbox
     startup = FakeStartupInputs()
     hosts = _sandbox_hosts(task, run, "agent_sandbox")
     executor = ClaimedRunExecutor(
-        _deps(store, conversation_store=conversations, host_store=hosts, startup_inputs=startup)
+        _deps(
+            store,
+            conversation_store=conversations,
+            host_store=hosts,
+            sandbox_config=_draining_sandbox_config(30),
+            startup_inputs=startup,
+        ),
+        now=clock.now,
     )
 
     assert await executor.recover(run) == "failed"
@@ -700,20 +722,12 @@ async def test_recovery_fails_a_failed_managed_launch_and_tears_down_its_sandbox
 
 async def test_recovery_waits_out_another_replicas_shutdown_drain(store, monkeypatch) -> None:
     from omnigent.server import managed_hosts
-    from omnigent.server.managed_hosts import ManagedSandboxConfig, ManagedSandboxDeployment
 
     terminate = AsyncMock()
     monkeypatch.setattr(managed_hosts, "terminate_managed_host", terminate)
     task = _saved_task(store, execution_target="managed_sandbox")
     run = _expired_run(task)
-    config = ManagedSandboxDeployment.single(
-        ManagedSandboxConfig(
-            server_url="https://server.example.com",
-            launcher_factory=lambda: pytest.fail("recovery never launches a sandbox"),
-            token_ttl_s=90000,
-        ),
-        shutdown_drain_s=30,
-    )
+    config = _draining_sandbox_config(30)
     clock = FakeClock(run.lease_expires_at + 10)
     startup = FakeStartupInputs()
     conversations = _RecoveryConversationStore(
