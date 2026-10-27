@@ -42,10 +42,11 @@ const showToast = vi.fn();
 vi.mock("@/components/ui/toast", () => ({ showToast: (...args: unknown[]) => showToast(...args) }));
 
 // Agent / host catalogs — return simple lists so labels resolve.
+const useAvailableAgents = vi.fn((_options?: { pinnedAgentIds?: string[] }) => ({
+  data: [{ id: "ag_1", name: "polly", display_name: "Polly" }],
+}));
 vi.mock("@/hooks/useAvailableAgents", () => ({
-  useAvailableAgents: () => ({
-    data: [{ id: "ag_1", name: "polly", display_name: "Polly" }],
-  }),
+  useAvailableAgents: (options?: { pinnedAgentIds?: string[] }) => useAvailableAgents(options),
 }));
 vi.mock("@/hooks/useHosts", () => ({
   useHosts: () => ({ data: [{ host_id: "h_1", name: "My Laptop" }] }),
@@ -202,6 +203,12 @@ describe("header, prompt, configuration", () => {
     // Null hostId → resolve-at-fire label, not blank.
     expect(screen.getByTestId("task-detail-host")).toHaveTextContent("Resolve at fire time");
     expect(screen.getByTestId("task-detail-state-pill")).toHaveTextContent("Active");
+  });
+
+  it("keeps the task's agent in the catalog when another agent shares its name", () => {
+    setTask(task({ agentId: "ag_1" }));
+    renderPage();
+    expect(useAvailableAgents).toHaveBeenLastCalledWith({ pinnedAgentIds: ["ag_1"] });
   });
 
   it("names the sandbox for a task that runs in a new sandbox each time", () => {

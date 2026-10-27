@@ -166,7 +166,12 @@ export function TaskDetailPage() {
   // Resolve the agent + host display labels from their catalogs. Both are
   // best-effort: an unknown id falls back to the raw id (agent) or a friendly
   // default (host) rather than blanking the field.
-  const { data: agents } = useAvailableAgents();
+  // Pin the task's agent: another agent with the same name (e.g. a session's
+  // own copy) would otherwise win the catalog's name merge and leave the
+  // label showing a raw id.
+  const { data: agents } = useAvailableAgents({
+    pinnedAgentIds: task != null ? [task.agentId] : [],
+  });
   const { data: hosts } = useHosts();
   const info = useServerInfo();
   const sandboxLabel = sandboxOptionLabel(info !== "loading" ? info.sandbox_provider : null);
