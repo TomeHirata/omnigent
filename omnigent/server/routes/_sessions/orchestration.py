@@ -4582,6 +4582,8 @@ async def _bind_and_launch_managed_runner(
     # From here a shutdown may cancel the launch: the host's replica finishes it.
     if (launch_task := asyncio.current_task()) is not None:
         _unbound_managed_launch_tasks.discard(launch_task)
+    if (launch := tracker.get(session_id)) is not None:
+        launch.bound.set()
     if relaunch_host is not None:
         await _note_workspace_reset_on_recreate(session_id, conversation_store)
     # Host bound; what remains is launching the runner and waiting

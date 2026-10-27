@@ -13,6 +13,7 @@ import pytest
 from omnigent.db.db_models import current_workspace_id, workspace_scope
 from omnigent.server.scheduled.dispatch_scheduler import (
     PersistentTaskScheduler,
+    ScheduledTaskDispatchHooks,
     StartupLease,
     StartupLeaseLost,
 )
@@ -1947,3 +1948,103 @@ async def test_finished_schedules_are_completed_and_not_rescanned(store, monkeyp
         assert store.list_uninitialized_tasks() == []
     finally:
         await scheduler.stop()
+
+
+def test_dispatch_hooks_replace_the_built_in_executor_only_as_a_whole() -> None:
+    assert ScheduledTaskDispatchHooks().on_fire is None
+    ScheduledTaskDispatchHooks(AsyncMock(), AsyncMock())
+    with pytest.raises(ValueError, match="both on_fire and on_expired"):
+        ScheduledTaskDispatchHooks(on_fire=AsyncMock())
+    with pytest.raises(ValueError, match="both on_fire and on_expired"):
+        ScheduledTaskDispatchHooks(on_expired=AsyncMock())
+    # A replacement executor would silently ignore it.
+    with pytest.raises(ValueError, match="fire_identity applies only"):
+        ScheduledTaskDispatchHooks(AsyncMock(), AsyncMock(), fire_identity=AsyncMock())
+
+
+async def test_run_now_starts_a_manual_run_here_when_this_replica_owns_its_host(
+    store, monkeypatch
+) -> None:
+    task = store.update(_task(store).id, state="paused")
+    clock = FakeClock(task.created_at + 60)
+    fired = []
+
+    async def fire(snapshot, lease):
+        fired.append((snapshot.state, lease.run))
+        await lease.finish("running")
+
+    scheduler = PersistentTaskScheduler(store, fire, AsyncMock(), now=clock.now, poll_seconds=3600)
+    # Only the request itself may start the run in this test.
+    monkeypatch.setattr(scheduler, "_claim_pending", AsyncMock())
+    await scheduler.start()
+    try:
+        run = await scheduler.run_now(task)
+        await asyncio.gather(*list(scheduler._startups.values()))
+    finally:
+        await scheduler.stop()
+
+    # Run now is a manual override: a paused task starts, under its own occurrence key.
+    [(state, started)] = fired
+    assert state == "paused"
+    assert (started.id, started.status) == (run.id, "starting")
+    assert started.trigger_key.startswith("manual:")
+    assert started.host_id == occurrence_host_id(task, started.trigger_key)
+    assert store.list_runs(task.id)[0][0].status == "running"
+    assert store.get(task.id).next_run_at is None
+
+
+async def test_run_now_waits_for_the_host_owner_to_start_it(store) -> None:
+    task = _task(store)
+    clock = FakeClock(task.created_at + 60)
+    owned = False
+
+    async def owns_host(_workspace_id, _host_id):
+        return owned
+
+    fire = AsyncMock()
+    scheduler = PersistentTaskScheduler(
+        store, fire, AsyncMock(), owns_host=owns_host, now=clock.now
+    )
+    run = await scheduler.run_now(task)
+    assert run.status == "scheduled"
+    await scheduler.poll_once()
+    await _drain(scheduler)
+    fire.assert_not_awaited()
+
+    owned = True
+    await scheduler.poll_once()
+    await _drain(scheduler)
+    [(snapshot, lease)] = [call.args for call in fire.await_args_list]
+    assert (snapshot.id, lease.run.id) == (task.id, run.id)
+    assert store.list_pending_runs() == []
+    # Run now never moves the schedule of an active task.
+    assert store.get(task.id).next_run_at == task.next_run_at
+
+
+async def test_run_now_keeps_a_recorded_request_when_starting_it_here_fails(store) -> None:
+    task = _task(store)
+    clock = FakeClock(task.created_at + 60)
+    calls = 0
+
+    async def owns_host(_workspace_id, _host_id):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("ownership lookup unavailable")
+        return True
+
+    fire = AsyncMock()
+    scheduler = PersistentTaskScheduler(
+        store, fire, AsyncMock(), owns_host=owns_host, now=clock.now, poll_seconds=3600
+    )
+    await scheduler.start()
+    try:
+        # Recorded, so the caller must not retry and create a second run.
+        run = await scheduler.run_now(task)
+        assert run is not None
+        await scheduler.poll_once()
+        await _drain(scheduler)
+    finally:
+        await scheduler.stop()
+    [(_snapshot, lease)] = [call.args for call in fire.await_args_list]
+    assert lease.run.id == run.id
