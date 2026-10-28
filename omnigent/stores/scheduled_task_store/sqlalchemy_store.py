@@ -140,6 +140,22 @@ def _to_entity(row: SqlScheduledTask) -> ScheduledTask:
     )
 
 
+# What a session is created with and keeps, so an edit to any of them makes a
+# first run's session stale. updated_at has second resolution, so it alone
+# would miss an edit in the same second.
+_SESSION_CREATION_FIELDS = (
+    "agent_id",
+    "host_id",
+    "workspace",
+    "execution_target",
+    "model_override",
+    "reasoning_effort",
+    "permission_mode",
+    "project_id",
+    "updated_at",
+)
+
+
 def _run_to_entity(row: SqlScheduledTaskRun) -> ScheduledTaskRun:
     """
     Convert a :class:`SqlScheduledTaskRun` ORM row to a :class:`ScheduledTaskRun`.
@@ -506,11 +522,9 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
             if row.session_id is not None:
                 return "taken"
             current = _to_entity(row)
-            # updated_at has second resolution, so the fields a session binds to
-            # are compared too.
             if any(
                 getattr(current, name) != getattr(snapshot, name)
-                for name in ("agent_id", "host_id", "workspace", "execution_target", "updated_at")
+                for name in _SESSION_CREATION_FIELDS
             ):
                 return "stale"
             row.session_id = session_id

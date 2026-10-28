@@ -2239,7 +2239,7 @@ def test_update_sets_and_clears_the_continued_session(
 
 
 def test_adopt_session_records_only_an_unchanged_continue_task_without_one(
-    store: SqlAlchemyScheduledTaskStore,
+    store: SqlAlchemyScheduledTaskStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A concurrent run, pick or edit wins over the first run's session."""
     new_mode = _session_task(store, "st_adopt_new")
@@ -2255,13 +2255,28 @@ def test_adopt_session_records_only_an_unchanged_continue_task_without_one(
     assert store.adopt_session(continuing.id, _uid("c2"), snapshot=snapshot) == "taken"
     assert store.get(continuing.id).session_id == _uid("c1")
 
-    # An edit in the same second as the snapshot is still caught.
-    edited = _session_task(store, "st_adopt_edit", session_mode="continue")
-    store.update(edited.id, name="renamed")
-    before_edit = store.get(edited.id)
-    store.update(edited.id, workspace="/elsewhere")
-    assert store.adopt_session(edited.id, _uid("c3"), snapshot=before_edit) == "stale"
-    assert store.get(edited.id).session_id is None
+    # An edit in the same second as the snapshot is still caught, for every
+    # setting the session was created with and keeps. The clock is frozen so
+    # updated_at cannot tell the edit apart.
+    from omnigent.stores.scheduled_task_store import sqlalchemy_store
+
+    monkeypatch.setattr(sqlalchemy_store, "now_epoch", lambda: 1_800_000_000)
+    for name, value in (
+        ("workspace", "/elsewhere"),
+        ("model_override", "claude-opus"),
+        ("reasoning_effort", "high"),
+        ("permission_mode", "acceptEdits"),
+        ("project_id", _uid("proj")),
+    ):
+        edited = _session_task(store, f"st_adopt_edit_{name}", session_mode="continue")
+        store.update(edited.id, name="renamed")
+        before_edit = store.get(edited.id)
+        store.update(edited.id, **{name: value})
+        assert store.get(edited.id).updated_at == before_edit.updated_at, name
+        assert store.adopt_session(edited.id, _uid(f"c3{name}"), snapshot=before_edit) == (
+            "stale"
+        ), name
+        assert store.get(edited.id).session_id is None, name
 
     store.delete(continuing.id)
     assert store.adopt_session(continuing.id, _uid("c4"), snapshot=adopted) == "stale"
