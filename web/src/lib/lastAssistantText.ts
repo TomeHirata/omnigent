@@ -83,18 +83,26 @@ export function extractErrorText(item: unknown): string | undefined {
  *
  * :param items: Raw session items, oldest-to-newest.
  * :param maxChars: Preview character budget (default 160).
- * :returns: The preview and its item key (the item id, else the text), or
- *     `undefined` when no item carries output text.
+ * :returns: The preview, its item key (the item id, else the text), and the
+ *     untrimmed `fullText` when the preview cut any of it; `undefined` when no
+ *     item carries output text.
  */
 export function latestOutput(
   items: readonly unknown[],
   maxChars: number = DEFAULT_MAX_CHARS,
-): { key: string; preview: string } | undefined {
+): { key: string; preview: string; fullText?: string } | undefined {
   for (let i = items.length - 1; i >= 0; i--) {
     const text = extractAssistantText(items[i]) ?? extractErrorText(items[i]);
     if (text === undefined) continue;
     const id = (items[i] as Record<string, unknown>).id;
-    return { key: typeof id === "string" ? id : text, preview: previewText(text, maxChars) };
+    const preview = previewText(text, maxChars);
+    // Uncapped, the preview is every non-empty line; anything shorter was cut.
+    const truncated = preview !== previewText(text, Infinity, Infinity);
+    return {
+      key: typeof id === "string" ? id : text,
+      preview,
+      ...(truncated ? { fullText: text } : {}),
+    };
   }
   return undefined;
 }

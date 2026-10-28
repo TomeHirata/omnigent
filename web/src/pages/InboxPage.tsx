@@ -60,10 +60,12 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { ApprovalCard, type SubmitApprovalFn } from "@/components/blocks/ApprovalCard";
+import { FilePathAwareMessageResponse } from "@/components/blocks/ChatMarkdown";
 import { ElicitationMessage } from "@/components/blocks/ElicitationMessage";
 import { PageScroll } from "@/components/PageScroll";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { showToast } from "@/components/ui/toast";
@@ -115,6 +117,7 @@ import {
 } from "@/lib/sessionsApi";
 import { userColor, userInitials } from "@/lib/userBadge";
 import { cn } from "@/lib/utils";
+import { FileViewerContext } from "@/shell/FileViewerContext";
 import { conversationDisplayLabel, getConversationAgentType } from "@/shell/sidebarNav";
 
 /** Optimistic verdicts keyed by elicitation id, mirroring the chat store's flip. */
@@ -685,9 +688,7 @@ export function InboxPage() {
       >
         <div>
           <SessionLine title={title} />
-          {preview && (
-            <p className="mt-2 text-ui font-medium break-words whitespace-pre-wrap">{preview}</p>
-          )}
+          {preview && <LatestOutputPreview preview={preview} fullText={output?.fullText} />}
         </div>
         {replyAwaitingAnswer && (
           <p role="status" className="flex items-center gap-1.5 text-sm text-muted-foreground">
@@ -985,6 +986,42 @@ function SessionLine({ title, detail }: { title: string; detail?: string }) {
 
 function InboxActions({ children }: { children: ReactNode }) {
   return <div className="flex items-center justify-end gap-1 pt-0.5">{children}</div>;
+}
+
+/**
+ * The expanded unread card's latest-output preview. When the preview cut the
+ * reply, hovering or focusing it shows the whole reply, rendered like the chat.
+ */
+function LatestOutputPreview({ preview, fullText }: { preview: string; fullText?: string }) {
+  const className = "mt-2 text-ui font-medium break-words whitespace-pre-wrap";
+  if (fullText === undefined) return <p className={className}>{preview}</p>;
+  return (
+    // The close delay lets the pointer cross into the card to scroll it.
+    <HoverCard openDelay={300} closeDelay={150}>
+      <HoverCardTrigger asChild>
+        <p
+          tabIndex={0}
+          className={cn(
+            className,
+            "cursor-default rounded-sm outline-none focus-visible:ring-3 focus-visible:ring-ring/50",
+          )}
+        >
+          {preview}
+        </p>
+      </HoverCardTrigger>
+      <HoverCardContent
+        side="bottom"
+        align="start"
+        className="max-h-[min(60vh,32rem)] w-[min(40rem,calc(100vw-2rem))] overflow-y-auto p-3"
+      >
+        {/* No session is open here, so file paths stay plain text instead of
+            resolving against whichever session the file viewer last showed. */}
+        <FileViewerContext.Provider value={null}>
+          <FilePathAwareMessageResponse>{fullText}</FilePathAwareMessageResponse>
+        </FileViewerContext.Provider>
+      </HoverCardContent>
+    </HoverCard>
+  );
 }
 
 /** The expanded unread card's reply box; its Send button lives in the action row. */

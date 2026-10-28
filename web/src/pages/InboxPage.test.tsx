@@ -660,6 +660,48 @@ describe("InboxPage unread sessions", () => {
     expect(await screen.findByTestId("inbox-unread")).toHaveAttribute("data-expanded", "false");
   });
 
+  it("shows the whole latest reply on hover when the preview cut it", async () => {
+    // WHY: the preview keeps 3 lines and 280 characters, but the full reply is
+    // already loaded, so hovering shows the rest without another request.
+    const row = unreadConversation();
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    const reply = ["First line.", "Second line.", "Third line.", "**Fourth** has the verdict."];
+    vi.mocked(sessionsApi.fetchSessionItemsPage).mockResolvedValue({
+      items: [assistantReply(reply.join("\n"))],
+      hasMore: false,
+    });
+    renderPage();
+
+    const item = await screen.findByTestId("inbox-unread");
+    fireEvent.click(within(item).getByRole("button", { name: /Unread Session/ }));
+    const preview = await within(item).findByText(/Third line\./);
+    expect(preview).toHaveAttribute("tabindex", "0");
+    expect(screen.queryByText(/has the verdict/)).not.toBeInTheDocument();
+
+    fireEvent.pointerEnter(preview);
+
+    // Rendered like the chat: the markdown bold renders as bold, not asterisks.
+    expect(await screen.findByText("Fourth")).toHaveAttribute("data-streamdown", "strong");
+    expect(screen.getByText(/has the verdict/)).toBeInTheDocument();
+    expect(sessionsApi.fetchSessionItemsPage).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers no hover card when the preview already shows the whole reply", async () => {
+    const row = unreadConversation();
+    vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
+    vi.mocked(sessionsApi.fetchSessionItemsPage).mockResolvedValue({
+      items: [assistantReply("All done.\n\nNothing else to report.")],
+      hasMore: false,
+    });
+    renderPage();
+
+    const item = await screen.findByTestId("inbox-unread");
+    fireEvent.click(within(item).getByRole("button", { name: /Unread Session/ }));
+    const preview = await within(item).findByText(/Nothing else to report\./);
+    expect(preview).not.toHaveAttribute("data-slot", "hover-card-trigger");
+    expect(preview).not.toHaveAttribute("tabindex");
+  });
+
   it("keeps the row usable when its preview fetch fails", async () => {
     // WHY: a missing preview isn't a load failure — the row still renders
     // without one, raises no error banner, and can be marked read.

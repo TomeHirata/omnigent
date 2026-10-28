@@ -105,7 +105,20 @@ describe("latestOutput", () => {
   it("falls back to the full text when the item has no id", () => {
     // The key is the untruncated text, so two long replies sharing a prefix differ.
     const long = `${"a".repeat(30)} first`;
-    expect(latestOutput([reply(long)], 10)).toEqual({ key: long, preview: "aaaaaaaaa…" });
+    expect(latestOutput([reply(long)])?.key).toBe(long);
+  });
+
+  it("returns the untrimmed text only when the preview cut some of it", () => {
+    const capped = `${"a".repeat(30)} first`;
+    expect(latestOutput([reply(capped)], 10)).toEqual({
+      key: capped,
+      preview: "aaaaaaaaa…",
+      fullText: capped,
+    });
+    const manyLines = "one\ntwo\nthree\nfour";
+    expect(latestOutput([reply(manyLines)])?.fullText).toBe(manyLines);
+    // Blank lines between paragraphs are dropped from the preview but lose no text.
+    expect(latestOutput([reply("one\n\ntwo")])).toEqual({ key: "one\n\ntwo", preview: "one\ntwo" });
   });
 });
 
