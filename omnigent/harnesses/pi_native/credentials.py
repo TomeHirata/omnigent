@@ -1523,6 +1523,92 @@ def _live_family_model_entries(
     return entries
 
 
+def _spread_over_databricks_surfaces(
+    *,
+    family_base_url: str,
+    declared_surface: DatabricksPiSurface,
+    api: str,
+    api_key: str,
+    auth_header: bool,
+    model: str,
+    shortlist: list[_PiModelEntry],
+    curated_models: bool,
+) -> PiProviderConfig | None:
+    """Move a lone Databricks gateway family's models onto their own surfaces.
+
+    One family names one surface, but its workspace serves every protocol with
+    the same credential. Claude ids belong on the Anthropic Messages passthrough;
+    other ids must stay off it (Gemini-3.x rejects Anthropic-format tool history
+    that carries no thought signature). Non-Claude ids on an OpenAI-family
+    surface keep the wire that family declares.
+
+    :param family_base_url: The family's workspace-hosted gateway URL.
+    :param declared_surface: The surface *family_base_url* names.
+    :param api: The family's Pi API type.
+    :param api_key: The family's Pi ``apiKey`` value.
+    :param auth_header: Whether the family sends ``Authorization: Bearer``.
+    :param model: The launch model id.
+    :param shortlist: The model entries the single-family config would register.
+    :param curated_models: Whether *shortlist* is a configured tier shortlist.
+    :returns: A multi-surface config, or ``None`` when every model already fits
+        the family's surface.
+    """
+    targets = []
+    for model_entry in shortlist:
+        surface = databricks_pi_surface_for_model(model_entry["id"])
+        if surface is not DatabricksPiSurface.ANTHROPIC and (
+            declared_surface is not DatabricksPiSurface.ANTHROPIC
+        ):
+            surface = declared_surface
+        targets.append((model_entry, surface))
+    if all(surface is declared_surface for _, surface in targets):
+        return None
+    workspace_url = f"https://{urlparse(family_base_url).hostname}"
+    surface_urls = {
+        DatabricksPiSurface.ANTHROPIC: f"{workspace_url}{_DATABRICKS_ANTHROPIC_GATEWAY_PATH}",
+        DatabricksPiSurface.RESPONSES: f"{workspace_url}/ai-gateway/codex/v1",
+        DatabricksPiSurface.COMPLETIONS: f"{workspace_url}/serving-endpoints",
+        DatabricksPiSurface.MLFLOW: f"{workspace_url}/ai-gateway/mlflow/v1",
+        declared_surface: family_base_url,
+    }
+    claude_models: list[_PiModelEntry] = []
+    surface_models: dict[DatabricksPiSurface, list[_PiModelEntry]] = {}
+    for model_entry, surface in targets:
+        if surface is DatabricksPiSurface.ANTHROPIC:
+            moved = declared_surface is not DatabricksPiSurface.ANTHROPIC
+            claude_models.append({**model_entry, "reasoning": True} if moved else model_entry)
+        else:
+            surface_models.setdefault(surface, []).append(model_entry)
+    additional: dict[str, _PiProviderPayload] = {}
+    for surface, models in surface_models.items():
+        if surface is declared_surface:
+            api_type = api
+        elif surface is DatabricksPiSurface.RESPONSES:
+            api_type = "openai-responses"
+        else:
+            api_type = "openai-completions"
+        additional[_SURFACE_PROVIDER_IDS[surface]] = _databricks_openai_provider(
+            api_key, surface_urls[surface], models, api_type=api_type
+        )
+    return PiProviderConfig(
+        provider_id=_PI_PROVIDER_ID,
+        base_url=surface_urls[DatabricksPiSurface.ANTHROPIC],
+        api="anthropic-messages",
+        model=model,
+        api_key=api_key,
+        # The gateway takes the workspace credential as a bearer on every surface.
+        auth_header=auth_header or declared_surface is not DatabricksPiSurface.ANTHROPIC,
+        extra_models=claude_models,
+        additional_providers=additional,
+        databricks_surfaces={
+            surface: url
+            for surface, url in surface_urls.items()
+            if surface is not DatabricksPiSurface.ANTHROPIC
+        },
+        curated_models=curated_models,
+    )
+
+
 def _inline_family_pi_provider(
     entry: ProviderEntry, *, model: str | None, preserve_model_ids: bool = False
 ) -> PiProviderConfig | None:
@@ -1536,7 +1622,9 @@ def _inline_family_pi_provider(
     the selected family's ``base_url`` is a workspace-hosted Databricks AI
     Gateway, the whole workspace is enumerated instead (Claude, GPT and Gemini
     surfaces) with the configured default kept as the launch model; see
-    :func:`_databricks_gateway_pi_provider`.
+    :func:`_databricks_gateway_pi_provider`. Without that listing, each model
+    still goes to its own gateway surface; see
+    :func:`_spread_over_databricks_surfaces`.
 
     :param entry: The resolved default provider entry.
     :param model: Session model override, or ``None`` to use the family default.
@@ -1594,7 +1682,7 @@ def _inline_family_pi_provider(
         # A workspace-hosted Databricks Unity Gateway fronts Claude, GPT and Gemini
         # together; list the workspace so Pi offers every family, not just this
         # one. Inference bindings pin exact ids and a multi-model tier map is a
-        # deliberate shortlist, so both keep the single-family config below.
+        # deliberate shortlist, so both keep the shortlist below.
         declared_surface = _databricks_workspace_gateway_surface(family.base_url)
         if declared_surface is not None and not preserve_model_ids and not curated_models:
             # The configured default keeps its declared surface and limits when
@@ -1637,6 +1725,19 @@ def _inline_family_pi_provider(
                         configured_max_output_tokens=family.max_output_tokens,
                     )
                 )
+        if declared_surface is not None:
+            spread = _spread_over_databricks_surfaces(
+                family_base_url=family.base_url,
+                declared_surface=declared_surface,
+                api=api,
+                api_key=api_key,
+                auth_header=auth_header,
+                model=resolved_model,
+                shortlist=shortlist,
+                curated_models=curated_models,
+            )
+            if spread is not None:
+                return spread
         return PiProviderConfig(
             provider_id=_PI_PROVIDER_ID,
             base_url=family.base_url,
@@ -1719,34 +1820,37 @@ def resolve_pi_native_provider(
         if resolved is None:
             raise ValueError(f"Configured provider {entry.name!r} cannot route Pi.")
         if binding.model_allowlist is not None:
-            grouped: dict[str, PiProviderConfig] = {}
             provider_ids = {
                 "anthropic-messages": _PI_PROVIDER_ID,
                 "openai-responses": _PI_OPENAI_PROVIDER_ID,
                 "openai-completions": _PI_COMPLETIONS_PROVIDER_ID,
             }
+            payloads: dict[str, _PiProviderPayload] = {}
+            rows: dict[str, list[_PiModelEntry]] = {}
             for model_id in binding.model_allowlist:
                 routed = _inline_family_pi_provider(entry, model=model_id, preserve_model_ids=True)
                 if routed is None:
                     raise ValueError(
                         f"Configured provider {entry.name!r} cannot route {model_id!r}."
                     )
-                provider_id = provider_ids[routed.api]
-                model_entry = next(row for row in routed.extra_models if row["id"] == model_id)
-                previous = grouped.get(provider_id)
-                grouped[provider_id] = replace(
-                    routed,
-                    provider_id=provider_id,
-                    extra_models=[*(previous.extra_models if previous else []), model_entry],
-                )
+                # A model may be routed to a secondary surface, so follow the rendered config.
+                for rendered_id, payload in routed.to_models_config()["providers"].items():
+                    row = next((m for m in payload["models"] if m["id"] == model_id), None)
+                    if row is None:
+                        continue
+                    provider_id = (
+                        provider_ids[routed.api] if rendered_id == _PI_PROVIDER_ID else rendered_id
+                    )
+                    payloads.setdefault(provider_id, payload)
+                    rows.setdefault(provider_id, []).append(row)
+                    break
             primary_id = provider_ids[resolved.api]
-            primary = grouped.pop(primary_id)
             resolved = replace(
-                primary,
-                model=resolved.model,
+                resolved,
+                provider_id=primary_id,
+                extra_models=rows.pop(primary_id, []),
                 additional_providers={
-                    pid: provider.to_models_config()["providers"][pid]
-                    for pid, provider in grouped.items()
+                    pid: {**payloads[pid], "models": models} for pid, models in rows.items()
                 },
                 curated_models=True,
                 model_allowlist=binding.model_allowlist,

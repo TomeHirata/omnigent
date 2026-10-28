@@ -316,6 +316,49 @@ def test_pi_picker_preserves_models_with_colliding_ids() -> None:
             assert provider.model == model
 
 
+def test_pi_binding_routes_each_allowed_model_to_its_gateway_surface() -> None:
+    models = ["system.ai.claude-opus-5", "system.ai.gemini-3-5-flash"]
+    profile = {
+        "providers": {
+            "unity": {
+                "kind": "gateway",
+                "anthropic": {
+                    "base_url": "https://wkspc.cloud.databricks.com/ai-gateway/anthropic",
+                    "api_key_ref": "env:UNITY_TEST_KEY",
+                    "models": {"default": models[0]},
+                },
+            }
+        },
+        "inference": {
+            "harnesses": {
+                "pi-native": {
+                    "provider": "unity",
+                    "default_model": models[0],
+                    "model_allowlist": models,
+                }
+            }
+        },
+    }
+    with inference_config_scope(profile):
+        provider = resolve_pi_native_provider()
+        switched = resolve_pi_native_provider(model=models[1])
+    assert provider is not None and switched is not None
+    rendered = provider.to_models_config()["providers"]
+    assert {
+        pid: [row["id"] for row in payload["models"]] for pid, payload in rendered.items()
+    } == {
+        "omnigent": [models[0]],
+        "omnigent-mlflow": [models[1]],
+    }
+    assert rendered["omnigent"]["api"] == "anthropic-messages"
+    assert rendered["omnigent-mlflow"]["api"] == "openai-completions"
+    assert rendered["omnigent-mlflow"]["baseUrl"] == (
+        "https://wkspc.cloud.databricks.com/ai-gateway/mlflow/v1"
+    )
+    assert switched.model == models[1]
+    assert switched.to_models_config() == provider.to_models_config()
+
+
 def test_acp_slug_binding_preserves_one_model_restriction() -> None:
     profile = _profile()
     profile["inference"] = {
