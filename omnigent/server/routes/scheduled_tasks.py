@@ -599,18 +599,19 @@ def create_scheduled_tasks_router(
         # the frontend can compute unread dots without per-row session GETs.
         # Runs without a conversation_id (skipped/failed) contribute null fields.
         conv_ids = [r.conversation_id for r in runs if r.conversation_id is not None]
-        convs = conversation_store.get_conversations(conv_ids) if conv_ids else {}
+        sessions = conversation_store.get_session_activity(conv_ids) if conv_ids else {}
         run_rows = []
         for r in runs:
-            if r.conversation_id is not None and r.conversation_id in convs:
-                conv = convs[r.conversation_id]
+            session = sessions.get(r.conversation_id) if r.conversation_id is not None else None
+            if r.conversation_id is not None and session is not None:
                 last_seen, explicit_unread = _read_state_entry(viewer_id, r.conversation_id)
                 run_rows.append(
                     _run_to_response(
                         r,
-                        conversation_updated_at=conv.updated_at,
+                        conversation_updated_at=session.updated_at,
                         conversation_status=_list_status_with_starting(
-                            _session_status_from_cache(conv.id, conv.live_status), conv.id
+                            _session_status_from_cache(r.conversation_id, session.live_status),
+                            r.conversation_id,
                         ),
                         viewer_last_seen=last_seen,
                         viewer_unread=explicit_unread,

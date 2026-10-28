@@ -28,12 +28,13 @@ import type * as RoutingModule from "@/lib/routing";
 import type { ScheduledTask, ScheduledTaskRun } from "@/lib/scheduledTasksApi";
 
 const navigate = vi.fn();
+let routeParams = { taskId: "st_1" };
 vi.mock("@/lib/routing", async (importOriginal) => {
   const actual = await importOriginal<typeof RoutingModule>();
   return {
     ...actual,
     useNavigate: () => navigate,
-    useParams: () => ({ taskId: "st_1" }),
+    useParams: () => routeParams,
   };
 });
 
@@ -168,6 +169,7 @@ function setRuns(
 }
 
 beforeEach(() => {
+  routeParams = { taskId: "st_1" };
   useAvailableAgents.mockImplementation(defaultAgentCatalog);
   navigate.mockReset();
   updateMutate.mockReset();
@@ -862,5 +864,22 @@ describe("auto-mark runs unread", () => {
 
     expect(seedRunUnreadBaseline).not.toHaveBeenCalled();
     expect(screen.getByTestId("task-detail-run")).toHaveAttribute("data-run-unread", "false");
+  });
+
+  it("does NOT auto-mark another task's history when the route switches tasks in place", () => {
+    setTask(task());
+    setRuns([run({ id: "run_a", status: "succeeded", conversationId: "c_a" })]);
+    const { rerender } = renderPage();
+
+    // Browser history jumps straight to task B, keeping this route mounted: its
+    // cached history first, then its first fetched response.
+    routeParams = { taskId: "st_2" };
+    setTask(task({ id: "st_2" }));
+    setRuns([run({ id: "run_b", status: "succeeded", conversationId: "c_b" })], { cached: true });
+    rerender(pageTree());
+    setRuns([run({ id: "run_b", status: "succeeded", conversationId: "c_b" })]);
+    rerender(pageTree());
+
+    expect(seedRunUnreadBaseline).not.toHaveBeenCalled();
   });
 });

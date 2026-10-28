@@ -59,6 +59,13 @@ import { cn } from "@/lib/utils";
 
 export function TaskDetailPage() {
   const { taskId = "" } = useParams<{ taskId: string }>();
+  // Remount per task: the run-tracking state below belongs to one task's
+  // history, and moving between tasks in browser history can keep this route
+  // mounted.
+  return <TaskDetail key={taskId} taskId={taskId} />;
+}
+
+function TaskDetail({ taskId }: { taskId: string }) {
   const navigate = useNavigate();
   const now = useNow();
 
