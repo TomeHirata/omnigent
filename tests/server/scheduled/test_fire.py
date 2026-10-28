@@ -35,6 +35,7 @@ from omnigent.server.auth import LEVEL_OWNER, LEVEL_READ, RESERVED_USER_LOCAL, R
 from omnigent.server.bundles import bundle_location
 from omnigent.server.scheduled import fire as fire_mod
 from omnigent.server.scheduled.fire import FireDeps, build_on_fire, build_run_now
+from omnigent.server.scheduled.schedule import continued_sandbox_host_id
 from omnigent.server.schemas import SessionEventInput
 from omnigent.stores.agent_store.sqlalchemy_store import SqlAlchemyAgentStore
 from omnigent.stores.artifact_store.local import LocalArtifactStore
@@ -130,6 +131,9 @@ class FakeScheduledTaskStore:
         self.run_workspace_ids: list[int] = []
         self.running_runs: dict[str, ScheduledTaskRun] = {}
         self.run_updates: list[dict[str, Any]] = []
+        self.adopted: list[tuple[str, str]] = []
+        self.adopt_outcome = "adopted"
+        self.released: list[tuple[str, str]] = []
 
     def get(self, scheduled_task_id: str) -> ScheduledTask | None:
         self.get_workspace_ids.append(current_workspace_id())
@@ -149,7 +153,12 @@ class FakeScheduledTaskStore:
         return cleared
 
     def create_run(
-        self, run_id: str, scheduled_task_id: str, status: str, scheduled_at: int, **kwargs: Any
+        self,
+        run_id: str,
+        scheduled_task_id: str,
+        status: str,
+        scheduled_at: int,
+        **kwargs: Any,
     ) -> Any:
         self.run_workspace_ids.append(current_workspace_id())
         self.runs.append(
@@ -162,6 +171,15 @@ class FakeScheduledTaskStore:
             }
         )
         return None
+
+    def adopt_session(
+        self, scheduled_task_id: str, session_id: str, *, snapshot: ScheduledTask
+    ) -> str:
+        self.adopted.append((scheduled_task_id, session_id))
+        return self.adopt_outcome
+
+    def release_session(self, scheduled_task_id: str, session_id: str) -> None:
+        self.released.append((scheduled_task_id, session_id))
 
     def get_running_run_by_conversation(self, conversation_id: str) -> Any:
         if conversation_id in self.running_runs:
@@ -233,6 +251,11 @@ class FakeConversationStore:
         self._seq = 0
         self.fail_create = fail_create
         self.label_writes: dict[str, dict[str, str]] = {}
+        self.deleted: list[str] = []
+
+    async def delete_conversation(self, conversation_id: str) -> bool:
+        self.deleted.append(conversation_id)
+        return True
 
     def create_conversation(self, **kwargs: Any) -> _FakeConversation:
         self.create_workspace_ids.append(current_workspace_id())
@@ -240,7 +263,7 @@ class FakeConversationStore:
             raise RuntimeError("create failed")
         self._seq += 1
         conv = _FakeConversation(
-            id=f"conv_{self._seq}",
+            id=kwargs.get("conversation_id") or f"conv_{self._seq}",
             agent_id=kwargs.get("agent_id", ""),
             workspace=kwargs.get("workspace"),
             host_id=kwargs.get("host_id"),
@@ -277,6 +300,8 @@ class FakePermissionStore:
         self.fail_grant_users = fail_grant_users or set()
         # ``None`` means every owner exists (the default for most tests).
         self.users: set[str] | None = set(users) if users is not None else None
+        # Sessions no user has owner access to; every other session is owned.
+        self.unowned: set[str] = set()
 
     def ensure_user(self, user_id: str, *, is_admin: bool = False) -> None:
         self.ensured.append(user_id)
@@ -290,6 +315,9 @@ class FakePermissionStore:
         from omnigent.entities.account import Account
 
         return Account(user_id, False, None, None, False) if self.user_exists(user_id) else None
+
+    def check_access(self, user_id: str | None, conversation_id: str, required_level: int) -> bool:
+        return conversation_id not in self.unowned
 
     def grant(self, user_id: str, conversation_id: str, level: int) -> Any:
         self.grant_workspace_ids.append(current_workspace_id())
@@ -359,13 +387,18 @@ class FakePolicyStore:
         self.created: list[dict[str, Any]] = []
         self.deleted: list[str] = []
         self.fail_create = fail_create
+        self.session_reads = 0
 
-    def list_for_session(self, session_id: str) -> list[Any]:
+    def _live(self, session_id: str) -> list[Any]:
         return [
             SimpleNamespace(id=p["policy_id"], name=p["name"])
             for p in self.created
             if p["session_id"] == session_id and p["policy_id"] not in self.deleted
         ]
+
+    def list_for_session(self, session_id: str) -> list[Any]:
+        self.session_reads += 1
+        return self._live(session_id)
 
     def delete(self, policy_id: str, session_id: str) -> bool:
         self.deleted.append(policy_id)
@@ -383,6 +416,9 @@ class FakePolicyStore:
     ) -> Any:
         if self.fail_create:
             raise RuntimeError("policy create failed")
+        # Like the real store, a name is unique within a session.
+        if any(p.name == name for p in self._live(session_id)):
+            raise RuntimeError(f"duplicate session policy name {name!r}")
         self.created.append(
             {
                 "policy_id": policy_id,
@@ -2280,7 +2316,7 @@ async def test_public_grant_failure_does_not_cancel_run() -> None:
     assert not any(r.get("error_code") == "owner_grant_failed" for r in store.runs)
 
 
-# ── Conversation reuse ───────────────────────────────────────────────────────
+# ── Continuing one session ───────────────────────────────────────────────────
 
 
 class _ExistingConversationStore(FakeConversationStore):
@@ -2300,12 +2336,12 @@ class _ExistingConversationStore(FakeConversationStore):
         return SimpleNamespace(data=tree, has_more=False, last_id=None)
 
 
-def _reusing_task(**overrides: Any) -> ScheduledTask:
-    return _task(reuse_conversation=True, last_run_conversation_id="conv_prev", **overrides)
+def _continuing_task(**overrides: Any) -> ScheduledTask:
+    return _task(session_mode="continue", session_id="conv_prev", **overrides)
 
 
-def _previous_conversation(**overrides: Any) -> _FakeConversation:
-    """The conversation a reusing ``_task()`` continues: same agent, host and workspace."""
+def _continued_session(**overrides: Any) -> _FakeConversation:
+    """The session a continuing ``_task()`` sends to: same agent, host and workspace."""
     fields: dict[str, Any] = {
         "id": "conv_prev",
         "agent_id": "ag_1",
@@ -2329,55 +2365,267 @@ async def _fire_once(deps: FireDeps) -> list[Any]:
 
 
 @pytest.mark.asyncio
-async def test_reuse_sends_prompt_into_previous_conversation() -> None:
-    conv_store = _ExistingConversationStore(_previous_conversation())
+async def test_continue_sends_the_prompt_into_the_session() -> None:
+    conv_store = _ExistingConversationStore(_continued_session())
     perm = FakePermissionStore()
-    store = FakeScheduledTaskStore(rows={"task_1": _reusing_task()})
+    store = FakeScheduledTaskStore(rows={"task_1": _continuing_task()})
 
     launched = await _fire_once(_deps(store, conversation_store=conv_store, permission_store=perm))
 
     assert [conv.id for conv in launched] == ["conv_prev"]
     assert conv_store.created == []
     assert perm.grants == []
+    assert store.adopted == []
     assert [(run["status"], run["conversation_id"]) for run in store.runs] == [
-        ("running", "conv_prev")
+        ("succeeded", "conv_prev")
     ]
 
 
 @pytest.mark.asyncio
-async def test_reuse_without_previous_conversation_creates_one() -> None:
+async def test_continue_without_a_session_creates_one_and_keeps_it() -> None:
     conv_store = FakeConversationStore()
-    store = FakeScheduledTaskStore(rows={"task_1": _task(reuse_conversation=True)})
+    store = FakeScheduledTaskStore(rows={"task_1": _task(session_mode="continue")})
 
     launched = await _fire_once(_deps(store, conversation_store=conv_store))
 
-    assert [conv.id for conv in launched] == ["conv_1"]
-    assert store.updates[-1]["last_run_conversation_id"] == "conv_1"
+    # The session is recorded on the task before it is created, under that id.
+    [(task_id, session_id)] = store.adopted
+    assert task_id == "task_1"
+    assert [conv.id for conv in launched] == [session_id]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("existing", "error_code"),
-    [
-        (None, "reused_conversation_missing"),
-        (_previous_conversation(archived=True), "reused_conversation_archived"),
-        (_previous_conversation(agent_id="ag_other"), "reused_conversation_incompatible"),
-        (_previous_conversation(host_id="host_2"), "reused_conversation_incompatible"),
-        (_previous_conversation(workspace="/elsewhere"), "reused_conversation_incompatible"),
-    ],
-)
-async def test_reuse_never_replaces_an_unusable_conversation(
-    existing: _FakeConversation | None, error_code: str
-) -> None:
-    conv_store = _ExistingConversationStore(*([existing] if existing else []))
-    store = FakeScheduledTaskStore(rows={"task_1": _reusing_task()})
+async def test_a_first_run_skips_when_another_run_already_started_the_session() -> None:
+    """The run that records its session second deletes it before anything ran in it."""
+    conv_store = FakeConversationStore()
+    store = FakeScheduledTaskStore(rows={"task_1": _task(session_mode="continue")})
+    store.adopt_outcome = "taken"
 
     launched = await _fire_once(_deps(store, conversation_store=conv_store))
 
     assert launched == []
+    assert conv_store.deleted == ["conv_1"]
+    assert [(run["status"], run["error_code"]) for run in store.runs] == [
+        ("skipped", "continued_session_busy")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_first_run_on_an_edited_task_runs_without_keeping_its_session() -> None:
+    conv_store = FakeConversationStore()
+    store = FakeScheduledTaskStore(rows={"task_1": _task(session_mode="continue")})
+    store.adopt_outcome = "stale"
+
+    launched = await _fire_once(_deps(store, conversation_store=conv_store))
+
+    assert store.adopted == [("task_1", "conv_1")]
+    assert [conv.id for conv in launched] == ["conv_1"]
+    assert conv_store.deleted == []
+    assert [run["status"] for run in store.runs] == ["running"]
+
+
+@pytest.mark.asyncio
+async def test_a_first_run_that_cannot_create_its_session_records_none() -> None:
+    """A session is recorded only once it exists, so a failed create leaves nothing to undo."""
+    conv_store = FakeConversationStore(fail_create=True)
+    store = FakeScheduledTaskStore(rows={"task_1": _task(session_mode="continue")})
+
+    await _fire_once(_deps(store, conversation_store=conv_store))
+
+    assert (store.adopted, store.released) == ([], [])
+    assert [(run["status"], run["error_code"]) for run in store.runs] == [
+        ("failed", "session_create_failed")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_first_run_whose_owner_grant_fails_releases_its_session() -> None:
+    """The owner cannot use that session, so the next run starts another."""
+    store = FakeScheduledTaskStore(rows={"task_1": _task(session_mode="continue")})
+
+    await _fire_once(_deps(store, permission_store=FakePermissionStore(fail_grant=True)))
+
+    assert store.adopted and store.released == store.adopted
+    assert [(run["status"], run["error_code"]) for run in store.runs] == [
+        ("failed", "owner_grant_failed")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_new_session_mode_never_keeps_the_session() -> None:
+    store = FakeScheduledTaskStore(rows={"task_1": _task()})
+
+    launched = await _fire_once(_deps(store))
+
+    assert [conv.id for conv in launched] == ["conv_1"]
+    assert store.adopted == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("existing", "task_overrides", "error_code"),
+    [
+        (None, {}, "continued_session_missing"),
+        (_continued_session(archived=True), {}, "continued_session_archived"),
+        (
+            _continued_session(parent_conversation_id="conv_root"),
+            {},
+            "continued_session_incompatible",
+        ),
+        (_continued_session(agent_id="ag_other"), {}, "continued_session_incompatible"),
+        (_continued_session(host_id="host_2"), {}, "continued_session_incompatible"),
+        (_continued_session(workspace="/elsewhere"), {}, "continued_session_incompatible"),
+        (
+            _continued_session(host_id="host_sandbox"),
+            {"host_id": None, "workspace": None},
+            "continued_session_incompatible",
+        ),
+    ],
+)
+async def test_continue_never_replaces_an_unusable_session(
+    existing: _FakeConversation | None, task_overrides: dict[str, Any], error_code: str
+) -> None:
+    conv_store = _ExistingConversationStore(*([existing] if existing else []))
+    host_store = FakeHostStore(
+        {"host_sandbox": _FakeHost("host_sandbox", "local", sandbox_provider="modal")}
+    )
+    store = FakeScheduledTaskStore(rows={"task_1": _continuing_task(**task_overrides)})
+
+    launched = await _fire_once(_deps(store, conversation_store=conv_store, host_store=host_store))
+
+    assert launched == []
     assert conv_store.created == []
     assert [(run["status"], run["error_code"]) for run in store.runs] == [("failed", error_code)]
-    assert "reset" in store.runs[0]["error"]
+    assert "start a new session" in store.runs[0]["error"]
+
+
+_SANDBOX_TASK_ID = "5a1d0c9e8b7f4a3d2c1b0a9f8e7d6c5b"
+
+
+def _sandbox_continue_task(**overrides: Any) -> ScheduledTask:
+    """A continue task that runs in a sandbox, with a real id for its host id."""
+    fields: dict[str, Any] = {
+        "id": _SANDBOX_TASK_ID,
+        "execution_target": "managed_sandbox",
+        "host_id": None,
+        "workspace": None,
+        "session_mode": "continue",
+    }
+    fields.update(overrides)
+    return _task(**fields)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("on_own_host", "error_code"), [(True, None), (False, "continued_session_incompatible")]
+)
+async def test_a_sandbox_task_continues_only_a_session_on_its_own_host(
+    on_own_host: bool, error_code: str | None
+) -> None:
+    """A session on another sandbox is unreachable from the replica that runs the task."""
+    task = _sandbox_continue_task(session_id="conv_prev")
+    host_id = continued_sandbox_host_id(task.id, task.workspace_id) if on_own_host else "host_box"
+    hosts = FakeHostStore({host_id: _FakeHost(host_id, "local", sandbox_provider="agent_sandbox")})
+
+    problem = await fire_mod.continued_session_problem(
+        task,
+        _continued_session(host_id=host_id, workspace="/sandbox/ws"),
+        host_store=hosts,
+        permission_store=None,
+    )
+
+    assert (problem[1] if problem is not None else None) == error_code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host_exists", [False, True])
+async def test_a_sandbox_continue_tasks_first_run_uses_the_tasks_own_host(
+    monkeypatch: pytest.MonkeyPatch, host_exists: bool
+) -> None:
+    """An existing host, left by a reset session, gets a new sandbox, not a second host row."""
+    from omnigent.server.managed_hosts import REQUESTED_HOST_ID_LABEL_KEY, ManagedLaunchTracker
+    from omnigent.server.routes import sessions
+
+    task = _sandbox_continue_task()
+    own = continued_sandbox_host_id(task.id, task.workspace_id)
+    existing = _FakeHost(own, "local", sandbox_provider="agent_sandbox")
+
+    async def launch(**kwargs: Any) -> None:
+        kwargs["tracker"].finish(kwargs["session_id"])
+
+    managed_launch = AsyncMock(side_effect=launch)
+    monkeypatch.setattr(sessions, "_run_managed_launch", managed_launch)
+    conv_store = FakeConversationStore()
+    store = FakeScheduledTaskStore(rows={"task_1": task})
+    on_fire = build_on_fire(
+        _deps(
+            store,
+            conversation_store=conv_store,
+            host_store=FakeHostStore({own: existing} if host_exists else {}),
+            sandbox_config=_managed_sandbox_config(),
+            managed_launches=ManagedLaunchTracker(),
+            startup_inputs=FakeStartupInputs(),
+        )
+    )
+
+    await on_fire(0, "task_1")
+    await _drain()
+    await _drain_managed_launches()
+
+    [call] = managed_launch.await_args_list
+    assert call.kwargs["host_id"] == own
+    assert call.kwargs["relaunch_host"] is (existing if host_exists else None)
+    # A relaunch keeps routing the sandbox by the task's host id.
+    assert conv_store.created[0]["labels"][REQUESTED_HOST_ID_LABEL_KEY] == own
+    assert [run["status"] for run in store.runs] == ["running"]
+
+
+@pytest.mark.asyncio
+async def test_a_new_session_joins_the_tasks_sandbox_in_an_earlier_sessions_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a reset, the next session runs on the same sandbox, woken like a user message."""
+    from omnigent.server.routes import sessions
+
+    task = _sandbox_continue_task(last_run_conversation_id="conv_prev")
+    own = continued_sandbox_host_id(task.id, task.workspace_id)
+    conv_store = _ExistingConversationStore(
+        _continued_session(host_id=own, workspace="/sandbox/ws")
+    )
+    managed_launch = AsyncMock()
+    monkeypatch.setattr(sessions, "_run_managed_launch", managed_launch)
+    store = FakeScheduledTaskStore(rows={"task_1": task})
+    hosts = FakeHostStore({own: _FakeHost(own, "local", sandbox_provider="agent_sandbox")})
+
+    launched = await _fire_once(
+        _deps(
+            store,
+            conversation_store=conv_store,
+            host_store=hosts,
+            sandbox_config=_FakeSandboxConfig(),
+        )
+    )
+
+    [created] = conv_store.created
+    assert (created["host_id"], created["workspace"]) == (own, "/sandbox/ws")
+    assert [conv.host_id for conv in launched] == [own]
+    managed_launch.assert_not_awaited()
+    assert [run["status"] for run in store.runs] == ["running"]
+
+
+@pytest.mark.asyncio
+async def test_continue_fails_when_the_owner_no_longer_owns_the_session() -> None:
+    conv_store = _ExistingConversationStore(_continued_session())
+    perm = FakePermissionStore()
+    perm.unowned.add("conv_prev")
+    store = FakeScheduledTaskStore(rows={"task_1": _continuing_task()})
+
+    launched = await _fire_once(_deps(store, conversation_store=conv_store, permission_store=perm))
+
+    assert launched == []
+    assert [(run["status"], run["error_code"]) for run in store.runs] == [
+        ("failed", "continued_session_forbidden")
+    ]
 
 
 def _running_run(fired_at: int) -> ScheduledTaskRun:
@@ -2392,41 +2640,54 @@ def _running_run(fired_at: int) -> ScheduledTaskRun:
 
 
 @pytest.mark.asyncio
-async def test_reuse_skips_while_previous_run_is_still_running() -> None:
-    conv_store = _ExistingConversationStore(_previous_conversation())
-    store = FakeScheduledTaskStore(rows={"task_1": _reusing_task()})
+async def test_continue_records_the_run_once_the_prompt_is_delivered() -> None:
+    """The run does not wait for the turn, so a failed send leaves no run claiming success."""
+    conv_store = _ExistingConversationStore(_continued_session())
+    store = FakeScheduledTaskStore(rows={"task_1": _continuing_task()})
+    runs_at_dispatch: list[tuple[str, str]] = []
+
+    async def _launch(conv: Any, task: Any) -> None:
+        runs_at_dispatch.extend((run["status"], run["conversation_id"]) for run in store.runs)
+
+    await build_on_fire(_deps(store, conversation_store=conv_store), launch_dispatch=_launch)(
+        0, "task_1"
+    )
+    await _drain()
+
+    assert runs_at_dispatch == []
+    assert [(run["status"], run["conversation_id"]) for run in store.runs] == [
+        ("succeeded", "conv_prev")
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live_status", ["running", "waiting"])
+async def test_continue_sends_while_an_earlier_turn_is_still_going(live_status: str) -> None:
+    """The prompt joins the busy session; the earlier run is left to its own turn end."""
+    conv_store = _ExistingConversationStore(
+        _continued_session(live_status=live_status, runner_last_seen=int(time.time()))
+    )
+    store = FakeScheduledTaskStore(rows={"task_1": _continuing_task()})
     store.running_runs["conv_prev"] = _running_run(fired_at=int(time.time()))
 
     launched = await _fire_once(_deps(store, conversation_store=conv_store))
 
-    assert launched == []
-    assert [(run["status"], run["error_code"]) for run in store.runs] == [
-        ("skipped", "reused_conversation_busy")
-    ]
-
-
-@pytest.mark.asyncio
-async def test_reuse_fails_an_orphaned_previous_run_and_continues() -> None:
-    """A run whose prompt was lost stops blocking once the grace period is over."""
-    conv_store = _ExistingConversationStore(_previous_conversation(live_status="idle"))
-    store = FakeScheduledTaskStore(rows={"task_1": _reusing_task()})
-    orphaned = int(time.time()) - fire_mod._ORPHANED_RUN_GRACE_SECONDS - 1
-    store.running_runs["conv_prev"] = _running_run(fired_at=orphaned)
-
-    launched = await _fire_once(_deps(store, conversation_store=conv_store))
-
     assert [conv.id for conv in launched] == ["conv_prev"]
-    assert [(u["status"], u["error_code"]) for u in store.run_updates] == [
-        ("failed", "incomplete")
+    assert [(run["status"], run["conversation_id"]) for run in store.runs] == [
+        ("succeeded", "conv_prev")
     ]
-    assert [run["status"] for run in store.runs] == ["running"]
+    assert store.run_updates == []
 
 
 @pytest.mark.asyncio
-async def test_reuse_budget_is_per_fire_on_top_of_session_spend() -> None:
-    """The baseline is the spend the budget policy enforces, sub-agents included."""
+async def test_continue_budget_is_per_fire_on_top_of_session_spend() -> None:
+    """The baseline is the spend the budget policy enforces, sub-agents included.
+
+    The first time the task continues a session, a cap stored under an older,
+    random id is dropped too; the new cap gets the session's fixed id.
+    """
     conv_store = _ExistingConversationStore(
-        _previous_conversation(session_usage={"total_cost_usd": 1.0}),
+        _continued_session(session_usage={"total_cost_usd": 1.0}),
         _FakeConversation(
             id="conv_child",
             agent_id="ag_1",
@@ -2437,91 +2698,71 @@ async def test_reuse_budget_is_per_fire_on_top_of_session_spend() -> None:
     )
     policy_store = FakePolicyStore()
     policy_store.create(
-        policy_id="pol_prev",
+        policy_id="pol_earlier",
         session_id="conv_prev",
         name=fire_mod._COST_BUDGET_POLICY_NAME,
         type="python",
         handler=fire_mod._COST_BUDGET_HANDLER,
         factory_params={"max_cost_usd": 2.0},
     )
-    store = FakeScheduledTaskStore(rows={"task_1": _reusing_task(max_cost_usd=2.0)})
+    store = FakeScheduledTaskStore(rows={"task_1": _continuing_task(max_cost_usd=2.0)})
 
     await _fire_once(_deps(store, conversation_store=conv_store, policy_store=policy_store))
 
-    assert policy_store.deleted == ["pol_prev"]
+    assert policy_store.deleted == ["pol_earlier", fire_mod._cost_budget_policy_id("conv_prev")]
+    assert policy_store.created[-1]["policy_id"] == fire_mod._cost_budget_policy_id("conv_prev")
     assert policy_store.created[-1]["factory_params"] == {"max_cost_usd": 5.25}
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("live_status", "heartbeat_age_s", "skipped"),
-    [
-        ("running", 0, True),
-        ("waiting", 0, True),
-        ("running", 3600, False),
-        ("idle", 0, False),
-    ],
-)
-async def test_reuse_skips_while_someone_else_is_mid_turn(
-    live_status: str, heartbeat_age_s: int, skipped: bool
-) -> None:
-    """A turn started by hand blocks the fire; a status left by a dead runner does not."""
-    conv_store = _ExistingConversationStore(
-        _previous_conversation(
-            live_status=live_status, runner_last_seen=int(time.time()) - heartbeat_age_s
-        )
-    )
-    store = FakeScheduledTaskStore(rows={"task_1": _reusing_task()})
-
-    launched = await _fire_once(_deps(store, conversation_store=conv_store))
-
-    assert (launched == []) is skipped
-    assert [run["status"] for run in store.runs] == ["skipped" if skipped else "running"]
-
-
-@pytest.mark.asyncio
-async def test_reuse_with_budget_cleared_drops_the_earlier_cap() -> None:
-    conv_store = _ExistingConversationStore(_previous_conversation())
+async def test_a_later_continue_replaces_the_budget_by_key_without_reading_policies() -> None:
+    """Once the task has run in the session, its cap has the fixed id."""
+    conv_store = _ExistingConversationStore(_continued_session())
     policy_store = FakePolicyStore()
+    keyed = fire_mod._cost_budget_policy_id("conv_prev")
     policy_store.create(
-        policy_id="pol_prev",
+        policy_id=keyed,
         session_id="conv_prev",
         name=fire_mod._COST_BUDGET_POLICY_NAME,
         type="python",
         handler=fire_mod._COST_BUDGET_HANDLER,
         factory_params={"max_cost_usd": 2.0},
     )
-    store = FakeScheduledTaskStore(rows={"task_1": _reusing_task(max_cost_usd=None)})
+    store = FakeScheduledTaskStore(
+        rows={"task_1": _continuing_task(max_cost_usd=2.0, last_run_conversation_id="conv_prev")}
+    )
 
     await _fire_once(_deps(store, conversation_store=conv_store, policy_store=policy_store))
 
-    assert policy_store.deleted == ["pol_prev"]
+    assert policy_store.session_reads == 0
+    assert policy_store.deleted == [keyed]
+    assert policy_store.created[-1]["policy_id"] == keyed
+
+
+@pytest.mark.asyncio
+async def test_continue_with_budget_cleared_drops_the_earlier_cap() -> None:
+    conv_store = _ExistingConversationStore(_continued_session())
+    policy_store = FakePolicyStore()
+    policy_store.create(
+        policy_id="pol_earlier",
+        session_id="conv_prev",
+        name=fire_mod._COST_BUDGET_POLICY_NAME,
+        type="python",
+        handler=fire_mod._COST_BUDGET_HANDLER,
+        factory_params={"max_cost_usd": 2.0},
+    )
+    store = FakeScheduledTaskStore(rows={"task_1": _continuing_task(max_cost_usd=None)})
+
+    await _fire_once(_deps(store, conversation_store=conv_store, policy_store=policy_store))
+
+    assert policy_store.deleted == ["pol_earlier", fire_mod._cost_budget_policy_id("conv_prev")]
     assert len(policy_store.created) == 1
 
 
 @pytest.mark.asyncio
-async def test_reuse_records_the_run_before_dispatch_and_keeps_a_concurrent_reset() -> None:
-    """A turn that ends during dispatch finds its run, and a reset made then is not undone."""
-    conv_store = _ExistingConversationStore(_previous_conversation())
-    store = FakeScheduledTaskStore(rows={"task_1": _reusing_task()})
-    runs_at_dispatch: list[str] = []
-
-    async def _launch(conv: Any, task: Any) -> None:
-        runs_at_dispatch.extend(run["status"] for run in store.runs)
-
-    await build_on_fire(_deps(store, conversation_store=conv_store), launch_dispatch=_launch)(
-        0, "task_1"
-    )
-    await _drain()
-
-    assert runs_at_dispatch == ["running"]
-    assert all("last_run_conversation_id" not in update for update in store.updates)
-
-
-@pytest.mark.asyncio
-async def test_reuse_dispatch_failure_fails_the_recorded_run() -> None:
-    conv_store = _ExistingConversationStore(_previous_conversation())
-    store = FakeScheduledTaskStore(rows={"task_1": _reusing_task()})
+async def test_continue_dispatch_failure_records_a_failed_run() -> None:
+    conv_store = _ExistingConversationStore(_continued_session())
+    store = FakeScheduledTaskStore(rows={"task_1": _continuing_task()})
 
     async def _launch(conv: Any, task: Any) -> None:
         raise RuntimeError("runner never came up")
@@ -2531,26 +2772,6 @@ async def test_reuse_dispatch_failure_fails_the_recorded_run() -> None:
     )
     await _drain()
 
-    assert [run["status"] for run in store.runs] == ["running"]
-    assert [(u["id"], u["status"], u["error_code"]) for u in store.run_updates] == [
-        (store.runs[0]["run_id"], "failed", "launch_failed")
-    ]
-
-
-@pytest.mark.asyncio
-async def test_reuse_skips_when_only_the_live_status_cache_shows_a_turn() -> None:
-    """The persisted status lags the in-memory one, so a just-started turn still blocks."""
-    from omnigent.server.routes._sessions.common import _session_status_cache
-
-    conv_store = _ExistingConversationStore(_previous_conversation(live_status="idle"))
-    store = FakeScheduledTaskStore(rows={"task_1": _reusing_task()})
-    _session_status_cache["conv_prev"] = "running"
-    try:
-        launched = await _fire_once(_deps(store, conversation_store=conv_store))
-    finally:
-        _session_status_cache.pop("conv_prev", None)
-
-    assert launched == []
-    assert [(run["status"], run["error_code"]) for run in store.runs] == [
-        ("skipped", "reused_conversation_busy")
+    assert [(run["status"], run["error_code"], run["conversation_id"]) for run in store.runs] == [
+        ("failed", "launch_failed", "conv_prev")
     ]

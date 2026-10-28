@@ -26,9 +26,11 @@ from omnigent.db.enum_codecs import (
     SCHEDULED_TASK_STATE,
     decode_scheduled_task_execution_target,
     decode_scheduled_task_run_status,
+    decode_scheduled_task_session_mode,
     decode_scheduled_task_state,
     encode_scheduled_task_execution_target,
     encode_scheduled_task_run_status,
+    encode_scheduled_task_session_mode,
     encode_scheduled_task_state,
 )
 from omnigent.db.utils import (
@@ -47,7 +49,7 @@ from omnigent.server.scheduled.schedule import (
     occurrence_host_id,
     scheduled_trigger_key,
 )
-from omnigent.stores.scheduled_task_store import ScheduledTaskStore
+from omnigent.stores.scheduled_task_store import AdoptOutcome, ScheduledTaskStore
 from omnigent.stores.scheduled_task_store.dispatch import (
     DeletedTaskCursor,
     DispatchCursor,
@@ -122,7 +124,8 @@ def _to_entity(row: SqlScheduledTask) -> ScheduledTask:
         reasoning_effort=row.reasoning_effort,
         permission_mode=row.permission_mode,
         max_cost_usd=row.max_cost_usd,
-        reuse_conversation=row.reuse_conversation,
+        session_mode=decode_scheduled_task_session_mode(row.session_mode),
+        session_id=row.session_id,
         workspace=row.workspace,
         base_branch=row.base_branch,
         execution_target=decode_scheduled_task_execution_target(row.execution_target),
@@ -213,7 +216,8 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
         reasoning_effort: str | None = None,
         permission_mode: str | None = None,
         max_cost_usd: float | None = None,
-        reuse_conversation: bool = False,
+        session_mode: str = "new",
+        session_id: str | None = None,
         workspace: str | None = None,
         host_id: str | None = None,
         project_id: str | None = None,
@@ -238,7 +242,8 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
                 reasoning_effort=reasoning_effort,
                 permission_mode=permission_mode,
                 max_cost_usd=max_cost_usd,
-                reuse_conversation=reuse_conversation,
+                session_mode=encode_scheduled_task_session_mode(session_mode),
+                session_id=session_id,
                 workspace=workspace,
                 base_branch=None,
                 execution_target=encode_scheduled_task_execution_target(execution_target),
@@ -350,7 +355,8 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
         reasoning_effort: str | None = _UNSET,
         permission_mode: str | None = _UNSET,
         max_cost_usd: float | None = _UNSET,
-        reuse_conversation: bool | None = None,
+        session_mode: str | None = None,
+        session_id: str | None = _UNSET,
         workspace: str | None = _UNSET,
         host_id: str | None = _UNSET,
         project_id: str | None = _UNSET,
@@ -363,7 +369,7 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
 
         ``None`` leaves most fields unchanged. For the per-task overrides
         (``model_override``, ``reasoning_effort``, ``permission_mode``),
-        ``workspace``, ``host_id``, ``project_id``, ``max_cost_usd``, and
+        ``workspace``, ``host_id``, ``project_id``, ``max_cost_usd``, ``session_id``, and
         ``last_run_conversation_id``, the sentinel default means "not provided /
         leave unchanged"; passing ``None`` explicitly sets the column to NULL —
         so resetting an override to the agent default actually clears it (a set
@@ -413,8 +419,13 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
             if max_cost_usd is not _UNSET and row.max_cost_usd != max_cost_usd:
                 row.max_cost_usd = max_cost_usd
                 changed = True
-            if reuse_conversation is not None and row.reuse_conversation != reuse_conversation:
-                row.reuse_conversation = reuse_conversation
+            if session_mode is not None:
+                encoded_mode = encode_scheduled_task_session_mode(session_mode)
+                if row.session_mode != encoded_mode:
+                    row.session_mode = encoded_mode
+                    changed = True
+            if session_id is not _UNSET and row.session_id != session_id:
+                row.session_id = session_id
                 changed = True
             if workspace is not _UNSET and row.workspace != workspace:
                 row.workspace = workspace
@@ -471,6 +482,50 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
             return result.rowcount > 0
 
         return run_write_transaction(self._session_immediate, "clear_task_project", write)
+
+    def adopt_session(
+        self, scheduled_task_id: str, session_id: str, *, snapshot: ScheduledTask
+    ) -> AdoptOutcome:
+        """Record the first firing's session under the task lock, unless the task changed."""
+
+        def write(session: Session) -> AdoptOutcome:
+            row = session.get(
+                SqlScheduledTask, (current_workspace_id(), scheduled_task_id), with_for_update=True
+            )
+            if (
+                row is None
+                or row.state == encode_scheduled_task_state("deleted")
+                or row.session_mode != encode_scheduled_task_session_mode("continue")
+            ):
+                return "stale"
+            if row.session_id is not None:
+                return "taken"
+            current = _to_entity(row)
+            # updated_at has second resolution, so the fields a session binds to
+            # are compared too.
+            if any(
+                getattr(current, name) != getattr(snapshot, name)
+                for name in ("agent_id", "host_id", "workspace", "execution_target", "updated_at")
+            ):
+                return "stale"
+            row.session_id = session_id
+            row.updated_at = now_epoch()
+            return "adopted"
+
+        return run_write_transaction(self._session_immediate, "adopt_task_session", write)
+
+    def release_session(self, scheduled_task_id: str, session_id: str) -> None:
+        """Clear a session the firing could not use, unless the task moved on."""
+
+        def write(session: Session) -> None:
+            row = session.get(
+                SqlScheduledTask, (current_workspace_id(), scheduled_task_id), with_for_update=True
+            )
+            if row is not None and row.session_id == session_id:
+                row.session_id = None
+                row.updated_at = now_epoch()
+
+        run_write_transaction(self._session_immediate, "release_task_session", write)
 
     def delete(self, scheduled_task_id: str) -> bool:
         """Hide the task, then remove history in bounded transactions, preserving live claims."""
@@ -745,8 +800,9 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
         """Return the ``running`` run for a conversation, or ``None``.
 
         Workspace-scoped reverse lookup for the event-driven completion hook;
-        backed by ``ix_scheduled_task_runs_conversation_id``. A conversation has
-        at most one ``running`` run, so ``.first()`` is exact rather than lossy.
+        backed by ``ix_scheduled_task_runs_conversation_status``, so a continued
+        session's finished runs are not read. A conversation has at most one
+        ``running`` run, so ``LIMIT 1`` is exact rather than lossy.
         """
         running_code = encode_scheduled_task_run_status("running")
         with self._session("select_running_run_by_conversation") as session:
@@ -755,6 +811,7 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
                 .where(SqlScheduledTaskRun.workspace_id == current_workspace_id())
                 .where(SqlScheduledTaskRun.conversation_id == conversation_id)
                 .where(SqlScheduledTaskRun.status == running_code)
+                .limit(1)
             )
             row = session.execute(stmt).scalars().first()
             return _run_to_entity(row) if row is not None else None
@@ -1286,10 +1343,11 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
                 f"Cannot update a starting run to status {status!r}. "
                 "Expected 'starting', 'running', 'succeeded', 'failed', or 'skipped'."
             )
-        if status == "succeeded" and not expired:
+        if status == "succeeded" and not expired and conversation_id is None:
             raise ValueError(
-                "Only recovery records 'succeeded' for a starting run, after finding that "
-                "its session already finished. An executor records 'running' instead."
+                "An executor records 'succeeded' for a starting run only with the "
+                "conversation_id of the continued session it delivered a prompt into. "
+                "Recovery records it after finding that the run's session already finished."
             )
         if status == "starting" and (expired or conversation_id is None):
             raise ValueError(

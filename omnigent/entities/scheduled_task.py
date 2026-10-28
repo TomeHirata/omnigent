@@ -55,9 +55,11 @@ class ScheduledTask:
         blocks all models once cumulative spend reaches this limit. ``None``
         means no per-firing cost cap (the session runs unconstrained unless the
         agent spec or server-wide defaults impose one).
-    :param reuse_conversation: When ``True``, each firing after the first sends
-        its prompt into ``last_run_conversation_id`` instead of creating a new
-        conversation. ``False`` (default) starts a fresh conversation per fire.
+    :param session_mode: ``"new"`` (default) starts a new session per firing;
+        ``"continue"`` sends each firing's prompt into ``session_id``.
+    :param session_id: The session a ``"continue"`` task sends its prompt to.
+        ``None`` until its first firing creates one, unless the owner picked an
+        existing session.
     :param workspace: Absolute existing path where a fired session's connected
         host runner should start. ``None`` only for legacy or invalid rows.
     :param base_branch: Reserved legacy column; scheduled tasks currently do
@@ -72,8 +74,7 @@ class ScheduledTask:
     :param last_run_at: Unix epoch seconds of the most recent firing, or
         ``None`` if it has never fired.
     :param last_run_conversation_id: Conversation used by the most recent
-        firing, or ``None``. With ``reuse_conversation`` it is the conversation
-        the next firing continues.
+        firing, or ``None``.
     :param updated_at: Unix epoch seconds of the last write, or ``None`` if the
         row has never been updated.
     """
@@ -91,7 +92,8 @@ class ScheduledTask:
     reasoning_effort: str | None = None
     permission_mode: str | None = None
     max_cost_usd: float | None = None
-    reuse_conversation: bool = False
+    session_mode: str = "new"
+    session_id: str | None = None
     workspace: str | None = None
     base_branch: str | None = None
     execution_target: str = "connected_host"
@@ -104,6 +106,11 @@ class ScheduledTask:
     next_run_at: int | None = None
     project_id: str | None = None
     delegation_ref: str | None = None
+
+    @property
+    def continues_session(self) -> bool:
+        """Whether the next firing sends its prompt into an existing session."""
+        return self.session_mode == "continue" and self.session_id is not None
 
 
 @dataclass

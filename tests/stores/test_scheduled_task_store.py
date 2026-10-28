@@ -8,6 +8,7 @@ SQLite database.
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import pytest
 
@@ -55,7 +56,8 @@ def test_create_returns_scheduled_task_with_all_fields(
         model_override="claude-opus-4-7",
         reasoning_effort="high",
         permission_mode="acceptEdits",
-        reuse_conversation=True,
+        session_mode="continue",
+        session_id=_uid("conv_abc"),
         workspace="/home/alice/repo",
         host_id=_uid("host_abc123"),
         project_id=_uid("proj_abc"),
@@ -71,7 +73,8 @@ def test_create_returns_scheduled_task_with_all_fields(
     assert task.model_override == "claude-opus-4-7"
     assert task.reasoning_effort == "high"
     assert task.permission_mode == "acceptEdits"
-    assert task.reuse_conversation is True
+    assert task.session_mode == "continue"
+    assert task.session_id == _uid("conv_abc")
     assert task.workspace == "/home/alice/repo"
     assert task.base_branch is None
     assert task.execution_target == "connected_host"
@@ -98,7 +101,8 @@ def test_create_minimal_defaults(store: SqlAlchemyScheduledTaskStore) -> None:
     assert task.model_override is None
     assert task.reasoning_effort is None
     assert task.permission_mode is None
-    assert task.reuse_conversation is False
+    assert task.session_mode == "new"
+    assert task.session_id is None
     assert task.workspace is None
     assert task.base_branch is None
     assert task.execution_target == "connected_host"
@@ -1542,7 +1546,7 @@ def test_recovery_records_a_session_that_already_finished(
         task, now=now, next_run_at=now + 3600, host_id=task.host_id, lease_seconds=120
     )
     # Only recovery can tell that a session finished before startup was recorded.
-    with pytest.raises(ValueError, match="Only recovery records 'succeeded'"):
+    with pytest.raises(ValueError, match="An executor records 'succeeded'"):
         store.transition_starting_run(run, now=lambda: now + 30, status="succeeded")
     succeeded = store.transition_starting_run(
         run, now=lambda: now + 120, status="succeeded", expired=True
@@ -2186,20 +2190,86 @@ def test_schedule_completion_does_not_overwrite_edits_or_other_workspace(store, 
     assert not store.complete_schedule(completed)
 
 
-def test_update_toggles_reuse_conversation(store: SqlAlchemyScheduledTaskStore) -> None:
-    """``reuse_conversation`` flips both ways; omitting it leaves it unchanged."""
-    task = store.create(
-        scheduled_task_id=_uid("st_reuse"),
-        name="reuse",
+def _session_task(store: SqlAlchemyScheduledTaskStore, seed: str, **kwargs: Any):
+    return store.create(
+        scheduled_task_id=_uid(seed),
+        name=seed,
         prompt="continue",
         rrule="FREQ=DAILY",
         user_id="bob@example.com",
-        agent_id=_uid("ag_reuse"),
+        agent_id=_uid(f"ag_{seed}"),
         timezone="UTC",
+        **kwargs,
     )
-    enabled = store.update(task.id, reuse_conversation=True)
-    assert enabled is not None and enabled.reuse_conversation is True
-    renamed = store.update(task.id, name="still reusing")
-    assert renamed is not None and renamed.reuse_conversation is True
-    disabled = store.update(task.id, reuse_conversation=False)
-    assert disabled is not None and disabled.reuse_conversation is False
+
+
+def test_update_sets_and_clears_the_continued_session(
+    store: SqlAlchemyScheduledTaskStore,
+) -> None:
+    """Omitting ``session_id`` leaves it; ``None`` clears it."""
+    task = _session_task(store, "st_continue")
+    picked = store.update(task.id, session_mode="continue", session_id=_uid("conv_picked"))
+    assert picked is not None
+    assert (picked.session_mode, picked.session_id) == ("continue", _uid("conv_picked"))
+    renamed = store.update(task.id, name="still continuing")
+    assert renamed is not None and renamed.session_id == _uid("conv_picked")
+    cleared = store.update(task.id, session_id=None)
+    assert cleared is not None
+    assert (cleared.session_mode, cleared.session_id) == ("continue", None)
+    back_to_new = store.update(task.id, session_mode="new")
+    assert back_to_new is not None and back_to_new.session_mode == "new"
+
+
+def test_adopt_session_records_only_an_unchanged_continue_task_without_one(
+    store: SqlAlchemyScheduledTaskStore,
+) -> None:
+    """A concurrent run, pick or edit wins over the first run's session."""
+    new_mode = _session_task(store, "st_adopt_new")
+    assert store.adopt_session(new_mode.id, _uid("c1"), snapshot=new_mode) == "stale"
+    assert store.get(new_mode.id).session_id is None
+
+    continuing = _session_task(store, "st_adopt", session_mode="continue")
+    snapshot = store.get(continuing.id)
+    assert store.adopt_session(continuing.id, _uid("c1"), snapshot=snapshot) == "adopted"
+    adopted = store.get(continuing.id)
+    assert adopted.session_id == _uid("c1")
+    # A second first run from the same snapshot finds the session already recorded.
+    assert store.adopt_session(continuing.id, _uid("c2"), snapshot=snapshot) == "taken"
+    assert store.get(continuing.id).session_id == _uid("c1")
+
+    # An edit in the same second as the snapshot is still caught.
+    edited = _session_task(store, "st_adopt_edit", session_mode="continue")
+    store.update(edited.id, name="renamed")
+    before_edit = store.get(edited.id)
+    store.update(edited.id, workspace="/elsewhere")
+    assert store.adopt_session(edited.id, _uid("c3"), snapshot=before_edit) == "stale"
+    assert store.get(edited.id).session_id is None
+
+    store.delete(continuing.id)
+    assert store.adopt_session(continuing.id, _uid("c4"), snapshot=adopted) == "stale"
+
+
+def test_release_session_clears_only_the_session_it_names(
+    store: SqlAlchemyScheduledTaskStore,
+) -> None:
+    task = _session_task(store, "st_release", session_mode="continue", session_id=_uid("c1"))
+    store.release_session(task.id, _uid("other"))
+    assert store.get(task.id).session_id == _uid("c1")
+    store.release_session(task.id, _uid("c1"))
+    assert store.get(task.id).session_id is None
+
+
+def test_an_executor_records_succeeded_for_a_prompt_delivered_into_a_session(
+    store: SqlAlchemyScheduledTaskStore,
+) -> None:
+    task = _due_task(store)
+    now = task.next_run_at
+    run = store.claim_scheduled_run(
+        task, now=now, next_run_at=now + 3600, host_id=task.host_id, lease_seconds=120
+    )
+    delivered = store.transition_starting_run(
+        run, now=lambda: now + 30, status="succeeded", conversation_id=_uid("c1")
+    )
+    assert (delivered.status, delivered.conversation_id) == ("succeeded", _uid("c1"))
+    assert delivered.finished_at == now + 30
+    assert delivered.lease_expires_at is None

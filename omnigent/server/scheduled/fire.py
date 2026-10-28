@@ -25,9 +25,10 @@ firing:
 #. **Records the run** — stamps ``last_run_at`` + ``last_run_conversation_id`` on
    the task row and writes a ``scheduled_task_runs`` history row.
 
-A task with ``reuse_conversation`` set skips host resolution and session
-creation once it has a ``last_run_conversation_id``: the prompt goes into that
-conversation instead, waking its runner the way a user message would.
+A task with ``session_mode = "continue"`` skips host resolution and session
+creation once it has a ``session_id``: the prompt goes into that session
+instead, waking its runner the way a user message would. Its first firing
+creates the session as usual and records it as the task's ``session_id``.
 
 **Fire-and-forget.** The re-read + state guard run synchronously so an obviously
 dead fire costs nothing, but the session creation / launch is dispatched onto a
@@ -90,12 +91,9 @@ from omnigent.server.scheduled.dispatch_scheduler import (
     FireIdentityRevoked,
     StartupLease,
 )
-from omnigent.server.scheduled.run_reconciler import STALE_RUN_ERROR_CODE
+from omnigent.server.scheduled.schedule import continued_sandbox_host_id
 from omnigent.server.schemas import SessionEventInput
-from omnigent.stores.conversation_store import (
-    SCHEDULED_TASK_ORIGIN_LABEL_KEY,
-    runner_seen_is_fresh,
-)
+from omnigent.stores.conversation_store import SCHEDULED_TASK_ORIGIN_LABEL_KEY
 
 if TYPE_CHECKING:
     from omnigent.server.managed_hosts import ManagedLaunchTracker
@@ -231,8 +229,9 @@ class _FireDispatch:
     connected: LaunchDispatch
     connected_preflight: ConnectedHostPreflight | None
     managed: LaunchDispatch
-    reuse: LaunchDispatch
     managed_start: ManagedLaunchStart | None = None
+    # ``None`` uses the real seam that wakes the session's runner.
+    reuse: LaunchDispatch | None = None
 
 
 class _FireRecorder(Protocol):
@@ -307,9 +306,14 @@ class _NewRunRecorder:
         if start is None:
             return
         # Started only after the run exists, so a fast launch failure has a
-        # running run to fail.
+        # running run to fail. A continue task keeps one sandbox host.
+        host_id = (
+            continued_sandbox_host_id(task.id, task.workspace_id)
+            if task.session_mode == "continue"
+            else None
+        )
         try:
-            start(conv, task, None, _LEGACY_LAUNCH_ERRORS)
+            start(conv, task, host_id, _LEGACY_LAUNCH_ERRORS)
         except Exception as exc:
             _logger.exception(
                 "scheduled fire: managed launch did not start for task %s (session %s)",
@@ -544,8 +548,10 @@ async def _run_fire_for_task(
         )
         return
 
-    if task.reuse_conversation and task.last_run_conversation_id is not None:
-        await _continue_conversation(deps, task, fire_dispatch.reuse, recorder)
+    if task.continues_session:
+        await _continue_session(
+            deps, task, fire_dispatch.reuse or _make_reuse_dispatch(deps), recorder
+        )
         return
 
     dispatch = fire_dispatch.managed if managed else fire_dispatch.connected
@@ -587,6 +593,17 @@ async def _run_fire_for_task(
         await recorder.finish("failed", error=error, error_code=error_code)
         return
 
+    hand_off = managed
+    if managed and task.session_mode == "continue":
+        joined = await _continued_host_binding(deps, task)
+        if joined is not None:
+            # The task keeps one sandbox host. A new session joins it in an
+            # earlier session's workspace, waking or relaunching it the way a
+            # user message would, instead of provisioning a second sandbox.
+            effective = replace(effective, host_id=joined[0], workspace=joined[1])
+            dispatch = fire_dispatch.reuse or _make_reuse_dispatch(deps)
+            hand_off = False
+
     await recorder.check()
     try:
         effective = await _own_task_agent(deps, effective)
@@ -597,6 +614,19 @@ async def _run_fire_for_task(
             "failed", error="session creation failed", error_code="session_create_failed"
         )
         return
+    # Compared as stored: ``effective`` carries this fire's resolved host.
+    stored = replace(task, agent_id=effective.agent_id, updated_at=effective.updated_at)
+    try:
+        kept = await _keep_first_session(deps, stored, conv.id)
+    except _SessionTaken:
+        await _discard_session(deps, conv.id)
+        await recorder.finish(
+            "skipped",
+            error="another run already started the session this automation continues",
+            error_code="continued_session_busy",
+        )
+        return
+    session_id = conv.id if kept else None
     await recorder.session_created(conv.id)
 
     await _attach_cost_budget(deps, task, conv.id)
@@ -609,6 +639,9 @@ async def _run_fire_for_task(
             task.id,
             conv.id,
         )
+        # The owner cannot use this session, so the next run starts another.
+        if session_id is not None:
+            await _release_session(deps, task, session_id)
         await recorder.finish(
             "failed",
             conversation_id=conv.id,
@@ -652,7 +685,7 @@ async def _run_fire_for_task(
         )
         return
 
-    if managed:
+    if hand_off:
         await recorder.hand_off_managed(conv, effective, fire_dispatch.managed_start)
     else:
         await recorder.finish("running", conversation_id=conv.id)
@@ -675,135 +708,208 @@ async def _disable_for_deleted_owner(
     )
 
 
-async def _continue_conversation(
+async def _continue_session(
     deps: FireDeps,
     task: ScheduledTask,
     dispatch: LaunchDispatch,
     recorder: _FireRecorder,
 ) -> None:
-    """Send the task's prompt into the conversation its previous run used.
+    """Send the task's prompt into the session it continues.
 
-    Never falls back to a new conversation: a missing, archived or re-bound
-    conversation records a failed run telling the owner to reset it, and a
-    previous run still in progress records a skipped one.
+    The prompt goes in the way a user's message would, also while the session is
+    busy with an earlier turn, and the run succeeds once it is delivered. Never
+    falls back to a new session: one that cannot take the prompt records a
+    failed run telling the owner how to start a new one.
     """
-    conversation_id = task.last_run_conversation_id
-    assert conversation_id is not None  # guarded by the caller
-    conv = await asyncio.to_thread(deps.conversation_store.get_conversation, conversation_id)
-    unavailable = _reuse_unavailable_reason(task, conv)
-    if unavailable is not None:
-        error, error_code = unavailable
-        _logger.warning("scheduled fire: task %s cannot reuse its session: %s", task.id, error)
-        await recorder.finish("failed", error=error, error_code=error_code)
+    session_id = task.session_id
+    assert session_id is not None  # guarded by the caller
+    conv = await asyncio.to_thread(deps.conversation_store.get_conversation, session_id)
+    problem = await continued_session_problem(
+        task, conv, host_store=deps.host_store, permission_store=deps.permission_store
+    )
+    if problem is not None:
+        reason, error_code = problem
+        _logger.warning("scheduled fire: task %s cannot continue its session: %s", task.id, reason)
+        await recorder.finish(
+            "failed", error=f"{reason}; {_NEW_SESSION_HINT}", error_code=error_code
+        )
         return
     assert conv is not None
 
-    if await _conversation_busy(deps, conv):
-        _logger.info("scheduled fire: task %s conversation is still busy — skipping", task.id)
-        await recorder.finish(
-            "skipped",
-            error="the conversation is still busy with a previous turn",
-            error_code="reused_conversation_busy",
-        )
-        return
-
-    spent_usd = await asyncio.to_thread(_session_cost_usd, deps, conversation_id)
-    await _attach_cost_budget(deps, task, conversation_id, spent_usd=spent_usd)
-    await recorder.session_created(conversation_id)
     await recorder.check()
+    spent_usd = await asyncio.to_thread(_session_cost_usd, deps, session_id)
+    await _attach_cost_budget(
+        deps,
+        task,
+        session_id,
+        spent_usd=spent_usd,
+        replace=True,
+        # The first time the task continues a session it may be a picked one,
+        # whose cap predates fixed policy ids.
+        unkeyed=task.last_run_conversation_id != session_id,
+    )
     try:
         await dispatch(conv, task)
     except Exception:
         _logger.exception(
-            "scheduled fire: dispatch into reused session %s failed for task %s",
-            conversation_id,
+            "scheduled fire: dispatch into continued session %s failed for task %s",
+            session_id,
             task.id,
         )
         await recorder.finish(
             "failed",
-            conversation_id=conversation_id,
+            conversation_id=session_id,
             error="runner launch/dispatch failed",
             error_code="launch_failed",
         )
         return
-    await recorder.finish("running", conversation_id=conversation_id)
-    _logger.info("scheduled fire: task %s continued session %s", task.id, conversation_id)
+    await recorder.finish("succeeded", conversation_id=session_id)
+    _logger.info("scheduled fire: task %s continued session %s", task.id, session_id)
 
 
-_RESET_HINT = "reset the automation's conversation or turn off conversation reuse"
+_NEW_SESSION_HINT = "edit the automation to start a new session on its next run"
 
 
-def _reuse_unavailable_reason(
-    task: ScheduledTask, conv: Conversation | None
+async def continued_session_problem(
+    task: ScheduledTask,
+    conv: Conversation | None,
+    *,
+    host_store: Any | None,
+    permission_store: Any | None,
 ) -> tuple[str, str] | None:
-    """Why ``conv`` cannot take the task's next prompt, or ``None`` if it can."""
+    """Why ``conv`` cannot take *task*'s prompts, with an error code, or ``None`` if it can.
+
+    Checked when the owner picks a session and again on every firing, since the
+    session and the task can both change in between.
+    """
     if conv is None:
-        return (
-            f"the conversation this automation continues no longer exists; {_RESET_HINT}",
-            "reused_conversation_missing",
-        )
+        return "the session no longer exists", "continued_session_missing"
+    # Ownership first: nothing else about a session the owner cannot see is told.
+    if permission_store is not None and not await asyncio.to_thread(
+        permission_store.check_access, task.user_id or RESERVED_USER_LOCAL, conv.id, LEVEL_OWNER
+    ):
+        return "the automation's owner does not own the session", "continued_session_forbidden"
     if conv.archived:
-        return (
-            f"the conversation this automation continues is archived; unarchive it, or "
-            f"{_RESET_HINT}",
-            "reused_conversation_archived",
-        )
+        return "the session is archived", "continued_session_archived"
+    if conv.parent_conversation_id is not None:
+        return "the session is a sub-agent's session", "continued_session_incompatible"
     if conv.agent_id != task.agent_id:
-        return (
-            f"the conversation this automation continues runs a different agent; {_RESET_HINT}",
-            "reused_conversation_incompatible",
-        )
-    # A pin the task changed since the conversation started would otherwise be
-    # ignored silently: the conversation keeps running where it was created.
+        return "the session runs a different agent", "continued_session_incompatible"
+    # A pin the task changed since would otherwise be ignored silently: the
+    # session keeps running where it was created.
     if (task.host_id is not None and task.host_id != conv.host_id) or (
         task.workspace is not None and task.workspace != conv.workspace
     ):
         return (
-            "the conversation this automation continues runs on a different host or "
-            f"workspace than the automation now pins; {_RESET_HINT}",
-            "reused_conversation_incompatible",
+            "the session runs on a different host or workspace than the automation pins",
+            "continued_session_incompatible",
         )
+    # A continue task routes by its own sandbox host, so a session on another
+    # sandbox would be unreachable from the replica running the task.
+    if (
+        task.execution_target == "managed_sandbox"
+        and conv.host_id is not None
+        and conv.host_id != continued_sandbox_host_id(task.id, task.workspace_id)
+    ):
+        return (
+            "the session runs in a sandbox this automation did not start",
+            "continued_session_incompatible",
+        )
+    host = (
+        await asyncio.to_thread(host_store.get_host, conv.host_id)
+        if host_store is not None and conv.host_id is not None
+        else None
+    )
+    if host is not None:
+        in_sandbox = host.sandbox_provider is not None
+        if in_sandbox != (task.execution_target == "managed_sandbox"):
+            where = "in a sandbox" if in_sandbox else "on a connected host"
+            return (
+                f"the session runs {where}, unlike the automation's execution target",
+                "continued_session_incompatible",
+            )
     return None
 
 
-# A dispatched turn shows up as a running live status within seconds. A run
-# still ``running`` this long after firing, on a conversation that is not
-# mid-turn, lost its prompt or its completion (a server restart, a dead host).
-_ORPHANED_RUN_GRACE_SECONDS = 10 * 60
+class _SessionTaken(Exception):
+    """Another run already recorded the session a continue task's first firing created."""
 
 
-async def _conversation_busy(deps: FireDeps, conv: Conversation) -> bool:
-    """True while an earlier run, or a turn someone started by hand, is in progress.
+async def _keep_first_session(deps: FireDeps, task: ScheduledTask, session_id: str) -> bool:
+    """Record the session a continue task's first firing created as the one it continues.
 
-    The live status comes from this replica's status cache when it holds the
-    session's tunnel; the persisted copy lags it and counts only while the
-    runner heartbeat is fresh. An earlier ``running`` run counts only within the
-    grace period; after it, on a conversation that is not mid-turn, it is failed
-    as orphaned so one lost prompt cannot block every later firing.
+    Recorded only once the session exists, so a run never finds a recorded
+    session that is still being created. ``False`` for a ``"new"`` task, or
+    when the task changed since this firing read it: the run then uses a
+    session the task does not keep, and the next firing starts one for the
+    edited task.
+
+    :raises _SessionTaken: Another first firing recorded its session first.
     """
-    from omnigent.server.routes._sessions.common import _session_status_cache
-
-    live = _session_status_cache.get(conv.id)
-    if live is None and runner_seen_is_fresh(conv.runner_last_seen):
-        live = conv.live_status
-    if live in ("running", "waiting"):
-        return True
-    store = deps.scheduled_task_store
-    previous = await asyncio.to_thread(store.get_running_run_by_conversation, conv.id)
-    if previous is None:
+    if task.session_mode != "continue":
         return False
-    now = int(time.time())
-    if now - (previous.fired_at or previous.scheduled_at) < _ORPHANED_RUN_GRACE_SECONDS:
-        return True
-    await asyncio.to_thread(
-        store.update_run,
-        previous.id,
-        status="failed",
-        finished_at=now,
-        error="the run's turn never started or never reported completion",
-        error_code=STALE_RUN_ERROR_CODE,
+    try:
+        outcome = await asyncio.to_thread(
+            deps.scheduled_task_store.adopt_session,
+            task.id,
+            session_id,
+            snapshot=task,
+        )
+    except Exception:
+        _logger.exception(
+            "scheduled fire: could not record the session task %s continues", task.id
+        )
+        return False
+    if outcome == "taken":
+        raise _SessionTaken
+    if outcome == "stale":
+        _logger.info(
+            "scheduled fire: task %s changed during its first run; not keeping its session",
+            task.id,
+        )
+        return False
+    return True
+
+
+async def _discard_session(deps: FireDeps, conversation_id: str) -> None:
+    """Delete a first firing's session that lost to another run's, before anything ran in it."""
+    try:
+        await deps.conversation_store.delete_conversation(conversation_id)
+    except Exception:
+        _logger.exception(
+            "scheduled fire: could not delete the unused session %s", conversation_id
+        )
+
+
+async def _continued_host_binding(deps: FireDeps, task: ScheduledTask) -> tuple[str, str] | None:
+    """The continue task's sandbox host, with a workspace a new session can use there.
+
+    The workspace is the one the task's last run used on that host. ``None``
+    when the host does not exist yet or no earlier session on it is known; the
+    fire then provisions the sandbox, or replaces it under the same identity.
+    """
+    if deps.host_store is None or task.last_run_conversation_id is None:
+        return None
+    host_id = continued_sandbox_host_id(task.id, task.workspace_id)
+    host = await asyncio.to_thread(deps.host_store.get_host, host_id)
+    if host is None or host.sandbox_provider is None:
+        return None
+    earlier = await asyncio.to_thread(
+        deps.conversation_store.get_conversation, task.last_run_conversation_id
     )
-    return False
+    if earlier is None or earlier.host_id != host_id or earlier.workspace is None:
+        return None
+    return host_id, earlier.workspace
+
+
+async def _release_session(deps: FireDeps, task: ScheduledTask, session_id: str) -> None:
+    """Forget a recorded session the owner cannot use, so the next firing starts one."""
+    try:
+        await asyncio.to_thread(deps.scheduled_task_store.release_session, task.id, session_id)
+    except Exception:
+        _logger.exception(
+            "scheduled fire: could not clear session %s from task %s", session_id, task.id
+        )
 
 
 def _session_cost_usd(deps: FireDeps, conversation_id: str) -> float:
@@ -1097,8 +1203,13 @@ async def _own_task_agent(deps: FireDeps, task: ScheduledTask) -> ScheduledTask:
     )
     if bound.id == agent.id:
         return task
-    await asyncio.to_thread(deps.scheduled_task_store.update, task.id, agent_id=bound.id)
-    return replace(task, agent_id=bound.id)
+    stored = await asyncio.to_thread(deps.scheduled_task_store.update, task.id, agent_id=bound.id)
+    # The write moved updated_at; later checks of the snapshot compare against it.
+    return replace(
+        task,
+        agent_id=bound.id,
+        updated_at=stored.updated_at if stored is not None else task.updated_at,
+    )
 
 
 async def _agent_revision(deps: FireDeps, conv: Conversation) -> str | None:
@@ -1136,6 +1247,20 @@ async def _fire_project_id(deps: FireDeps, task: ScheduledTask) -> str | None:
     return project.id
 
 
+def _session_labels(task: ScheduledTask) -> dict[str, str]:
+    """Labels a fired session starts with.
+
+    A continue task's sandbox session records the host id it routes by, so a
+    relaunched sandbox keeps connecting to the replica that owns that id.
+    """
+    labels = {SCHEDULED_TASK_ORIGIN_LABEL_KEY: task.id}
+    if task.execution_target == "managed_sandbox" and task.session_mode == "continue":
+        from omnigent.server.managed_hosts import REQUESTED_HOST_ID_LABEL_KEY
+
+        labels[REQUESTED_HOST_ID_LABEL_KEY] = continued_sandbox_host_id(task.id, task.workspace_id)
+    return labels
+
+
 async def _create_session(deps: FireDeps, task: ScheduledTask) -> Conversation:
     """Create a conversation bound to the task's agent, carrying the stored spec."""
     conv: Conversation = await asyncio.to_thread(
@@ -1145,7 +1270,7 @@ async def _create_session(deps: FireDeps, task: ScheduledTask) -> Conversation:
         host_id=task.host_id,
         workspace=task.workspace,
         terminal_launch_args=await _permission_mode_launch_args(deps, task),
-        labels={SCHEDULED_TASK_ORIGIN_LABEL_KEY: task.id},
+        labels=_session_labels(task),
         project_id=await _fire_project_id(deps, task),
     )
     reasoning_effort = task.reasoning_effort
@@ -1176,47 +1301,69 @@ _COST_BUDGET_HANDLER = "omnigent.policies.builtins.cost.cost_budget"
 _COST_BUDGET_POLICY_NAME = "__scheduled_task_cost_budget"
 
 
+def _cost_budget_policy_id(conversation_id: str) -> str:
+    """The cost-budget policy's fixed id in a session, so a later fire replaces it by key."""
+    return uuid.uuid5(
+        uuid.NAMESPACE_URL, f"omnigent:{_COST_BUDGET_POLICY_NAME}:{conversation_id}"
+    ).hex
+
+
+def _drop_unkeyed_cost_budget(deps: FireDeps, conversation_id: str) -> None:
+    """Delete a cost-budget cap a session carries under another id than the fixed one.
+
+    A session created before the cap had a fixed id stores it under a random
+    one. Read only the first time a task continues a session.
+    """
+    assert deps.policy_store is not None
+    keyed = _cost_budget_policy_id(conversation_id)
+    for policy in deps.policy_store.list_for_session(conversation_id):
+        if policy.name == _COST_BUDGET_POLICY_NAME and policy.id != keyed:
+            deps.policy_store.delete(policy.id, conversation_id)
+
+
 async def _attach_cost_budget(
     deps: FireDeps,
     task: ScheduledTask,
     conversation_id: str,
     *,
     spent_usd: float = 0.0,
+    replace: bool = False,
+    unkeyed: bool = False,
 ) -> None:
     """Attach a cost_budget policy to a session spawned by a scheduled task.
 
     The budget is per fire, and the policy gates cumulative session spend, so a
-    reused session's cap is set to ``spent_usd`` plus the budget, replacing the
-    cap an earlier fire attached.
+    continued session's cap is set to ``spent_usd`` plus the budget. With
+    ``replace``, the cap an earlier fire attached is dropped first by its fixed
+    id, also when the budget was since cleared; ``unkeyed`` also drops a cap
+    stored under another id.
 
     Non-fatal: a failure logs a warning but does not fail the fire — an
     uncapped session is better than a dead run.
     """
-    if deps.policy_store is None:
+    if deps.policy_store is None or (task.max_cost_usd is None and not replace):
         return
     from omnigent.runtime.policies.builder import invalidate_session_policy_specs_cache
 
+    policy_id = _cost_budget_policy_id(conversation_id)
     try:
-        for existing in await asyncio.to_thread(
-            deps.policy_store.list_for_session, conversation_id
-        ):
-            if existing.name == _COST_BUDGET_POLICY_NAME:
-                await asyncio.to_thread(deps.policy_store.delete, existing.id, conversation_id)
-        if task.max_cost_usd is None:
-            # A cleared budget must not leave an earlier fire's cap on a reused session.
+        if replace:
+            if unkeyed:
+                await asyncio.to_thread(_drop_unkeyed_cost_budget, deps, conversation_id)
+            await asyncio.to_thread(deps.policy_store.delete, policy_id, conversation_id)
+        if task.max_cost_usd is not None:
+            await asyncio.to_thread(
+                deps.policy_store.create,
+                policy_id=policy_id,
+                session_id=conversation_id,
+                name=_COST_BUDGET_POLICY_NAME,
+                type="python",
+                handler=_COST_BUDGET_HANDLER,
+                factory_params={"max_cost_usd": spent_usd + task.max_cost_usd},
+                enabled=True,
+            )
+        if replace:
             invalidate_session_policy_specs_cache(conversation_id)
-            return
-        await asyncio.to_thread(
-            deps.policy_store.create,
-            policy_id=_new_id(),
-            session_id=conversation_id,
-            name=_COST_BUDGET_POLICY_NAME,
-            type="python",
-            handler=_COST_BUDGET_HANDLER,
-            factory_params={"max_cost_usd": spent_usd + task.max_cost_usd},
-            enabled=True,
-        )
-        invalidate_session_policy_specs_cache(conversation_id)
     except Exception:
         _logger.warning(
             "scheduled fire: failed to attach cost budget for task %s (session %s)",
@@ -1619,6 +1766,13 @@ def _make_managed_sandbox_start(deps: FireDeps) -> ManagedLaunchStart:
 
         async def _launch() -> None:
             try:
+                # A continue task's sandbox host outlives a session reset; a new
+                # sandbox generation replaces it rather than a second host row.
+                existing = (
+                    await asyncio.to_thread(deps.host_store.get_host, host_id)
+                    if host_id is not None
+                    else None
+                )
                 await _run_managed_launch(
                     session_id=conv.id,
                     owner=task.user_id or RESERVED_USER_LOCAL,
@@ -1633,6 +1787,9 @@ def _make_managed_sandbox_start(deps: FireDeps) -> ManagedLaunchStart:
                     agent_store=deps.agent_store,
                     agent_id=task.agent_id,
                     host_id=host_id,
+                    relaunch_host=existing
+                    if existing is not None and existing.sandbox_provider is not None
+                    else None,
                 )
             except Exception as exc:
                 await _fail_running_run(
@@ -2012,9 +2169,11 @@ class ClaimedRunExecutor:
             self._deps.conversation_store.get_conversation, run.conversation_id
         )
         # Decided from the run, not the task: its target may have changed since
-        # the claim. Only a sandbox run's host ID is derived from its occurrence.
-        managed = run.trigger_key is not None and run.host_id == sandbox_host_id(
-            run.scheduled_task_id, run.workspace_id, run.trigger_key
+        # the claim. Only a sandbox run's host ID is derived, from its occurrence
+        # or, for a task that continues a session, from the task.
+        managed = run.trigger_key is not None and run.host_id in (
+            sandbox_host_id(run.scheduled_task_id, run.workspace_id, run.trigger_key),
+            continued_sandbox_host_id(run.scheduled_task_id, run.workspace_id),
         )
         if conv is None:
             if managed:
@@ -2055,7 +2214,12 @@ class ClaimedRunExecutor:
             )
             if any(item.status in ("in_progress", "incomplete") for item in pending):
                 return "running"
-            return _delivered_run_outcome(conv, await self._transcript_evidence(conv.id))
+            evidence = await self._transcript_evidence(conv.id)
+            if not evidence.delivered and conv.live_status not in ("running", "waiting"):
+                # Nothing is saved to deliver and nothing reached the agent: a
+                # session that joined the task's sandbox never got its prompt.
+                return "failed"
+            return _delivered_run_outcome(conv, evidence)
         tracker = self._deps.managed_launches
         launch = tracker.get(conv.id) if tracker is not None else None
         if launch is not None and not launch.settled.is_set():

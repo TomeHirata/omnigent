@@ -794,21 +794,24 @@ def test_scheduled_task_edit_prefills_permission_mode(
     expect(page.get_by_test_id("task-permission-trigger")).to_have_text("Bypass permissions")
 
 
-def test_scheduled_task_create_persists_conversation_reuse(
+def test_scheduled_task_create_persists_continuing_one_session(
     page: Page,
     live_server: str,
 ) -> None:
-    """Ticking "Continue the same conversation" on create persists the opt-in."""
+    """Choosing "Continue one session" on create persists the session mode."""
     page.goto(f"{live_server}/tasks")
     _open_create_dialog(page)
 
-    page.get_by_test_id("task-name-input").fill("Reuse create")
+    page.get_by_test_id("task-name-input").fill("Continue create")
     page.get_by_test_id("task-prompt-input").fill("Continue the log.")
-    page.get_by_test_id("task-reuse-conversation").click()
-    expect(page.get_by_test_id("task-reuse-conversation")).to_be_checked()
+    page.get_by_test_id("task-session-mode-trigger").click()
+    page.get_by_test_id("task-session-mode-continue").click()
+    expect(page.get_by_test_id("task-session-mode-trigger")).to_contain_text(
+        "Continue one session"
+    )
     page.get_by_test_id("create-scheduled-task-submit").click()
 
-    expect(_row_by_name(page, "Reuse create")).to_be_visible(timeout=30_000)
+    expect(_row_by_name(page, "Continue create")).to_be_visible(timeout=30_000)
     tasks = httpx.get(f"{live_server}/v1/scheduled-tasks", timeout=10.0).json()["scheduled_tasks"]
-    created = next(t for t in tasks if t["name"] == "Reuse create")
-    assert created["reuse_conversation"] is True, created
+    created = next(t for t in tasks if t["name"] == "Continue create")
+    assert (created["session_mode"], created["session_id"]) == ("continue", None), created

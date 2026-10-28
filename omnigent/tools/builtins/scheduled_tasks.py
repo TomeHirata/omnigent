@@ -112,12 +112,23 @@ class SysScheduledTaskCreateTool(Tool):
                                 "blocked once the limit is reached. Omit for no cap."
                             ),
                         },
-                        "reuse_conversation": {
-                            "type": "boolean",
+                        "session_mode": {
+                            "type": "string",
+                            "enum": ["new", "continue"],
                             "description": (
-                                "Optional. When true, every run after the first sends the "
-                                "prompt into the previous run's conversation, keeping its "
-                                "context, instead of starting a new session. Default false."
+                                "Optional. 'new' (default) starts a new session for every "
+                                "run. 'continue' sends every run's prompt into one session, "
+                                "keeping its context: session_id when given, otherwise the "
+                                "session the first run creates."
+                            ),
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": (
+                                "Optional, with session_mode 'continue'. An existing "
+                                "top-level session the owner owns, e.g. the current session, "
+                                "to send every run's prompt into. agent_id must be that "
+                                "session's agent."
                             ),
                         },
                         "workspace": {
@@ -267,18 +278,20 @@ class SysScheduledTaskUpdateTool(Tool):
                                 "New per-firing cost budget in USD. Null clears the cap."
                             ),
                         },
-                        "reuse_conversation": {
-                            "type": "boolean",
+                        "session_mode": {
+                            "type": "string",
+                            "enum": ["new", "continue"],
                             "description": (
-                                "Continue the previous run's conversation on each run "
-                                "(true) or start a new session per run (false)."
+                                "'new' starts a new session for every run; 'continue' sends "
+                                "every run's prompt into one session."
                             ),
                         },
-                        "reset_conversation": {
-                            "type": "boolean",
+                        "session_id": {
+                            "type": ["string", "null"],
                             "description": (
-                                "True makes the next run of a reusing task start a new "
-                                "conversation, e.g. after the reused one was deleted."
+                                "With session_mode 'continue': the existing session to "
+                                "continue, or null so the next run starts a new session "
+                                "that later runs continue."
                             ),
                         },
                         "workspace": {
