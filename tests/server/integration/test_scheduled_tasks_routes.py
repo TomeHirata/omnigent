@@ -1281,8 +1281,12 @@ async def test_list_runs_includes_conversation_read_state_fields(
     conv = conv_store.create_conversation(conversation_id=uuid.uuid4().hex)
     conv_store.set_session_live_status(conv.id, "idle")
     _set_read_state("alice@example.com", conv.id, conv.updated_at - 1, True)
+    # A known session the viewer never flagged, waiting on its harness.
+    waiting = conv_store.create_conversation(conversation_id=uuid.uuid4().hex)
+    conv_store.set_session_live_status(waiting.id, "waiting")
 
     succeeded_id = uuid.uuid4().hex
+    running_id = uuid.uuid4().hex
     skipped_id = uuid.uuid4().hex
     _seed_run(
         db_uri,
@@ -1291,6 +1295,14 @@ async def test_list_runs_includes_conversation_read_state_fields(
         scheduled_at=1000,
         status="succeeded",
         conversation_id=conv.id,
+    )
+    _seed_run(
+        db_uri,
+        task_id,
+        running_id,
+        scheduled_at=1500,
+        status="running",
+        conversation_id=waiting.id,
     )
     _seed_run(
         db_uri,
@@ -1311,6 +1323,12 @@ async def test_list_runs_includes_conversation_read_state_fields(
     assert succ["conversation_updated_at"] == conv_store.get_conversation(conv.id).updated_at
     assert succ["conversation_status"] == "idle"
     assert succ["viewer_unread"] is True
+
+    # Status reads as the sessions list reports it ("waiting" is "running"), and
+    # an unflagged session is explicitly not unread rather than unknown.
+    running = runs[running_id]
+    assert running["conversation_status"] == "running"
+    assert running["viewer_unread"] is False
 
     # The skipped run (no conversation_id) gets null for all three fields.
     skip = runs[skipped_id]

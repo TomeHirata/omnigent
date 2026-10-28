@@ -91,8 +91,8 @@ export interface ScheduledTaskRun {
   /** Epoch seconds of the conversation's last update; `null` for runs without a conversation. */
   conversationUpdatedAt: number | null;
   /**
-   * The conversation's live status (e.g. `"idle"`, `"running"`); `null` for runs without a
-   * conversation. Same semantics as the `status` field in `GET /v1/sessions` list items.
+   * The session's status as `GET /v1/sessions` reports it (`"idle"`, `"running"` or
+   * `"failed"`), without that list's sub-agent roll-up; `null` for runs without a conversation.
    */
   conversationStatus: string | null;
   /**

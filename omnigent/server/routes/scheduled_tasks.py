@@ -37,7 +37,11 @@ from omnigent.server.routes._session_create_validation import (
     validate_session_model_metadata,
     validate_session_permission_mode,
 )
-from omnigent.server.routes._sessions.helpers import _read_state_entry
+from omnigent.server.routes._sessions.helpers import (
+    _read_state_entry,
+    _session_status_from_cache,
+)
+from omnigent.server.routes._sessions.orchestration import _list_status_with_starting
 from omnigent.server.scheduled.rrule import RRuleSearchError, RRuleValidationError, validate_rrule
 from omnigent.server.scheduled.run_reconciler import force_fail_stale_runs
 from omnigent.stores import AgentStore, ConversationStore, PermissionStore
@@ -210,9 +214,10 @@ def _run_to_response(
     :param conversation_updated_at: The conversation's ``updated_at`` epoch
         seconds, or ``None`` for runs without a conversation. Embedded so the
         frontend can call ``isConversationUnseen`` with no per-row fetch.
-    :param conversation_status: The conversation's ``live_status`` (``"idle"``,
-        ``"running"``, etc.), or ``None`` for runs without a conversation. Same
-        semantics as the ``status`` field in ``GET /v1/sessions``.
+    :param conversation_status: The session's status as ``GET /v1/sessions``
+        reports it (``"idle"``, ``"running"`` or ``"failed"``; waiting and
+        booting read as running), without that list's sub-agent roll-up. ``None``
+        for runs without a conversation.
     :param viewer_unread: The caller's ``viewer_unread`` flag for the
         conversation (in-memory read-state explicit-unread), or ``None`` for
         runs without a conversation. Hydrates ``useUnseenConversations`` on load
@@ -563,7 +568,9 @@ def create_scheduled_tasks_router(
                     _run_to_response(
                         r,
                         conversation_updated_at=conv.updated_at,
-                        conversation_status=conv.live_status,
+                        conversation_status=_list_status_with_starting(
+                            _session_status_from_cache(conv.id, conv.live_status), conv.id
+                        ),
                         viewer_unread=explicit_unread,
                     )
                 )

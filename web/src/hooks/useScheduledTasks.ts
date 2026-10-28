@@ -206,13 +206,7 @@ export function useDeleteScheduledTask() {
  * makes the new "running" row appear promptly and does NOT try to chase the
  * run to completion.
  *
- * Driving the row to its terminal state is `useScheduledTaskRuns`'s
- * status-aware `refetchInterval`, which keeps refreshing for as long as the run
- * is unsettled and stops when it isn't. That replaced an accelerated poll that
- * lived here: a mutation-scoped poll has to guess a time budget up front, and
- * any budget short enough to avoid hammering the server was far too short for a
- * multi-minute run — it gave up mid-run and left the row spinning until a
- * remount refetched it. The query-level interval has no budget to exhaust.
+ * `useScheduledTaskRuns` keeps polling the history until every run settles.
  */
 export function useRunScheduledTaskNow() {
   const queryClient = useQueryClient();

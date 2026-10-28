@@ -116,8 +116,10 @@ export function TaskDetailPage() {
     };
   }, [taskId]);
 
-  // Auto-mark newly-completed (succeeded) runs as unread so the pink dot
-  // appears until the user opens the conversation.
+  // A run that succeeds while this page is open is marked unread until its
+  // session is opened. Runs that had already finished when the page loaded
+  // keep their session's own read state, as in the sidebar, which treats a
+  // session this client has never seen as read on first load.
   //
   // Two guards prevent incorrect behaviour:
   //   1. ONCE-PER-SESSION: `autoMarkedRef` tracks every conversationId this
@@ -339,9 +341,7 @@ export function TaskDetailPage() {
       {/* Status line: active toggle (Switch, ON = active) + state pill +
           schedule + next-run. The Switch sits to the LEFT of the pill. */}
       <div className="mt-3 flex flex-wrap items-center gap-2 text-sm">
-        {/* A scheduled task is ON when active. onCheckedChange passes a boolean,
-            but handlePauseToggle derives the next state from `paused` and
-            ignores its args, so no rewiring is needed. */}
+        {/* ON = active. handlePauseToggle derives the next state from `paused`. */}
         <Switch
           aria-label={paused ? "Resume automation" : "Pause automation"}
           data-testid="task-detail-pause-toggle"
