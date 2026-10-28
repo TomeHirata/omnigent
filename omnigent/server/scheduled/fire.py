@@ -1351,15 +1351,19 @@ _COST_BUDGET_HANDLER = "omnigent.policies.builtins.cost.cost_budget"
 _COST_BUDGET_POLICY_NAME = "__scheduled_task_cost_budget"
 
 
-def _cost_budget_policy_id(conversation_id: str) -> str:
-    """The cost-budget policy's fixed id in a session, so a later fire replaces it by key."""
+def _cost_budget_policy_id(task_id: str, conversation_id: str) -> str:
+    """The id a task's cost cap has in a session, so its later fires find it by key.
+
+    Scoped to the task as well, so an automation only ever changes its own cap,
+    never one another automation continuing the same session set.
+    """
     return uuid.uuid5(
-        uuid.NAMESPACE_URL, f"omnigent:{_COST_BUDGET_POLICY_NAME}:{conversation_id}"
+        uuid.NAMESPACE_URL, f"omnigent:{_COST_BUDGET_POLICY_NAME}:{task_id}:{conversation_id}"
     ).hex
 
 
 class _BudgetConflict(Exception):
-    """The session already has a cost cap under another id than its fixed one."""
+    """The session already has a cost cap that is not this task's."""
 
 
 class _BudgetNotSet(Exception):
@@ -1386,15 +1390,15 @@ async def _attach_cost_budget(
     is better than a dead run.
 
     :raises _BudgetConflict: With ``replace``, when the session already has a
-        cap under another id, such as one set before caps had a fixed id. That
-        cap would keep applying, so the run should not go on.
+        cap under another id: another automation's, or one set before caps had
+        a fixed id. That cap would keep applying, so the run should not go on.
     :raises _BudgetNotSet: With ``replace``, when the cap could not be set.
     """
     if deps.policy_store is None or (task.max_cost_usd is None and not replace):
         return
     from omnigent.runtime.policies.builder import invalidate_session_policy_specs_cache
 
-    policy_id = _cost_budget_policy_id(conversation_id)
+    policy_id = _cost_budget_policy_id(task.id, conversation_id)
     cap = None if task.max_cost_usd is None else {"max_cost_usd": spent_usd + task.max_cost_usd}
     try:
         if cap is None:
