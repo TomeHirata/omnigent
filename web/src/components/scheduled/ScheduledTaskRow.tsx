@@ -23,6 +23,8 @@ import {
   PlayIcon,
   Trash2Icon,
 } from "lucide-react";
+import { useServerInfo } from "@/lib/CapabilitiesContext";
+import { isFeatureEnabled } from "@/lib/capabilities";
 import { useNavigate } from "@/lib/routing";
 import { Button } from "@/components/ui/button";
 import {
@@ -58,6 +60,7 @@ export function ScheduledTaskRow({
   busy: boolean;
 }) {
   const navigate = useNavigate();
+  const detailPageEnabled = isFeatureEnabled(useServerInfo(), "automations_v2");
   const [menuOpen, setMenuOpen] = useState(false);
   const { trackClick } = useOmnigentAnalytics();
   const paused = task.state === "paused";
@@ -76,6 +79,31 @@ export function ScheduledTaskRow({
   function handleNavigate() {
     navigate(`/tasks/${task.id}`);
   }
+
+  const body = (
+    <>
+      <span className="flex min-w-0 items-center gap-2">
+        <span className="truncate text-[15px] font-semibold">{task.name}</span>
+        {paused && (
+          <span
+            data-testid="task-paused-pill"
+            className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+          >
+            Paused
+          </span>
+        )}
+      </span>
+      <span className="truncate text-ui text-muted-foreground/80" data-testid="task-schedule-line">
+        {scheduleSummary}
+        {nextRun && (
+          <>
+            {" · "}
+            <span data-testid="task-next-run">Next run {nextRun}</span>
+          </>
+        )}
+      </span>
+    </>
+  );
 
   return (
     <div
@@ -101,38 +129,20 @@ export function ScheduledTaskRow({
           on the row except the menu opens the detail page — while keeping ONE
           real interactive element for a11y (no wrapping the ⋯ button inside
           it). `text-left` + `min-w-0` keep the truncation behavior identical to
-          the old div. */}
-      <button
-        type="button"
-        data-testid="task-row-open"
-        onClick={handleNavigate}
-        aria-label={`Open ${task.name}`}
-        className="flex min-w-0 flex-1 cursor-pointer flex-col text-left after:absolute after:inset-0 after:content-['']"
-      >
-        <span className="flex min-w-0 items-center gap-2">
-          <span className="truncate text-[15px] font-semibold">{task.name}</span>
-          {paused && (
-            <span
-              data-testid="task-paused-pill"
-              className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
-            >
-              Paused
-            </span>
-          )}
-        </span>
-        <span
-          className="truncate text-ui text-muted-foreground/80"
-          data-testid="task-schedule-line"
+          the plain div. The detail page ships behind automations_v2. */}
+      {detailPageEnabled ? (
+        <button
+          type="button"
+          data-testid="task-row-open"
+          onClick={handleNavigate}
+          aria-label={`Open ${task.name}`}
+          className="flex min-w-0 flex-1 cursor-pointer flex-col text-left after:absolute after:inset-0 after:content-['']"
         >
-          {scheduleSummary}
-          {nextRun && (
-            <>
-              {" · "}
-              <span data-testid="task-next-run">Next run {nextRun}</span>
-            </>
-          )}
-        </span>
-      </button>
+          {body}
+        </button>
+      ) : (
+        <div className="flex min-w-0 flex-1 flex-col">{body}</div>
+      )}
 
       {/* Hover-revealed ellipsis menu, mirroring the sidebar conversation-row
           action button: absolute-positioned on the right, hidden until the row

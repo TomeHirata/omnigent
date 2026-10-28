@@ -199,7 +199,14 @@ function AppRoutes({ basename }: AppProps) {
             }
           />
           <Route path={`${prefix}/tasks`} element={<TasksPage />} />
-          <Route path={`${prefix}/tasks/:taskId`} element={<TaskDetailPage />} />
+          <Route
+            path={`${prefix}/tasks/:taskId`}
+            element={
+              <FeatureGatedPage feature="automations_v2">
+                <TaskDetailPage />
+              </FeatureGatedPage>
+            }
+          />
           <Route
             path={`${prefix}/usage`}
             element={

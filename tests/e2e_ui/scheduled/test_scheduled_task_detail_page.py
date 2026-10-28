@@ -22,7 +22,7 @@ that only the live server path can exercise.
 from __future__ import annotations
 
 import httpx
-from playwright.sync_api import Page, expect
+from playwright.sync_api import Page, Route, expect
 
 from tests.e2e_ui.scheduled.test_scheduled_tasks_page import (
     _builtin_agent_id,
@@ -32,6 +32,18 @@ from tests.e2e_ui.scheduled.test_scheduled_tasks_page import (
     _delete_scheduled_tasks_created_by_test,  # noqa: F401
     _row_by_name,
 )
+
+
+def _enable_detail_page(page: Page) -> None:
+    """Turn on only the automations_v2 web gate, leaving the server's scheduler alone."""
+
+    def handle_info(route: Route) -> None:
+        response = route.fetch()
+        info = response.json()
+        info["features"] = {**(info.get("features") or {}), "automations_v2": True}
+        route.fulfill(response=response, json=info)
+
+    page.route("**/v1/info", handle_info)
 
 
 def test_scheduled_task_detail_page_run_now_records_run_row(
@@ -57,6 +69,7 @@ def test_scheduled_task_detail_page_run_now_records_run_row(
         "FREQ=DAILY;BYHOUR=9;BYMINUTE=0",
     )
 
+    _enable_detail_page(page)
     page.goto(f"{live_server}/tasks")
     row = _row_by_name(page, "Detail run-now test")
     expect(row).to_be_visible(timeout=30_000)

@@ -9,6 +9,8 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ScheduledTaskRow } from "./ScheduledTaskRow";
+import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
+import { FALLBACK_SERVER_INFO } from "@/lib/capabilities";
 import type * as RoutingModule from "@/lib/routing";
 import type { ScheduledTask } from "@/lib/scheduledTasksApi";
 
@@ -55,6 +57,7 @@ const NOW = new Date("2026-03-10T12:00:00Z");
 function renderRow(
   t: ScheduledTask,
   handlers: Partial<Parameters<typeof ScheduledTaskRow>[0]> = {},
+  { detailPage = false }: { detailPage?: boolean } = {},
 ) {
   const props = {
     task: t,
@@ -67,9 +70,13 @@ function renderRow(
     ...handlers,
   };
   render(
-    <MemoryRouter>
-      <ScheduledTaskRow {...props} />
-    </MemoryRouter>,
+    <CapabilitiesProvider
+      info={{ ...FALLBACK_SERVER_INFO, features: { automations_v2: detailPage } }}
+    >
+      <MemoryRouter>
+        <ScheduledTaskRow {...props} />
+      </MemoryRouter>
+    </CapabilitiesProvider>,
   );
   return props;
 }
@@ -126,13 +133,20 @@ describe("⋯ menu actions", () => {
 describe("card-body navigation", () => {
   it("navigates to the task's detail page when the card body is clicked", () => {
     const t = task({ id: "st_42" });
-    renderRow(t);
+    renderRow(t, {}, { detailPage: true });
     fireEvent.click(screen.getByTestId("task-row-open"));
     expect(navigate).toHaveBeenCalledWith("/tasks/st_42");
   });
 
-  it("opening the ⋯ menu does NOT navigate", () => {
+  it("keeps the card body inert while the detail page is behind its release flag", () => {
     renderRow(task({ id: "st_42" }));
+    expect(screen.queryByTestId("task-row-open")).toBeNull();
+    fireEvent.click(screen.getByText("Nightly triage"));
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("opening the ⋯ menu does NOT navigate", () => {
+    renderRow(task({ id: "st_42" }), {}, { detailPage: true });
     // Radix opens on pointerdown; the trigger stops propagation so the
     // card-body navigation never fires.
     fireEvent.pointerDown(screen.getByTestId("task-row-menu"), { button: 0 });
@@ -143,7 +157,7 @@ describe("card-body navigation", () => {
   it("selecting a menu item dispatches its callback without navigating", () => {
     const onRunNow = vi.fn();
     const t = task({ id: "st_42" });
-    renderRow(t, { onRunNow });
+    renderRow(t, { onRunNow }, { detailPage: true });
     fireEvent.pointerDown(screen.getByTestId("task-row-menu"), { button: 0 });
     fireEvent.click(screen.getByTestId("task-run-now"));
     expect(onRunNow).toHaveBeenCalledWith(t);
