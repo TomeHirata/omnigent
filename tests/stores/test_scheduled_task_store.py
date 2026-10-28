@@ -2203,6 +2203,24 @@ def _session_task(store: SqlAlchemyScheduledTaskStore, seed: str, **kwargs: Any)
     )
 
 
+def test_adopting_a_session_pins_its_host_only_on_an_unpinned_task(
+    store: SqlAlchemyScheduledTaskStore,
+) -> None:
+    unpinned = _session_task(store, "st_pin_none", session_mode="continue")
+    assert (
+        store.adopt_session(unpinned.id, _uid("c1"), snapshot=unpinned, host_id=_uid("h1"))
+        == "adopted"
+    )
+    assert store.get(unpinned.id).host_id == _uid("h1")
+
+    pinned = _session_task(store, "st_pin_kept", session_mode="continue", host_id=_uid("h0"))
+    assert (
+        store.adopt_session(pinned.id, _uid("c2"), snapshot=pinned, host_id=_uid("h1"))
+        == "adopted"
+    )
+    assert store.get(pinned.id).host_id == _uid("h0")
+
+
 def test_update_sets_and_clears_the_continued_session(
     store: SqlAlchemyScheduledTaskStore,
 ) -> None:

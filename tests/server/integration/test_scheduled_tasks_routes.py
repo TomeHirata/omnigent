@@ -2449,6 +2449,38 @@ def _owned_session(
     return conv.id
 
 
+async def test_picking_a_session_pins_the_host_it_runs_on(
+    auth_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    """The session cannot move, so an unpinned task routes every run to its host."""
+    session_id = _owned_session(db_uri)
+    created = await auth_client.post(
+        "/v1/scheduled-tasks",
+        json=_create_body(
+            session_mode="continue", session_id=session_id, host_id=None, workspace=None
+        ),
+        headers=_headers(),
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["host_id"] == _HOST_ID
+
+    unpinned = (
+        await auth_client.post(
+            "/v1/scheduled-tasks",
+            json=_create_body(session_mode="continue", host_id=None, workspace=None),
+            headers=_headers(),
+        )
+    ).json()
+    assert unpinned["host_id"] is None
+    picked = await auth_client.patch(
+        f"/v1/scheduled-tasks/{unpinned['id']}",
+        json={"session_id": _owned_session(db_uri)},
+        headers=_headers(),
+    )
+    assert picked.status_code == 200, picked.text
+    assert picked.json()["host_id"] == _HOST_ID
+
+
 async def test_session_mode_round_trips_and_a_null_session_starts_a_new_one(
     auth_client: httpx.AsyncClient, db_uri: str
 ) -> None:

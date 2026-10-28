@@ -634,7 +634,10 @@ async def _run_fire_for_task(
     # Compared as stored: ``effective`` carries this fire's resolved host.
     stored = replace(task, agent_id=effective.agent_id, updated_at=effective.updated_at)
     try:
-        await _keep_first_session(deps, stored, conv.id)
+        # A connected-host session pins its host, so every later run routes there.
+        await _keep_first_session(
+            deps, stored, conv.id, host_id=None if managed else effective.host_id
+        )
     except _SessionTaken:
         await _discard_session(deps, conv.id)
         await recorder.finish(
@@ -840,7 +843,9 @@ class _SessionTaken(Exception):
     """Another run already recorded the session a continue task's first firing created."""
 
 
-async def _keep_first_session(deps: FireDeps, task: ScheduledTask, session_id: str) -> bool:
+async def _keep_first_session(
+    deps: FireDeps, task: ScheduledTask, session_id: str, *, host_id: str | None
+) -> bool:
     """Record the session a continue task's first firing created as the one it continues.
 
     Recorded only once the session exists and its owner can use it, so a run
@@ -859,6 +864,7 @@ async def _keep_first_session(deps: FireDeps, task: ScheduledTask, session_id: s
             task.id,
             session_id,
             snapshot=task,
+            host_id=host_id,
         )
     except Exception:
         _logger.exception(

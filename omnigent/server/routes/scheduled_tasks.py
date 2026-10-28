@@ -25,7 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from omnigent.db.account_authority import account_generation, current_account_user
-from omnigent.entities import Agent, ScheduledTask, ScheduledTaskRun
+from omnigent.entities import Agent, Conversation, ScheduledTask, ScheduledTaskRun
 from omnigent.errors import ErrorCode, OmnigentError
 from omnigent.server.auth import RESERVED_USER_LOCAL, AuthProvider
 from omnigent.server.bundles import agent_for_user
@@ -456,8 +456,9 @@ def create_scheduled_tasks_router(
             raise OmnigentError("Scheduled task not found", code=ErrorCode.NOT_FOUND)
         return task
 
-    async def _require_continuable(request: Request, task: ScheduledTask) -> None:
-        """Reject a picked session *task* could not continue; hide one the owner cannot see."""
+    async def _require_continuable(request: Request, task: ScheduledTask) -> Conversation:
+        """Return a picked session *task* can continue; reject it otherwise, hiding one
+        the owner cannot see."""
         from omnigent.server.scheduled.fire import continued_session_problem
 
         assert task.session_id is not None
@@ -469,7 +470,8 @@ def create_scheduled_tasks_router(
             permission_store=permission_store,
         )
         if problem is None:
-            return
+            assert conv is not None
+            return conv
         reason, error_code = problem
         if error_code in ("continued_session_missing", "continued_session_forbidden"):
             raise OmnigentError("Session not found", code=ErrorCode.NOT_FOUND)
@@ -503,10 +505,11 @@ def create_scheduled_tasks_router(
         # Known before the task exists, since a sandbox session must run on the
         # sandbox host derived from it.
         task_id = uuid.uuid4().hex
+        host_id = body.host_id
         if body.session_id is not None:
             # A picked session keeps the agent it runs, so the task takes no copy.
             bound = agent
-            await _require_continuable(
+            picked = await _require_continuable(
                 request,
                 ScheduledTask(
                     id=task_id,
@@ -524,6 +527,9 @@ def create_scheduled_tasks_router(
                     session_id=body.session_id,
                 ),
             )
+            # The session cannot move, so the task routes every run to its host.
+            if host_id is None and body.execution_target != "managed_sandbox":
+                host_id = picked.host_id
         else:
             bound = await _bind_agent(agent, owner_id)
         project_id: str | None = None
@@ -545,7 +551,7 @@ def create_scheduled_tasks_router(
                 session_mode=body.session_mode,
                 session_id=body.session_id,
                 workspace=workspace,
-                host_id=body.host_id,
+                host_id=host_id,
                 project_id=project_id,
                 execution_target=body.execution_target,
             )
@@ -855,7 +861,7 @@ def create_scheduled_tasks_router(
         ):
             fields["session_id"] = None
         if fields.get("session_id") is not None:
-            await _require_continuable(
+            picked = await _require_continuable(
                 request,
                 replace(
                     existing,
@@ -873,6 +879,12 @@ def create_scheduled_tasks_router(
                     },
                 ),
             )
+            # The session cannot move, so the task routes every run to its host.
+            if (
+                fields.get("host_id", existing.host_id) is None
+                and fields.get("execution_target", existing.execution_target) != "managed_sandbox"
+            ):
+                fields["host_id"] = picked.host_id
         project_owner = _project_owner(owner)
         try:
             if fields.get("project_id") is not None:

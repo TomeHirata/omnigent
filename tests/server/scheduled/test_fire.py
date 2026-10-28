@@ -134,6 +134,7 @@ class FakeScheduledTaskStore:
         self.run_updates: list[dict[str, Any]] = []
         self.adopted: list[tuple[str, str]] = []
         self.adopt_outcome = "adopted"
+        self.adopted_hosts: list[str | None] = []
 
     def get(self, scheduled_task_id: str) -> ScheduledTask | None:
         self.get_workspace_ids.append(current_workspace_id())
@@ -173,9 +174,15 @@ class FakeScheduledTaskStore:
         return None
 
     def adopt_session(
-        self, scheduled_task_id: str, session_id: str, *, snapshot: ScheduledTask
+        self,
+        scheduled_task_id: str,
+        session_id: str,
+        *,
+        snapshot: ScheduledTask,
+        host_id: str | None = None,
     ) -> str:
         self.adopted.append((scheduled_task_id, session_id))
+        self.adopted_hosts.append(host_id)
         return self.adopt_outcome
 
     def get_running_run_by_conversation(self, conversation_id: str) -> Any:
@@ -2392,6 +2399,34 @@ async def test_continue_without_a_session_creates_one_and_keeps_it() -> None:
     [(task_id, session_id)] = store.adopted
     assert task_id == "task_1"
     assert [conv.id for conv in launched] == [session_id]
+
+
+@pytest.mark.asyncio
+async def test_an_unpinned_first_run_pins_the_host_its_session_runs_on() -> None:
+    """The session cannot move, so later runs must route to the host it was created on."""
+    conv_store = FakeConversationStore()
+    store = FakeScheduledTaskStore(
+        rows={
+            "task_1": _task(
+                session_mode="continue",
+                user_id="alice@example.com",
+                host_id=None,
+                workspace="/repo",
+            )
+        }
+    )
+
+    await _fire_once(
+        _deps(
+            store,
+            conversation_store=conv_store,
+            host_store=FakeHostStore({"host_9": _FakeHost("host_9", "alice@example.com")}),
+            host_registry=FakeHostRegistry(online={"host_9"}),
+        )
+    )
+
+    assert conv_store.created[0]["host_id"] == "host_9"
+    assert store.adopted_hosts == ["host_9"]
 
 
 @pytest.mark.asyncio

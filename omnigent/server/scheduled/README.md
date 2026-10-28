@@ -425,9 +425,10 @@ same mode.
   string a host or sandbox sends as its routing key.
 - A task that continues a session keys every run, its first included, by one
   host: its pinned connected host, or for a sandbox task a host ID derived from
-  the task alone, so the replica holding that sandbox's connection runs it. An
-  unpinned connected-host task keys by the workspace ID, so a deployment that
-  routes host tunnels by host ID must pin those tasks to a host.
+  the task alone, so the replica holding that sandbox's connection runs it. A
+  connected-host task without a pin is pinned to its session's host when the
+  session is recorded or picked, so only its first run, before any session
+  exists, keys by the workspace ID.
 - The scheduler calls `owned_hosts` once per page of due tasks, of Run now
   requests, and of expired startups, listing each key once.
 - If the call raises, or takes longer than `recovery_seconds` during recovery,

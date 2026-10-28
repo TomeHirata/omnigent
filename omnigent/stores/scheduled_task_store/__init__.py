@@ -195,7 +195,12 @@ class ScheduledTaskStore(ABC):
 
     @abstractmethod
     def adopt_session(
-        self, scheduled_task_id: str, session_id: str, *, snapshot: ScheduledTask
+        self,
+        scheduled_task_id: str,
+        session_id: str,
+        *,
+        snapshot: ScheduledTask,
+        host_id: str | None = None,
     ) -> AdoptOutcome:
         """
         Record the session a ``"continue"`` task's first firing created.
@@ -208,6 +213,9 @@ class ScheduledTaskStore(ABC):
         :param scheduled_task_id: Opaque task identifier.
         :param session_id: The session the firing created.
         :param snapshot: The stored task as the firing read it.
+        :param host_id: The connected host the session runs on, pinned on a task
+            that has none: the session cannot move, so every later run routes
+            to that host.
         :returns: How the adoption resolved.
         """
         ...

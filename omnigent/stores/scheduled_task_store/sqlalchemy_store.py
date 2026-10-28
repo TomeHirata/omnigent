@@ -484,7 +484,12 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
         return run_write_transaction(self._session_immediate, "clear_task_project", write)
 
     def adopt_session(
-        self, scheduled_task_id: str, session_id: str, *, snapshot: ScheduledTask
+        self,
+        scheduled_task_id: str,
+        session_id: str,
+        *,
+        snapshot: ScheduledTask,
+        host_id: str | None = None,
     ) -> AdoptOutcome:
         """Record the first firing's session under the task lock, unless the task changed."""
 
@@ -509,6 +514,8 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
             ):
                 return "stale"
             row.session_id = session_id
+            if host_id is not None and row.host_id is None:
+                row.host_id = host_id
             row.updated_at = now_epoch()
             return "adopted"
 
