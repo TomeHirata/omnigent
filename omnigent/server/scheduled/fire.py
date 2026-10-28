@@ -69,6 +69,7 @@ from dataclasses import dataclass, replace
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+from sqlalchemy.exc import IntegrityError
 from starlette.datastructures import Headers
 
 from omnigent.db.account_authority import account_authority_scope
@@ -734,16 +735,22 @@ async def _continue_session(
 
     await recorder.check()
     spent_usd = await asyncio.to_thread(_session_cost_usd, deps, session_id)
-    await _attach_cost_budget(
-        deps,
-        task,
-        session_id,
-        spent_usd=spent_usd,
-        replace=True,
-        # The first time the task continues a session it may be a picked one,
-        # whose cap predates fixed policy ids.
-        unkeyed=task.last_run_conversation_id != session_id,
-    )
+    try:
+        await _attach_cost_budget(deps, task, session_id, spent_usd=spent_usd, replace=True)
+    except _BudgetConflict:
+        _logger.warning(
+            "scheduled fire: task %s session %s already has a cost cap it did not set",
+            task.id,
+            session_id,
+        )
+        await recorder.finish(
+            "failed",
+            conversation_id=session_id,
+            error="the session already has a cost cap this automation did not set; remove it "
+            f"from the session's policies, or {_NEW_SESSION_HINT}",
+            error_code="continued_session_budget_conflict",
+        )
+        return
     try:
         await dispatch(conv, task)
     except Exception:
@@ -1297,17 +1304,8 @@ def _cost_budget_policy_id(conversation_id: str) -> str:
     ).hex
 
 
-def _drop_unkeyed_cost_budget(deps: FireDeps, conversation_id: str) -> None:
-    """Delete a cost-budget cap a session carries under another id than the fixed one.
-
-    A session created before the cap had a fixed id stores it under a random
-    one. Read only the first time a task continues a session.
-    """
-    assert deps.policy_store is not None
-    keyed = _cost_budget_policy_id(conversation_id)
-    for policy in deps.policy_store.list_for_session(conversation_id):
-        if policy.name == _COST_BUDGET_POLICY_NAME and policy.id != keyed:
-            deps.policy_store.delete(policy.id, conversation_id)
+class _BudgetConflict(Exception):
+    """The session already has a cost cap under another id than its fixed one."""
 
 
 async def _attach_cost_budget(
@@ -1317,18 +1315,20 @@ async def _attach_cost_budget(
     *,
     spent_usd: float = 0.0,
     replace: bool = False,
-    unkeyed: bool = False,
 ) -> None:
     """Attach a cost_budget policy to a session spawned by a scheduled task.
 
     The budget is per fire, and the policy gates cumulative session spend, so a
     continued session's cap is set to ``spent_usd`` plus the budget. With
     ``replace``, the cap an earlier fire attached is dropped first by its fixed
-    id, also when the budget was since cleared; ``unkeyed`` also drops a cap
-    stored under another id.
+    id, also when the budget was since cleared.
 
     Non-fatal: a failure logs a warning but does not fail the fire — an
     uncapped session is better than a dead run.
+
+    :raises _BudgetConflict: With ``replace``, when the session already has a
+        cap under another id, such as one set before caps had a fixed id. That
+        cap would keep applying, so the run should not go on.
     """
     if deps.policy_store is None or (task.max_cost_usd is None and not replace):
         return
@@ -1337,22 +1337,33 @@ async def _attach_cost_budget(
     policy_id = _cost_budget_policy_id(conversation_id)
     try:
         if replace:
-            if unkeyed:
-                await asyncio.to_thread(_drop_unkeyed_cost_budget, deps, conversation_id)
             await asyncio.to_thread(deps.policy_store.delete, policy_id, conversation_id)
         if task.max_cost_usd is not None:
-            await asyncio.to_thread(
-                deps.policy_store.create,
-                policy_id=policy_id,
-                session_id=conversation_id,
-                name=_COST_BUDGET_POLICY_NAME,
-                type="python",
-                handler=_COST_BUDGET_HANDLER,
-                factory_params={"max_cost_usd": spent_usd + task.max_cost_usd},
-                enabled=True,
-            )
+            try:
+                await asyncio.to_thread(
+                    deps.policy_store.create,
+                    policy_id=policy_id,
+                    session_id=conversation_id,
+                    name=_COST_BUDGET_POLICY_NAME,
+                    type="python",
+                    handler=_COST_BUDGET_HANDLER,
+                    factory_params={"max_cost_usd": spent_usd + task.max_cost_usd},
+                    enabled=True,
+                )
+            except IntegrityError:
+                # The name is taken. Under the fixed id it is another run's cap
+                # from moments ago; under any other id it is not this task's.
+                if not replace:
+                    raise
+                if (
+                    await asyncio.to_thread(deps.policy_store.get, policy_id, conversation_id)
+                    is None
+                ):
+                    raise _BudgetConflict from None
         if replace:
             invalidate_session_policy_specs_cache(conversation_id)
+    except _BudgetConflict:
+        raise
     except Exception:
         _logger.warning(
             "scheduled fire: failed to attach cost budget for task %s (session %s)",

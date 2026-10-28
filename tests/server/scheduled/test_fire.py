@@ -26,6 +26,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy.exc import IntegrityError
 from starlette.datastructures import Headers
 
 from omnigent.db.db_models import current_workspace_id
@@ -396,6 +397,9 @@ class FakePolicyStore:
         self.session_reads += 1
         return self._live(session_id)
 
+    def get(self, policy_id: str, session_id: str) -> Any:
+        return next((p for p in self._live(session_id) if p.id == policy_id), None)
+
     def delete(self, policy_id: str, session_id: str) -> bool:
         self.deleted.append(policy_id)
         return True
@@ -414,7 +418,7 @@ class FakePolicyStore:
             raise RuntimeError("policy create failed")
         # Like the real store, a name is unique within a session.
         if any(p.name == name for p in self._live(session_id)):
-            raise RuntimeError(f"duplicate session policy name {name!r}")
+            raise IntegrityError("Duplicate session policy name", params={}, orig=Exception(name))
         self.created.append(
             {
                 "policy_id": policy_id,
@@ -2679,8 +2683,8 @@ async def test_continue_sends_while_an_earlier_turn_is_still_going(live_status: 
 async def test_continue_budget_is_per_fire_on_top_of_session_spend() -> None:
     """The baseline is the spend the budget policy enforces, sub-agents included.
 
-    The first time the task continues a session, a cap stored under an older,
-    random id is dropped too; the new cap gets the session's fixed id.
+    The earlier run's cap is replaced by the session's fixed id, without reading
+    the session's policies.
     """
     conv_store = _ExistingConversationStore(
         _continued_session(session_usage={"total_cost_usd": 1.0}),
@@ -2694,7 +2698,7 @@ async def test_continue_budget_is_per_fire_on_top_of_session_spend() -> None:
     )
     policy_store = FakePolicyStore()
     policy_store.create(
-        policy_id="pol_earlier",
+        policy_id=fire_mod._cost_budget_policy_id("conv_prev"),
         session_id="conv_prev",
         name=fire_mod._COST_BUDGET_POLICY_NAME,
         type="python",
@@ -2705,34 +2709,65 @@ async def test_continue_budget_is_per_fire_on_top_of_session_spend() -> None:
 
     await _fire_once(_deps(store, conversation_store=conv_store, policy_store=policy_store))
 
-    assert policy_store.deleted == ["pol_earlier", fire_mod._cost_budget_policy_id("conv_prev")]
+    assert policy_store.session_reads == 0
+    assert policy_store.deleted == [fire_mod._cost_budget_policy_id("conv_prev")]
     assert policy_store.created[-1]["policy_id"] == fire_mod._cost_budget_policy_id("conv_prev")
     assert policy_store.created[-1]["factory_params"] == {"max_cost_usd": 5.25}
 
 
-@pytest.mark.asyncio
-async def test_a_later_continue_replaces_the_budget_by_key_without_reading_policies() -> None:
-    """Once the task has run in the session, its cap has the fixed id."""
-    conv_store = _ExistingConversationStore(_continued_session())
-    policy_store = FakePolicyStore()
-    keyed = fire_mod._cost_budget_policy_id("conv_prev")
+def _seeded_budget(policy_store: Any, policy_id: str) -> None:
     policy_store.create(
-        policy_id=keyed,
+        policy_id=policy_id,
         session_id="conv_prev",
         name=fire_mod._COST_BUDGET_POLICY_NAME,
         type="python",
         handler=fire_mod._COST_BUDGET_HANDLER,
         factory_params={"max_cost_usd": 2.0},
     )
-    store = FakeScheduledTaskStore(
-        rows={"task_1": _continuing_task(max_cost_usd=2.0, last_run_conversation_id="conv_prev")}
+
+
+@pytest.mark.asyncio
+async def test_continue_fails_on_a_cost_cap_it_did_not_set() -> None:
+    """A cap under another id, such as one from before caps had a fixed id, would keep
+    applying; the run fails before the prompt is sent, and the cap is left alone."""
+    conv_store = _ExistingConversationStore(_continued_session())
+    policy_store = FakePolicyStore()
+    _seeded_budget(policy_store, "pol_earlier")
+    store = FakeScheduledTaskStore(rows={"task_1": _continuing_task(max_cost_usd=2.0)})
+
+    launched = await _fire_once(
+        _deps(store, conversation_store=conv_store, policy_store=policy_store)
     )
 
-    await _fire_once(_deps(store, conversation_store=conv_store, policy_store=policy_store))
-
+    assert launched == []
+    assert [(run["status"], run["error_code"]) for run in store.runs] == [
+        ("failed", "continued_session_budget_conflict")
+    ]
+    assert "pol_earlier" not in policy_store.deleted
     assert policy_store.session_reads == 0
-    assert policy_store.deleted == [keyed]
-    assert policy_store.created[-1]["policy_id"] == keyed
+
+
+class _RacingPolicyStore(FakePolicyStore):
+    """Another run re-creates the fixed-id cap right after this run deletes it."""
+
+    def delete(self, policy_id: str, session_id: str) -> bool:
+        self.deleted.append(policy_id)
+        return True
+
+
+@pytest.mark.asyncio
+async def test_continue_runs_when_another_run_just_set_the_cap() -> None:
+    conv_store = _ExistingConversationStore(_continued_session())
+    policy_store = _RacingPolicyStore()
+    _seeded_budget(policy_store, fire_mod._cost_budget_policy_id("conv_prev"))
+    store = FakeScheduledTaskStore(rows={"task_1": _continuing_task(max_cost_usd=2.0)})
+
+    launched = await _fire_once(
+        _deps(store, conversation_store=conv_store, policy_store=policy_store)
+    )
+
+    assert [conv.id for conv in launched] == ["conv_prev"]
+    assert [run["status"] for run in store.runs] == ["succeeded"]
 
 
 @pytest.mark.asyncio
@@ -2740,7 +2775,7 @@ async def test_continue_with_budget_cleared_drops_the_earlier_cap() -> None:
     conv_store = _ExistingConversationStore(_continued_session())
     policy_store = FakePolicyStore()
     policy_store.create(
-        policy_id="pol_earlier",
+        policy_id=fire_mod._cost_budget_policy_id("conv_prev"),
         session_id="conv_prev",
         name=fire_mod._COST_BUDGET_POLICY_NAME,
         type="python",
@@ -2751,7 +2786,7 @@ async def test_continue_with_budget_cleared_drops_the_earlier_cap() -> None:
 
     await _fire_once(_deps(store, conversation_store=conv_store, policy_store=policy_store))
 
-    assert policy_store.deleted == ["pol_earlier", fire_mod._cost_budget_policy_id("conv_prev")]
+    assert policy_store.deleted == [fire_mod._cost_budget_policy_id("conv_prev")]
     assert len(policy_store.created) == 1
 
 
