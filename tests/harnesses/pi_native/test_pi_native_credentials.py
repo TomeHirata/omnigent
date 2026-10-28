@@ -386,6 +386,80 @@ def test_inline_databricks_gateway_keeps_gemini_off_the_anthropic_wire(
     assert staged == ["omnigent-mlflow"]
 
 
+@pytest.mark.parametrize(
+    ("model_id", "provider_id", "api", "path"),
+    [
+        ("system.ai.gpt-5-5", "omnigent-openai", "openai-responses", "/ai-gateway/codex/v1"),
+        (
+            "databricks-meta-llama-3-3-70b-instruct",
+            "omnigent-completions",
+            "openai-completions",
+            "/serving-endpoints",
+        ),
+    ],
+)
+def test_inline_databricks_gateway_moves_anthropic_tiers_to_their_own_surface(
+    monkeypatch: pytest.MonkeyPatch, model_id: str, provider_id: str, api: str, path: str
+) -> None:
+    """Non-Claude tiers on an Anthropic-only gateway family leave the Anthropic wire."""
+
+    def _unexpected(host: str, token: str):
+        raise AssertionError("a curated tier map must not trigger enumeration")
+
+    monkeypatch.setattr(creds, "_fetch_pi_model_lists", _unexpected)
+
+    provider = creds.resolve_pi_native_provider(
+        model=model_id,
+        config_loader=lambda: _databricks_anthropic_gateway_config(other=model_id),
+    )
+
+    assert provider is not None
+    assert provider.credential_warning is None
+    rendered = provider.to_models_config()["providers"]
+    assert {pid: [m["id"] for m in payload["models"]] for pid, payload in rendered.items()} == {
+        "omnigent": ["system.ai.claude-opus-5"],
+        provider_id: [model_id],
+    }
+    assert rendered[provider_id]["api"] == api
+    assert rendered[provider_id]["baseUrl"] == f"https://wkspc.cloud.databricks.com{path}"
+
+
+def test_inline_databricks_gateway_moves_a_tier_with_its_own_family_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Gemini tier on the Anthropic family keeps that family's workspace and key.
+
+    Selecting Gemini explicitly still resolves through the OpenAI family, which
+    serves it on the wire that family declares.
+    """
+
+    def _boom(host: str, token: str):
+        raise RuntimeError("403 from unity-catalog/model-services")
+
+    monkeypatch.setattr(creds, "_fetch_pi_model_lists", _boom)
+    config = _databricks_anthropic_gateway_config(fast="system.ai.gemini-3-5-flash")
+    config["providers"]["unity"]["openai"] = {
+        "base_url": "https://other.cloud.databricks.com/ai-gateway/codex/v1",
+        "api_key": "openai-token",
+        "wire_api": "responses",
+        "models": {"default": "system.ai.gpt-5-5"},
+    }
+
+    provider = creds.resolve_pi_native_provider(config_loader=lambda: config)
+    gemini = creds.resolve_pi_native_provider(
+        model="system.ai.gemini-3-5-flash", config_loader=lambda: config
+    )
+
+    assert provider is not None and gemini is not None
+    mlflow = provider.to_models_config()["providers"]["omnigent-mlflow"]
+    assert mlflow["baseUrl"] == "https://wkspc.cloud.databricks.com/ai-gateway/mlflow/v1"
+    assert mlflow["apiKey"] == "gw-token"
+    assert [m["id"] for m in mlflow["models"]] == ["system.ai.gemini-3-5-flash"]
+    assert gemini.api == "openai-responses"
+    assert gemini.base_url == "https://other.cloud.databricks.com/ai-gateway/codex/v1"
+    assert gemini.api_key == "openai-token"
+
+
 def test_inline_databricks_gateway_sends_claude_to_the_anthropic_passthrough(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

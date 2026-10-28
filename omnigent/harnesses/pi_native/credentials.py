@@ -1242,30 +1242,34 @@ def _databricks_gateway_pi_provider(
                 gateway_origin = gateway_origin[: -len(suffix)]
     else:
         gateway_origin = f"https://{parsed_gateway.hostname}/ai-gateway"
-    codex_gateway_url = f"{gateway_origin}{_DATABRICKS_GATEWAY_CODEX_SUFFIX}"
-    workspace_completions_url = workspace_url + "/serving-endpoints" if workspace_url else None
-    workspace_mlflow_url = workspace_url + "/ai-gateway/mlflow/v1" if workspace_url else None
+    surface_urls = _databricks_surface_urls(gateway_origin, workspace_url)
     additional: dict[str, _PiProviderPayload] = {}
     if gpt_models:
         additional[_PI_OPENAI_PROVIDER_ID] = _databricks_openai_provider(
-            api_key, codex_gateway_url, gpt_models
+            api_key, surface_urls[DatabricksPiSurface.RESPONSES], gpt_models
         )
-    if completions_models and workspace_completions_url:
+    if completions_models and DatabricksPiSurface.COMPLETIONS in surface_urls:
         additional[_PI_COMPLETIONS_PROVIDER_ID] = _databricks_openai_provider(
-            api_key, workspace_completions_url, completions_models, api_type="openai-completions"
+            api_key,
+            surface_urls[DatabricksPiSurface.COMPLETIONS],
+            completions_models,
+            api_type="openai-completions",
         )
-    if gemini_models and workspace_mlflow_url:
+    if gemini_models and DatabricksPiSurface.MLFLOW in surface_urls:
         additional[_PI_MLFLOW_PROVIDER_ID] = _databricks_openai_provider(
-            api_key, workspace_mlflow_url, gemini_models, api_type="openai-completions"
+            api_key,
+            surface_urls[DatabricksPiSurface.MLFLOW],
+            gemini_models,
+            api_type="openai-completions",
         )
-    surfaces = {DatabricksPiSurface.RESPONSES: codex_gateway_url}
-    if workspace_completions_url:
-        surfaces[DatabricksPiSurface.COMPLETIONS] = workspace_completions_url
-    if workspace_mlflow_url:
-        surfaces[DatabricksPiSurface.MLFLOW] = workspace_mlflow_url
+    surfaces = {
+        surface: url
+        for surface, url in surface_urls.items()
+        if surface is not DatabricksPiSurface.ANTHROPIC
+    }
     config = PiProviderConfig(
         provider_id=_PI_PROVIDER_ID,
-        base_url=f"{gateway_origin}{_DATABRICKS_GATEWAY_ANTHROPIC_SUFFIX}",
+        base_url=surface_urls[DatabricksPiSurface.ANTHROPIC],
         api="anthropic-messages",
         model=_select_databricks_claude_model(model, claude_models),
         api_key=api_key,
@@ -1523,6 +1527,28 @@ def _live_family_model_entries(
     return entries
 
 
+def _databricks_surface_urls(
+    gateway_origin: str, workspace_url: str | None
+) -> dict[DatabricksPiSurface, str]:
+    """Return the base URL of each Databricks gateway surface Pi can reach.
+
+    :param gateway_origin: Origin the protocol suffixes hang off, e.g.
+        ``"https://ws.cloud.databricks.com/ai-gateway"``.
+    :param workspace_url: Workspace origin serving the MLflow and
+        serving-endpoints surfaces, or ``None`` when it is unresolved.
+    :returns: Surface base URLs; the workspace surfaces are omitted without
+        *workspace_url*.
+    """
+    urls = {
+        DatabricksPiSurface.ANTHROPIC: f"{gateway_origin}{_DATABRICKS_GATEWAY_ANTHROPIC_SUFFIX}",
+        DatabricksPiSurface.RESPONSES: f"{gateway_origin}{_DATABRICKS_GATEWAY_CODEX_SUFFIX}",
+    }
+    if workspace_url:
+        urls[DatabricksPiSurface.COMPLETIONS] = f"{workspace_url}/serving-endpoints"
+        urls[DatabricksPiSurface.MLFLOW] = f"{workspace_url}/ai-gateway/mlflow/v1"
+    return urls
+
+
 def _spread_over_databricks_surfaces(
     *,
     family_base_url: str,
@@ -1534,13 +1560,14 @@ def _spread_over_databricks_surfaces(
     shortlist: list[_PiModelEntry],
     curated_models: bool,
 ) -> PiProviderConfig | None:
-    """Move a lone Databricks gateway family's models onto their own surfaces.
+    """Move the selected Databricks gateway family's models onto their own surfaces.
 
     One family names one surface, but its workspace serves every protocol with
     the same credential. Claude ids belong on the Anthropic Messages passthrough;
     other ids must stay off it (Gemini-3.x rejects Anthropic-format tool history
     that carries no thought signature). Non-Claude ids on an OpenAI-family
-    surface keep the wire that family declares.
+    surface keep the wire that family declares. A moved tier keeps this family's
+    workspace and credential even when the provider configures the other family.
 
     :param family_base_url: The family's workspace-hosted gateway URL.
     :param declared_surface: The surface *family_base_url* names.
@@ -1565,10 +1592,7 @@ def _spread_over_databricks_surfaces(
         return None
     workspace_url = f"https://{urlparse(family_base_url).hostname}"
     surface_urls = {
-        DatabricksPiSurface.ANTHROPIC: f"{workspace_url}{_DATABRICKS_ANTHROPIC_GATEWAY_PATH}",
-        DatabricksPiSurface.RESPONSES: f"{workspace_url}/ai-gateway/codex/v1",
-        DatabricksPiSurface.COMPLETIONS: f"{workspace_url}/serving-endpoints",
-        DatabricksPiSurface.MLFLOW: f"{workspace_url}/ai-gateway/mlflow/v1",
+        **_databricks_surface_urls(f"{workspace_url}/ai-gateway", workspace_url),
         declared_surface: family_base_url,
     }
     claude_models: list[_PiModelEntry] = []
