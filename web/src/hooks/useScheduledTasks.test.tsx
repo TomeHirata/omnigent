@@ -16,6 +16,7 @@ import {
   useCreateScheduledTask,
   useDeleteScheduledTask,
   useRunScheduledTaskNow,
+  useScheduledTask,
   useScheduledTaskRuns,
   useScheduledTasks,
   useUpdateScheduledTask,
@@ -23,6 +24,7 @@ import {
 
 vi.mock("@/lib/scheduledTasksApi", () => ({
   listScheduledTasks: vi.fn(),
+  getScheduledTask: vi.fn(),
   listScheduledTaskRuns: vi.fn(),
   createScheduledTask: vi.fn(),
   updateScheduledTask: vi.fn(),
@@ -128,6 +130,25 @@ describe("mutations invalidate the list", () => {
     const { result } = renderHook(() => useDeleteScheduledTask(), { wrapper });
     await result.current.mutateAsync("st_1");
     expect(spy).toHaveBeenCalledWith({ queryKey: SCHEDULED_TASKS_KEY });
+  });
+
+  it("a deleted task's detail page refetches instead of rendering from cache", async () => {
+    const { queryClient, wrapper } = makeWrapper();
+    vi.mocked(api.getScheduledTask).mockResolvedValue(TASK);
+    const detail = renderHook(() => useScheduledTask(TASK.id), { wrapper });
+    await waitFor(() => expect(detail.result.current.data).toEqual(TASK));
+    queryClient.setQueryData(SCHEDULED_TASKS_KEY, [TASK]);
+    detail.unmount();
+
+    const { result } = renderHook(() => useDeleteScheduledTask(), { wrapper });
+    await result.current.mutateAsync(TASK.id);
+
+    // Back to the detail page: nothing cached to show, so it asks the server.
+    vi.mocked(api.getScheduledTask).mockRejectedValue(new Error("not found"));
+    const back = renderHook(() => useScheduledTask(TASK.id), { wrapper });
+    expect(back.result.current.data).toBeUndefined();
+    await waitFor(() => expect(back.result.current.isError).toBe(true));
+    expect(queryClient.getQueryData(SCHEDULED_TASKS_KEY)).toEqual([]);
   });
 
   it("run-now calls the API and immediately invalidates the list, detail + runs", async () => {
@@ -286,18 +307,21 @@ describe("useScheduledTaskRuns live refresh", () => {
       });
       expect(result.current.data).toEqual([SUCCEEDED_RUN]);
 
-      // …and polling STOPS: no further requests over a long quiet window.
+      // …and polling drops to the idle cadence: a minute brings one or two
+      // requests, where the in-flight cadence would make fifteen.
       const callsAfterSettled = vi.mocked(api.listScheduledTaskRuns).mock.calls.length;
       await act(async () => {
         await vi.advanceTimersByTimeAsync(60_000);
       });
-      expect(vi.mocked(api.listScheduledTaskRuns).mock.calls.length).toBe(callsAfterSettled);
+      const idleCalls = vi.mocked(api.listScheduledTaskRuns).mock.calls.length - callsAfterSettled;
+      expect(idleCalls).toBeGreaterThanOrEqual(1);
+      expect(idleCalls).toBeLessThanOrEqual(2);
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("never starts polling when the history is already all-terminal", async () => {
+  it("keeps a slow poll while the history is settled, so a later scheduled run appears", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: false });
     try {
       const { wrapper } = makeWrapper();
@@ -307,13 +331,21 @@ describe("useScheduledTaskRuns live refresh", () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);
       });
-      expect(result.current.isSuccess).toBe(true);
+      expect(result.current.data).toEqual([SUCCEEDED_RUN]);
 
+      // No fast polling while everything is settled.
       const callsAfterFirstFetch = vi.mocked(api.listScheduledTaskRuns).mock.calls.length;
       await act(async () => {
-        await vi.advanceTimersByTimeAsync(60_000);
+        await vi.advanceTimersByTimeAsync(20_000);
       });
       expect(vi.mocked(api.listScheduledTaskRuns).mock.calls.length).toBe(callsAfterFirstFetch);
+
+      // The schedule fires while the page stays open: the slow poll finds it.
+      vi.mocked(api.listScheduledTaskRuns).mockResolvedValue([RUNNING_RUN, SUCCEEDED_RUN]);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(11_000);
+      });
+      expect(result.current.data).toEqual([RUNNING_RUN, SUCCEEDED_RUN]);
     } finally {
       vi.useRealTimers();
     }

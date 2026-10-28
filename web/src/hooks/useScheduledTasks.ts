@@ -83,11 +83,18 @@ export function useScheduledTask(id: string, enabled = true) {
 
 // Statuses a run can still move OUT of. Everything else (succeeded / failed /
 // skipped, plus any status this client doesn't know) is treated as settled, so
-// an unrecognised value can never strand the poll below in an infinite loop.
+// an unrecognised value can never pin the fast poll below on.
 const ACTIVE_RUN_STATUSES = new Set(["scheduled", "starting", "running"]);
 
 /** Live-refresh cadence for a task's run history while anything is in flight. */
 const RUNS_REFETCH_INTERVAL_MS = 4_000;
+
+/**
+ * Cadence once everything has settled, so a scheduled run that starts later
+ * shows up. Nothing pushes run changes to the page; the scheduler itself polls
+ * every 30s.
+ */
+const RUNS_IDLE_REFETCH_INTERVAL_MS = 30_000;
 
 /**
  * Whether a run list still has work in flight, i.e. a value the server is
@@ -123,7 +130,8 @@ export function hasUnsettledRun(runs: ScheduledTaskRun[] | undefined): boolean {
  * are routine), so a one-shot invalidate after "Run now" cannot settle the row:
  * the refresh has to outlive the run. While any run is unsettled
  * (`hasUnsettledRun`) we refetch every few seconds; once everything is terminal
- * the interval returns `false` and polling STOPS — no steady-state traffic.
+ * the interval slows to `RUNS_IDLE_REFETCH_INTERVAL_MS`, so the next scheduled
+ * run still appears on a page left open.
  *
  * Reads the stop condition from the query's OWN cached data, so it never feeds
  * back through the caller (same shape as `terminalsReconcileInterval` in
@@ -152,7 +160,9 @@ export function useScheduledTaskRuns(id: string, enabled = true, awaitingRun = f
     enabled,
     staleTime: 30_000,
     refetchInterval: (query) =>
-      awaitingRun || hasUnsettledRun(query.state.data) ? RUNS_REFETCH_INTERVAL_MS : false,
+      awaitingRun || hasUnsettledRun(query.state.data)
+        ? RUNS_REFETCH_INTERVAL_MS
+        : RUNS_IDLE_REFETCH_INTERVAL_MS,
   });
 }
 
@@ -189,7 +199,14 @@ export function useDeleteScheduledTask() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => deleteScheduledTask(id),
-    onSuccess: () => {
+    onSuccess: (_data, id) => {
+      // Drop the deleted task everywhere it's cached, so Back to its detail
+      // page can't render it from a cache that is still fresh.
+      queryClient.setQueryData<ScheduledTask[]>(SCHEDULED_TASKS_KEY, (tasks) =>
+        tasks?.filter((t) => t.id !== id),
+      );
+      queryClient.removeQueries({ queryKey: scheduledTaskKey(id), exact: true });
+      queryClient.removeQueries({ queryKey: scheduledTaskRunsKey(id), exact: true });
       void queryClient.invalidateQueries({ queryKey: SCHEDULED_TASKS_KEY });
     },
   });
