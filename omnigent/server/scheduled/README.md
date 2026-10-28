@@ -231,6 +231,9 @@ wrong:
 - An `idle` session alone does not mean the turn finished: a session can be idle
   with its prompt saved but never run. Runner bookkeeping such as `resource_event`
   items does not count as evidence either.
+- Recovery never tears down a continue task's sandbox: other sessions of the task,
+  such as one started after a reset, may be using it, and the task's next run
+  reuses it. The provider's lifetime cap still applies.
 - Teardown only applies to server-managed sandbox hosts, and is safe to repeat, so
   two replicas can recover the same run.
 

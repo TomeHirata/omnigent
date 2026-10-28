@@ -2206,7 +2206,7 @@ class ClaimedRunExecutor:
         )
         if conv is None:
             if managed:
-                await self._terminate_sandbox(run.host_id)
+                await self._terminate_sandbox(run)
             return "failed"
         if managed:
             return await self._inspect_managed_startup(run, conv)
@@ -2233,7 +2233,7 @@ class ClaimedRunExecutor:
         if conv.labels.get(STARTUP_LABEL) == "failed":
             # The launch failure is already recorded on the session. A sandbox
             # that bound anyway can never deliver the failed prompt.
-            await self._terminate_sandbox(run.host_id)
+            await self._terminate_sandbox(run)
             return "failed"
         if conv.host_id is not None:
             # The prompt was saved before the launch began; the host's replica
@@ -2264,13 +2264,19 @@ class ClaimedRunExecutor:
             if launch is not None and launch.error is not None
             else "the sandbox launch stopped before its host connected"
         )
-        await self._terminate_sandbox(run.host_id)
+        await self._terminate_sandbox(run)
         if self._deps.startup_inputs is not None:
             await self._deps.startup_inputs.record_launch_failure(conv.id, reason)
         return "failed"
 
-    async def _terminate_sandbox(self, host_id: str | None) -> None:
-        await _terminate_run_sandbox(self._deps, host_id)
+    async def _terminate_sandbox(self, run: ScheduledTaskRun) -> None:
+        # A continue task's sandbox outlives any one session: another session of
+        # the task, such as one started after a reset, may be using it now, and
+        # the task's next run reuses it. Recovery leaves it to the task and the
+        # provider's lifetime cap.
+        if run.host_id == continued_sandbox_host_id(run.scheduled_task_id, run.workspace_id):
+            return
+        await _terminate_run_sandbox(self._deps, run.host_id)
 
 
 async def _terminate_run_sandbox(deps: FireDeps, host_id: str | None) -> None:

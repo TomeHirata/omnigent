@@ -969,6 +969,39 @@ async def test_recovery_cleans_up_the_sandbox_of_a_deleted_session(store, monkey
     terminate.assert_awaited_once()
 
 
+@pytest.mark.parametrize("state", ["session deleted", "launch failed", "launch abandoned"])
+async def test_recovery_never_tears_down_a_continue_tasks_shared_sandbox(
+    store, monkeypatch, state
+) -> None:
+    """Another session of the task, such as one started after a reset, may be using it."""
+    from omnigent.server import managed_hosts
+
+    terminate = AsyncMock()
+    monkeypatch.setattr(managed_hosts, "terminate_managed_host", terminate)
+    task = _saved_task(store, execution_target="managed_sandbox", session_mode="continue")
+    run = _expired_run(task)
+    assert run.host_id == continued_sandbox_host_id(task.id, task.workspace_id)
+    label = {"launch failed": "failed", "launch abandoned": "pending"}.get(state)
+    conversations = _RecoveryConversationStore(
+        None
+        if state == "session deleted"
+        else _FakeConversation(id=_CONV_ID, agent_id=_AGENT_ID, labels={STARTUP_LABEL: label})
+    )
+    executor = ClaimedRunExecutor(
+        _deps(
+            store,
+            conversation_store=conversations,
+            host_store=_sandbox_hosts(task, run, "agent_sandbox"),
+            sandbox_config=_draining_sandbox_config(0),
+            managed_launches=ManagedLaunchTracker(),
+            startup_inputs=FakeStartupInputs(),
+        )
+    )
+
+    assert await executor.recover(run) == "failed"
+    terminate.assert_not_awaited()
+
+
 def _draining_sandbox_config(shutdown_drain_s: float) -> Any:
     from omnigent.server.managed_hosts import ManagedSandboxConfig, ManagedSandboxDeployment
 
