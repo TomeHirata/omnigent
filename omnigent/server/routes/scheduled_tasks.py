@@ -544,6 +544,9 @@ def create_scheduled_tasks_router(
         owner = _owner(request)
         owner_id = None if owner == RESERVED_USER_LOCAL else owner
         _require_owned(scheduled_task_id, owner_id)
+        # Read state is keyed by the caller's raw identity, as the session
+        # read-state routes key it; ``owner_id`` folds "local" into None.
+        viewer_id = require_user(request, auth_provider)
         runs, next_cursor = store.list_runs(scheduled_task_id, limit=limit, after_id=after)
         runs = force_fail_stale_runs(store, runs)
         # Batch-fetch conversation metadata for runs that produced a session so
@@ -555,7 +558,7 @@ def create_scheduled_tasks_router(
         for r in runs:
             if r.conversation_id is not None and r.conversation_id in convs:
                 conv = convs[r.conversation_id]
-                _last_seen, explicit_unread = _read_state_entry(owner_id, r.conversation_id)
+                _last_seen, explicit_unread = _read_state_entry(viewer_id, r.conversation_id)
                 run_rows.append(
                     _run_to_response(
                         r,

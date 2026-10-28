@@ -37,6 +37,7 @@ import {
   useUpdateScheduledTask,
 } from "@/hooks/useScheduledTasks";
 import {
+  hasLocalReadState,
   isConversationUnseen,
   isExplicitlyUnread,
   seedRunUnreadBaseline,
@@ -72,7 +73,7 @@ export function TaskDetailPage() {
   const preFireNewestIdRef = useRef<string | null>(null);
   const awaitingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const { data: task, isLoading, isError } = useScheduledTask(taskId);
+  const { data: task, isLoading, isError, error, refetch } = useScheduledTask(taskId);
   // Run history only fetches once we have a real id.
   const {
     data: runs,
@@ -103,7 +104,6 @@ export function TaskDetailPage() {
     if (newestId != null && newestId !== preFireNewestIdRef.current) {
       clearAwaitingRunRow();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runs, awaitingRunRow]);
 
   // Unmount cleanup for the local safety timer so it can't fire into an
@@ -152,13 +152,13 @@ export function TaskDetailPage() {
       if (
         run.status === "succeeded" &&
         run.conversationId &&
+        run.conversationUpdatedAt != null &&
         !autoMarkedRef.current.has(run.conversationId)
       ) {
         autoMarkedRef.current.add(run.conversationId);
-        seedRunUnreadBaseline(
-          run.conversationId,
-          run.finishedAt ?? run.firedAt ?? Math.floor(Date.now() / 1000),
-        );
+        // Seed against the timestamp the unread check compares with; the run's
+        // finishedAt is written separately and can land a second later.
+        seedRunUnreadBaseline(run.conversationId, run.conversationUpdatedAt);
       }
     }
   }, [runs]);
@@ -199,8 +199,27 @@ export function TaskDetailPage() {
     );
   }
 
-  // Not found (bad / deleted id → 404) or any load error: a friendly message
-  // plus a way back to the list.
+  // A failed request (network, server error) can be retried; only a 404 means
+  // the automation is gone.
+  if (isError && !(error instanceof ScheduledTaskApiError && error.status === 404)) {
+    return (
+      <PageScroll contentClassName="px-6" data-testid="task-detail-load-error">
+        <BackLink />
+        <div className="flex flex-col items-start gap-2 py-12">
+          <p className="text-sm font-medium">Couldn’t load this automation.</p>
+          <Button
+            variant="outline"
+            size="sm"
+            data-testid="task-detail-retry"
+            onClick={() => void refetch()}
+          >
+            Try again
+          </Button>
+        </div>
+      </PageScroll>
+    );
+  }
+
   if (isError || !task) {
     return (
       <PageScroll contentClassName="px-6" data-testid="task-detail-not-found">
@@ -434,14 +453,9 @@ function ConfigField({ label, value, testId }: { label: string; value: string; t
  * run payload — with zero per-row session GETs.
  *
  * The runs endpoint returns `conversationUpdatedAt`, `conversationStatus`, and
- * `viewerUnread` (batched server-side). Priority:
- *   1. Local explicit-unread override (app-level "mark unread", a628dc12 path).
- *   2. Local `isConversationUnseen` — fires once `lastSeenMap` has a baseline
- *      for this conversation (set by `seedRunUnreadBaseline` on new completions,
- *      or by the sidebar's `seedReadState` on load).
- *   3. Server `viewerUnread` — the server-side explicit-unread flag, covering
- *      runs that were completed before this page was ever opened (no local
- *      baseline yet).
+ * `viewerUnread` (batched server-side). This client's read state wins whenever
+ * it has any: the run payload can be up to a poll old, so its `viewerUnread`
+ * only fills in for a conversation the client knows nothing about.
  * `useUnseenTick()` re-renders the instant the user opens the thread (marking
  * it read in the local mirror) so the dot clears without a refetch.
  */
@@ -449,18 +463,16 @@ function useRunUnread(run: ScheduledTaskRun): boolean {
   // Re-render when the read-state mirror changes (open thread → mark read).
   useUnseenTick();
   if (run.conversationId === null || run.conversationUpdatedAt === null) return false;
-  if (isExplicitlyUnread(run.conversationId)) return true;
-  if (
-    isConversationUnseen(
-      run.conversationId,
-      run.conversationUpdatedAt,
-      run.conversationStatus ?? undefined,
-    )
-  ) {
-    return true;
+  if (hasLocalReadState(run.conversationId)) {
+    return (
+      isExplicitlyUnread(run.conversationId) ||
+      isConversationUnseen(
+        run.conversationId,
+        run.conversationUpdatedAt,
+        run.conversationStatus ?? undefined,
+      )
+    );
   }
-  // Fall back to the server's explicit-unread flag for runs the local mirror
-  // hasn't seeded yet (no lastSeenMap entry from this client session).
   return run.viewerUnread === true;
 }
 
@@ -534,7 +546,6 @@ function RunRow({ run, now }: { run: ScheduledTaskRun; now: Date }) {
         <Link
           to={`/c/${run.conversationId}`}
           data-testid="run-open"
-          aria-label="Open session"
           className={cn(
             commonClassName,
             "cursor-pointer transition-colors hover:bg-muted focus-visible:bg-muted focus-visible:outline-none",

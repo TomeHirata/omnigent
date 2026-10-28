@@ -16,6 +16,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TaskDetailPage } from "./TaskDetailPage";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import * as hooks from "@/hooks/useScheduledTasks";
+import {
+  markConversationSeen,
+  markConversationUnread,
+  resetReadStateForTests,
+  seedReadState,
+} from "@/hooks/useUnseenConversations";
+import type * as UnseenModule from "@/hooks/useUnseenConversations";
 import { ScheduledTaskApiError } from "@/lib/scheduledTasksApi";
 import type * as RoutingModule from "@/lib/routing";
 import type { ScheduledTask, ScheduledTaskRun } from "@/lib/scheduledTasksApi";
@@ -52,16 +59,19 @@ vi.mock("@/hooks/useHosts", () => ({
   useHosts: () => ({ data: [{ host_id: "h_1", name: "My Laptop" }] }),
 }));
 
-// Read-state mirror: control unread verdicts deterministically. Default read.
-const isConversationUnseen = vi.fn(() => false);
-const isExplicitlyUnread = vi.fn(() => false);
-const seedRunUnreadBaseline = vi.fn();
-vi.mock("@/hooks/useUnseenConversations", () => ({
-  useUnseenTick: () => 0,
-  isConversationUnseen: (...args: unknown[]) => isConversationUnseen(...(args as [])),
-  isExplicitlyUnread: (...args: unknown[]) => isExplicitlyUnread(...(args as [])),
-  seedRunUnreadBaseline: (...args: unknown[]) => seedRunUnreadBaseline(...args),
-}));
+// The real read-state mirror, so unread verdicts come from actual state. Only
+// seedRunUnreadBaseline is wrapped, to count auto-marks.
+const { seedRunUnreadBaseline } = vi.hoisted(() => ({ seedRunUnreadBaseline: vi.fn() }));
+vi.mock("@/hooks/useUnseenConversations", async (importOriginal) => {
+  const actual = await importOriginal<typeof UnseenModule>();
+  return {
+    ...actual,
+    seedRunUnreadBaseline: (conversationId: string, updatedAt: number) => {
+      seedRunUnreadBaseline(conversationId, updatedAt);
+      actual.seedRunUnreadBaseline(conversationId, updatedAt);
+    },
+  };
+});
 
 // Freeze the ticking clock so relative next-run text is deterministic.
 vi.mock("@/hooks/useNow", () => ({
@@ -127,14 +137,17 @@ const updateMutate = vi.fn();
 const deleteMutate = vi.fn();
 const runNowMutate = vi.fn();
 
+const refetchTask = vi.fn();
 function setTask(
   data: ScheduledTask | undefined,
-  state: { isLoading?: boolean; isError?: boolean } = {},
+  state: { isLoading?: boolean; error?: Error } = {},
 ) {
   vi.mocked(hooks.useScheduledTask).mockReturnValue({
     data,
     isLoading: state.isLoading ?? false,
-    isError: state.isError ?? false,
+    isError: state.error !== undefined,
+    error: state.error ?? null,
+    refetch: refetchTask,
   } as unknown as ReturnType<typeof hooks.useScheduledTask>);
 }
 
@@ -152,10 +165,7 @@ beforeEach(() => {
   deleteMutate.mockReset();
   runNowMutate.mockReset();
   showToast.mockReset();
-  isConversationUnseen.mockReset();
-  isConversationUnseen.mockReturnValue(false);
-  isExplicitlyUnread.mockReset();
-  isExplicitlyUnread.mockReturnValue(false);
+  resetReadStateForTests();
   seedRunUnreadBaseline.mockReset();
   vi.mocked(hooks.useUpdateScheduledTask).mockReturnValue({
     mutate: updateMutate,
@@ -174,20 +184,24 @@ beforeEach(() => {
 
 afterEach(cleanup);
 
-function renderPage() {
+function pageTree() {
   // QueryClient required by other hooks in the tree (useScheduledTask, etc.).
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
-  return render(
+  return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <MemoryRouter>
           <TaskDetailPage />
         </MemoryRouter>
       </TooltipProvider>
-    </QueryClientProvider>,
+    </QueryClientProvider>
   );
+}
+
+function renderPage() {
+  return render(pageTree());
 }
 
 describe("header, prompt, configuration", () => {
@@ -262,11 +276,23 @@ describe("loading / not-found states", () => {
     expect(screen.getByTestId("task-detail-loading")).toBeInTheDocument();
   });
 
-  it("renders a friendly not-found with a back link on error", () => {
-    setTask(undefined, { isError: true });
+  it("renders a friendly not-found with a back link when the task 404s", () => {
+    setTask(undefined, { error: new ScheduledTaskApiError("not found", 404, "not_found") });
     renderPage();
     expect(screen.getByTestId("task-detail-not-found")).toBeInTheDocument();
     expect(screen.getByTestId("task-detail-back")).toBeInTheDocument();
+  });
+
+  it("offers a retry, not a not-found, when loading the task fails for another reason", () => {
+    refetchTask.mockReset();
+    setTask(undefined, { error: new ScheduledTaskApiError("unavailable", 503, null) });
+    renderPage();
+    expect(screen.queryByTestId("task-detail-not-found")).toBeNull();
+    expect(screen.getByTestId("task-detail-load-error")).toHaveTextContent(
+      "Couldn’t load this automation.",
+    );
+    fireEvent.click(screen.getByTestId("task-detail-retry"));
+    expect(refetchTask).toHaveBeenCalledOnce();
   });
 });
 
@@ -462,7 +488,7 @@ describe("run history", () => {
   });
 
   it("renders a READ succeeded run with a grey dot ('Completed' tooltip) and a clickable row", async () => {
-    // Default mocks resolve read (isConversationUnseen → false).
+    // No read state for the conversation, and no server unread flag.
     setTask(task());
     setRuns([run({ status: "succeeded", conversationId: "c_9" })]);
     renderPage();
@@ -496,7 +522,7 @@ describe("run history", () => {
   });
 
   it("renders an unread dot (brand-accent) with an 'Unread' tooltip for an unread success", async () => {
-    isConversationUnseen.mockReturnValue(true);
+    markConversationUnread("c_9", 1_700_000_500);
     setTask(task());
     setRuns([run({ status: "succeeded", conversationId: "c_9" })]);
     renderPage();
@@ -514,10 +540,8 @@ describe("run history", () => {
     await waitFor(() => expect(screen.getAllByText("Unread").length).toBeGreaterThan(0));
   });
 
-  it("shows unread dot from server viewerUnread=true with no per-row fetchConversationById call", async () => {
-    // isConversationUnseen stays false (local mirror has no baseline yet, as on
-    // a fresh page load). The server-side viewerUnread flag drives the dot.
-    isConversationUnseen.mockReturnValue(false);
+  it("shows the server's viewerUnread until the session is opened, then clears without a refetch", async () => {
+    // No local read state yet, as on a fresh page load: the server flag drives the dot.
     setTask(task());
     setRuns([
       run({
@@ -533,10 +557,18 @@ describe("run history", () => {
     await waitFor(() => expect(row).toHaveAttribute("data-run-unread", "true"));
     const dot = within(row).getByTestId("run-status-dot");
     expect(dot).toHaveAttribute("data-run-icon", "unread");
+
+    // Opening the session writes local read state; the cached run payload still
+    // says viewerUnread, but the newer local read wins.
+    act(() => {
+      seedReadState([]);
+      markConversationSeen("c_server_unread", 1_700_000_600);
+    });
+    await waitFor(() => expect(row).toHaveAttribute("data-run-unread", "false"));
   });
 
   it("treats a deleted/missing conversation (no payload) as read: grey dot, still clickable", async () => {
-    isConversationUnseen.mockReturnValue(true); // would be unread IF it existed
+    markConversationUnread("c_gone", 1_700_000_500); // would be unread IF it existed
     setTask(task());
     // A run whose conversation was deleted: the backend returns null for the
     // enriched fields (no conversation found in the store).
@@ -594,7 +626,9 @@ describe("run history", () => {
     setRuns([run({ status: "failed", errorCode: "runner_start_failed", conversationId: "c_7" })]);
     renderPage();
     const row = screen.getByTestId("task-detail-run");
-    expect(within(row).getByTestId("run-open")).toHaveAttribute("href", "/c/c_7");
+    const link = within(row).getByTestId("run-open");
+    expect(link).toHaveAttribute("href", "/c/c_7");
+    expect(link).toHaveAccessibleName(/Runner · The agent didn't start\./);
     expect(within(row).getByTestId("run-failure")).toHaveTextContent(
       "Runner · The agent didn't start.",
     );
@@ -691,7 +725,7 @@ describe("run history", () => {
 });
 
 describe("auto-mark runs unread", () => {
-  it("marks a newly-completed run unread when it transitions running→succeeded", () => {
+  it("marks a newly-completed run unread when it transitions running→succeeded", async () => {
     setTask(task());
     // First render: one running run (sets baseline — NOT marked).
     setRuns([
@@ -701,36 +735,56 @@ describe("auto-mark runs unread", () => {
         conversationId: "c_new",
         firedAt: 1_700_000_000,
         finishedAt: null,
+        conversationUpdatedAt: 1_700_000_100,
+        conversationStatus: "running",
       }),
     ]);
     const { rerender } = renderPage();
-    // Baseline seeded with the running run (not terminal → not in autoMarked set).
-    // seedRunUnreadBaseline should NOT have been called yet.
     expect(seedRunUnreadBaseline).not.toHaveBeenCalled();
 
-    // Simulate the run completing: update the mock to return succeeded.
+    // The run completes a second after its session's last update: completion
+    // and the session's updated_at are written separately.
     setRuns([
       run({
         id: "run_new",
         status: "succeeded",
         conversationId: "c_new",
         firedAt: 1_700_000_000,
-        finishedAt: 1_700_000_042,
+        finishedAt: 1_700_000_101,
+        conversationUpdatedAt: 1_700_000_100,
+        conversationStatus: "idle",
       }),
     ]);
-    rerender(
-      <QueryClientProvider
-        client={new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })}
-      >
-        <TooltipProvider>
-          <MemoryRouter>
-            <TaskDetailPage />
-          </MemoryRouter>
-        </TooltipProvider>
-      </QueryClientProvider>,
-    );
+    rerender(pageTree());
 
-    expect(seedRunUnreadBaseline).toHaveBeenCalledWith("c_new", 1_700_000_042);
+    expect(seedRunUnreadBaseline).toHaveBeenCalledWith("c_new", 1_700_000_100);
+    await waitFor(() =>
+      expect(screen.getByTestId("task-detail-run")).toHaveAttribute("data-run-unread", "true"),
+    );
+  });
+
+  it("keeps a session read when it was read at or after the completed run's last update", async () => {
+    setTask(task());
+    setRuns([]);
+    const { rerender } = renderPage();
+    act(() => {
+      seedReadState([]);
+      markConversationSeen("c_read", 1_700_000_100);
+    });
+
+    setRuns([
+      run({
+        status: "succeeded",
+        conversationId: "c_read",
+        conversationUpdatedAt: 1_700_000_100,
+        conversationStatus: "idle",
+      }),
+    ]);
+    rerender(pageTree());
+
+    await waitFor(() =>
+      expect(screen.getByTestId("task-detail-run")).toHaveAttribute("data-run-unread", "false"),
+    );
   });
 
   it("does NOT re-mark a run that was already opened (resurrection guard)", () => {
@@ -742,34 +796,18 @@ describe("auto-mark runs unread", () => {
 
     // Run completes — gets marked once.
     setRuns([run({ id: "run_1", status: "succeeded", conversationId: "c_opened" })]);
-    rerender(
-      <QueryClientProvider
-        client={new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })}
-      >
-        <TooltipProvider>
-          <MemoryRouter>
-            <TaskDetailPage />
-          </MemoryRouter>
-        </TooltipProvider>
-      </QueryClientProvider>,
-    );
+    rerender(pageTree());
     expect(seedRunUnreadBaseline).toHaveBeenCalledTimes(1);
 
-    // Simulate user opening the conversation (would call clearUnreadOverride /
-    // markConversationSeen externally). Now poll re-fetches the same runs list.
-    rerender(
-      <QueryClientProvider
-        client={new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })}
-      >
-        <TooltipProvider>
-          <MemoryRouter>
-            <TaskDetailPage />
-          </MemoryRouter>
-        </TooltipProvider>
-      </QueryClientProvider>,
-    );
-    // seedRunUnreadBaseline must NOT be called again — the id is in the ref.
+    // The user opens the session, then the next poll returns the same runs.
+    act(() => {
+      seedReadState([]);
+      markConversationSeen("c_opened", 1_800_000_000);
+    });
+    rerender(pageTree());
+    // The id is in the ref, so the open isn't undone.
     expect(seedRunUnreadBaseline).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("task-detail-run")).toHaveAttribute("data-run-unread", "false");
   });
 
   it("does NOT auto-mark pre-existing terminal runs on first page load (no-retroactive guard)", () => {
@@ -782,39 +820,5 @@ describe("auto-mark runs unread", () => {
     renderPage();
     // Baseline seeds both ids as already-seen → seedRunUnreadBaseline never called.
     expect(seedRunUnreadBaseline).not.toHaveBeenCalled();
-  });
-
-  it("uses seedRunUnreadBaseline (not markConversationUnread) so the dot clears when the conversation is opened", () => {
-    // Regression: previously markConversationUnread set the explicitlyUnread
-    // override, which blocked markConversationSeen in ChatPage (the initial-mount
-    // guard skips clearUnreadOverride on a fresh mount). The dot would therefore
-    // stick after the user clicked through. seedRunUnreadBaseline omits the
-    // override so markConversationSeen isn't blocked.
-    //
-    // Verify: auto-mark calls seedRunUnreadBaseline (no override), NOT
-    // markConversationUnread. The absence of markConversationUnread in the mock
-    // confirms the dot is driven by the baseline alone — openable via
-    // markConversationSeen without any guard blocking it.
-    setTask(task());
-    setRuns([]);
-    const { rerender } = renderPage();
-
-    setRuns([run({ id: "run_1", status: "succeeded", conversationId: "c_run" })]);
-    rerender(
-      <QueryClientProvider
-        client={new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })}
-      >
-        <TooltipProvider>
-          <MemoryRouter>
-            <TaskDetailPage />
-          </MemoryRouter>
-        </TooltipProvider>
-      </QueryClientProvider>,
-    );
-
-    // seedRunUnreadBaseline was called — not markConversationUnread.
-    expect(seedRunUnreadBaseline).toHaveBeenCalledWith("c_run", expect.any(Number));
-    // seedRunUnreadBaseline does NOT set the explicitlyUnread override, so
-    // markConversationSeen is never blocked by it when the user clicks through.
   });
 });

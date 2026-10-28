@@ -7,7 +7,7 @@ validation (400s) and live-scheduler sync on every mutation.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -66,7 +66,10 @@ def auth_app(
     from omnigent.server.auth import UnifiedAuthProvider
     from omnigent.stores.host_store import HostStore
 
-    persistent = getattr(request, "param", False)
+    # ``True`` runs automations_v2; ``"local_single_user"`` serves the
+    # single-user local runtime, where a request without a header is "local".
+    param = getattr(request, "param", False)
+    persistent = param is True
     artifact_store = LocalArtifactStore(str(tmp_path / "artifacts"))
     app = create_app(
         agent_store=SqlAlchemyAgentStore(db_uri),
@@ -80,7 +83,9 @@ def auth_app(
         # ownership) resolves against actual host rows. Without it,
         # ``app.state.host_store`` is None and the route skips the check.
         host_store=HostStore(db_uri),
-        auth_provider=UnifiedAuthProvider(source="header"),
+        auth_provider=UnifiedAuthProvider(
+            source="header", local_single_user=param == "local_single_user"
+        ),
         feature_flags=resolve_feature_flags(
             {"OMNIGENT_FEATURES": "automations_v2" if persistent else "-automations_v2"}
         ),
@@ -1230,8 +1235,25 @@ async def test_list_runs_returns_history_for_owned_task(
     assert newest["scheduled_task_id"] == task_id
     # The free-text error blob is not exposed on the run list.
     assert "error" not in newest
+    # The run's session doesn't exist, so it carries no session read state.
+    assert newest["conversation_updated_at"] is None
+    assert newest["conversation_status"] is None
+    assert newest["viewer_unread"] is None
 
 
+@pytest.fixture()
+def clean_session_read_state() -> Iterator[None]:
+    """Clear the module-level session read-state cache around a test."""
+    from omnigent.server.routes._sessions import helpers
+
+    helpers._read_last_seen.clear()
+    helpers._read_explicit_unread.clear()
+    yield
+    helpers._read_last_seen.clear()
+    helpers._read_explicit_unread.clear()
+
+
+@pytest.mark.usefixtures("clean_session_read_state")
 async def test_list_runs_includes_conversation_read_state_fields(
     auth_client: httpx.AsyncClient, db_uri: str
 ) -> None:
@@ -1252,9 +1274,13 @@ async def test_list_runs_includes_conversation_read_state_fields(
     ).json()
     task_id = created["id"]
 
+    from omnigent.server.routes._sessions.helpers import _set_read_state
+
     # Create a real conversation in the store so the batch-fetch can hydrate it.
     conv_store = SqlAlchemyConversationStore(db_uri)
     conv = conv_store.create_conversation(conversation_id=uuid.uuid4().hex)
+    conv_store.set_session_live_status(conv.id, "idle")
+    _set_read_state("alice@example.com", conv.id, conv.updated_at - 1, True)
 
     succeeded_id = uuid.uuid4().hex
     skipped_id = uuid.uuid4().hex
@@ -1282,15 +1308,45 @@ async def test_list_runs_includes_conversation_read_state_fields(
 
     # The succeeded run with a real conversation gets enriched fields.
     succ = runs[succeeded_id]
-    assert succ["conversation_updated_at"] == conv.updated_at
-    assert succ["conversation_status"] is None  # live_status is None until first turn
-    assert succ["viewer_unread"] is False  # no explicit-unread set for this viewer
+    assert succ["conversation_updated_at"] == conv_store.get_conversation(conv.id).updated_at
+    assert succ["conversation_status"] == "idle"
+    assert succ["viewer_unread"] is True
 
     # The skipped run (no conversation_id) gets null for all three fields.
     skip = runs[skipped_id]
     assert skip["conversation_updated_at"] is None
     assert skip["conversation_status"] is None
     assert skip["viewer_unread"] is None
+
+
+@pytest.mark.usefixtures("clean_session_read_state")
+@pytest.mark.parametrize("auth_app", ["local_single_user"], indirect=True)
+async def test_list_runs_reads_the_local_users_read_state(
+    auth_client: httpx.AsyncClient, db_uri: str
+) -> None:
+    """On the single-user local runtime, ``viewer_unread`` matches the session list's.
+
+    Session read state is keyed by the raw "local" identity; ``/runs`` must read
+    the same key rather than the ``None`` the task-ownership check uses.
+    """
+    import uuid
+
+    from omnigent.server.routes._sessions.helpers import _set_read_state
+
+    created = await auth_client.post(
+        "/v1/scheduled-tasks", json=_create_body(host_id=None, workspace=None)
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["id"]
+    conv_store = SqlAlchemyConversationStore(db_uri)
+    conv = conv_store.create_conversation(conversation_id=uuid.uuid4().hex)
+    run_id = uuid.uuid4().hex
+    _seed_run(db_uri, task_id, run_id, conversation_id=conv.id)
+    _set_read_state("local", conv.id, conv.updated_at - 1, True)
+
+    resp = await auth_client.get(f"/v1/scheduled-tasks/{task_id}/runs")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["runs"][0]["viewer_unread"] is True
 
 
 async def test_list_runs_empty_for_task_with_no_runs(

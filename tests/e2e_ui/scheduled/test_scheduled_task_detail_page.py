@@ -1,14 +1,9 @@
 """UI journey: the Scheduled Task DETAIL page (``/tasks/:taskId``).
 
-Covers the core detail-page render + interaction path for a scheduled task:
-
-* The detail page renders the task's name, prompt, Configuration block
-  (agent + host), and the status line (pause toggle + Active/Paused pill +
-  human-readable schedule).
-* Clicking the task card on ``/tasks`` navigates to ``/tasks/:taskId``.
-* Triggering **Run now** from the detail header fires
-  ``POST /v1/scheduled-tasks/{id}/run``, records a run in the background,
-  and the run-history section renders a run row.
+Covers the browser path the component tests can't: clicking the task card on
+``/tasks`` opens ``/tasks/:taskId`` with the real task, and **Run now** from the
+detail header fires ``POST /v1/scheduled-tasks/{id}/run``, records a run in the
+background, and the run-history section renders it.
 
 The seeded task pins no host, so a manual Run now with no online host records
 a ``failed`` run (``no_online_host``). This exercises the end-to-end render
@@ -39,63 +34,11 @@ from tests.e2e_ui.scheduled.test_scheduled_tasks_page import (
 )
 
 
-def test_scheduled_task_detail_page_renders_header_and_sections(
-    page: Page,
-    live_server: str,
-) -> None:
-    """Navigating to a task card lands on the detail page with all key sections.
-
-    Asserts the title, prompt, Configuration block (agent + host), and the
-    status line (Active pill + pause toggle + schedule summary) all render.
-    """
-    agent_id = _builtin_agent_id(live_server, "hello_world")
-    _create_task(
-        live_server,
-        agent_id,
-        "Detail render test",
-        "FREQ=DAILY;BYHOUR=9;BYMINUTE=0",
-    )
-
-    page.goto(f"{live_server}/tasks")
-    row = _row_by_name(page, "Detail render test")
-    expect(row).to_be_visible(timeout=30_000)
-
-    # Click the card body to navigate to the detail page.
-    row.get_by_test_id("task-row-open").click()
-
-    # URL must change to /tasks/:id.
-    page.wait_for_url("**/tasks/**", timeout=15_000)
-
-    # Header: task name.
-    expect(page.get_by_test_id("task-detail-title")).to_have_text(
-        "Detail render test", timeout=30_000
-    )
-
-    # Status line: Active pill, pause toggle, schedule summary.
-    expect(page.get_by_test_id("task-detail-state-pill")).to_contain_text("Active")
-    expect(page.get_by_test_id("task-detail-pause-toggle")).to_be_visible()
-    # The schedule summary is derived client-side from the stored RRULE.
-    expect(page.get_by_test_id("task-detail-schedule")).to_contain_text(
-        "Every day at 9:00 AM", timeout=15_000
-    )
-
-    # Prompt section.
-    expect(page.get_by_test_id("task-detail-prompt")).to_be_visible()
-
-    # Configuration block: the agent label resolves; the host reads
-    # "Resolve at fire time" when no host_id is pinned.
-    expect(page.get_by_test_id("task-detail-agent")).to_be_visible()
-    expect(page.get_by_test_id("task-detail-host")).to_contain_text("Resolve at fire time")
-
-    # Back link navigates back to the list.
-    expect(page.get_by_test_id("task-detail-back")).to_be_visible()
-
-
 def test_scheduled_task_detail_page_run_now_records_run_row(
     page: Page,
     live_server: str,
 ) -> None:
-    """Run now from the detail header fires the task and a run row appears.
+    """Open a task from the list, then Run now from its header records a run.
 
     The seeded task has no host, so the fire records a ``failed`` run (no
     online host at fire time). This exercises the real
@@ -120,10 +63,14 @@ def test_scheduled_task_detail_page_run_now_records_run_row(
     row.get_by_test_id("task-row-open").click()
     page.wait_for_url("**/tasks/**", timeout=15_000)
 
-    # Confirm the detail page loaded.
+    # The detail page loads the real task; component tests cover each field.
     expect(page.get_by_test_id("task-detail-title")).to_have_text(
         "Detail run-now test", timeout=30_000
     )
+    expect(page.get_by_test_id("task-detail-schedule")).to_contain_text(
+        "Every day at 9:00 AM", timeout=15_000
+    )
+    expect(page.get_by_test_id("task-detail-host")).to_contain_text("Resolve at fire time")
 
     # No run has fired yet.
     pre = httpx.get(f"{live_server}/v1/scheduled-tasks/{task_id}/runs", timeout=10.0)

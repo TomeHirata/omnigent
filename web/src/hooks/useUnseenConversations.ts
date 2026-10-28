@@ -262,23 +262,24 @@ export function markConversationSeen(conversationId: string, atSeconds?: number)
 }
 
 /**
- * Seeds a run-history unread dot for a freshly-completed scheduled-task run
- * without setting the {@link explicitlyUnread} override. The dot condition
- * (`updated_at > stored`) is satisfied by pinning the baseline just below
- * `updatedAt`, exactly like {@link markConversationUnread}, but omitting the
- * override means {@link markConversationSeen} is NOT blocked when the user
- * clicks through from the detail page — so the dot clears on open as expected.
- *
- * The override is deliberately withheld because the run's conversation is never
- * the "active thread" while the user is on `/tasks/:taskId`, so the suppression
- * that `explicitlyUnread` provides (keeping the dot alive while you're looking
- * at the thread) is not needed here and would instead prevent the dot from
- * clearing on click-through.
+ * Seed just below the conversation timestamp without setting an explicit-unread
+ * override, so opening the conversation clears it. A read at or after
+ * `updatedAt` is newer than this completion and is kept.
  */
 export function seedRunUnreadBaseline(conversationId: string, updatedAt: number): void {
+  const stored = lastSeenMap[conversationId];
+  if (stored !== undefined && stored >= updatedAt) return;
   lastSeenMap[conversationId] = updatedAt - 1;
   persistToStorage();
   notifySubscribers();
+}
+
+/**
+ * True when this client holds read state for the conversation. It is newer
+ * than any server snapshot fetched earlier, so callers prefer it.
+ */
+export function hasLocalReadState(conversationId: string): boolean {
+  return lastSeenMap[conversationId] !== undefined || explicitlyUnread.has(conversationId);
 }
 
 /**
