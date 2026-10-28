@@ -240,13 +240,15 @@ def test_expected_indexes(db_engine: Engine) -> None:
     ]
 
 
+@pytest.mark.parametrize("db_engine", ["migration", "metadata"], indirect=True)
 def test_state_default_on_omitted_insert(db_engine: Engine) -> None:
     """A raw insert omitting ``state`` / ``workspace_id`` / ``execution_target``
-    picks up their defaults.
+    / ``session_mode`` picks up their defaults.
 
     Only the integer server_defaults (``state`` / ``workspace_id`` /
-    ``execution_target``) are exercised here — all are omitted from the insert
-    and must fall back to their defaults.
+    ``execution_target`` / ``session_mode``) are exercised here — all are
+    omitted from the insert and must fall back to their defaults, on both the
+    migrated and the model-built schema.
     """
     with db_engine.begin() as conn:
         conn.execute(
