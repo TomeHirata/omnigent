@@ -213,19 +213,6 @@ class ScheduledTaskStore(ABC):
         ...
 
     @abstractmethod
-    def release_session(self, scheduled_task_id: str, session_id: str) -> None:
-        """
-        Clear an adopted session the firing could not use, such as one its owner
-        could not be granted.
-
-        A no-op when the task already continues a different session.
-
-        :param scheduled_task_id: Opaque task identifier.
-        :param session_id: The session the task should no longer continue.
-        """
-        ...
-
-    @abstractmethod
     def delete(self, scheduled_task_id: str) -> bool:
         """
         Delete a scheduled task. Idempotent.

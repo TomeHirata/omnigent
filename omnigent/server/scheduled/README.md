@@ -184,8 +184,8 @@ would, and sends the prompt, also while the session is busy with an earlier turn
 It records `succeeded` once the prompt is delivered, without waiting for the turn.
 If the replica stops before recording, recovery finds no session on the run and
 records `failed`; it never resends. A first run of such a task records its
-session on the task once the session exists, so a run never finds a recorded
-session that is still being created. Of two first runs, the one that records
+session on the task once the session exists and its owner is granted, so a run
+never finds a recorded session it cannot continue. Of two first runs, the one that records
 second deletes its unused session and records `skipped`.
 A sandbox task's first run starts its sandbox under the task's host ID. If that
 host already exists, left by a reset session, the new session joins it in that

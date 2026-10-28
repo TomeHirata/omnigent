@@ -514,19 +514,6 @@ class SqlAlchemyScheduledTaskStore(ScheduledTaskStore):
 
         return run_write_transaction(self._session_immediate, "adopt_task_session", write)
 
-    def release_session(self, scheduled_task_id: str, session_id: str) -> None:
-        """Clear a session the firing could not use, unless the task moved on."""
-
-        def write(session: Session) -> None:
-            row = session.get(
-                SqlScheduledTask, (current_workspace_id(), scheduled_task_id), with_for_update=True
-            )
-            if row is not None and row.session_id == session_id:
-                row.session_id = None
-                row.updated_at = now_epoch()
-
-        run_write_transaction(self._session_immediate, "release_task_session", write)
-
     def delete(self, scheduled_task_id: str) -> bool:
         """Hide the task, then remove history in bounded transactions, preserving live claims."""
 

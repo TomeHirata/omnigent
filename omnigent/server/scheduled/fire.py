@@ -614,23 +614,6 @@ async def _run_fire_for_task(
             "failed", error="session creation failed", error_code="session_create_failed"
         )
         return
-    # Compared as stored: ``effective`` carries this fire's resolved host.
-    stored = replace(task, agent_id=effective.agent_id, updated_at=effective.updated_at)
-    try:
-        kept = await _keep_first_session(deps, stored, conv.id)
-    except _SessionTaken:
-        await _discard_session(deps, conv.id)
-        await recorder.finish(
-            "skipped",
-            error="another run already started the session this automation continues",
-            error_code="continued_session_busy",
-        )
-        return
-    session_id = conv.id if kept else None
-    await recorder.session_created(conv.id)
-
-    await _attach_cost_budget(deps, task, conv.id)
-
     try:
         await _grant_owner(deps, effective, conv.id)
     except Exception:
@@ -639,9 +622,6 @@ async def _run_fire_for_task(
             task.id,
             conv.id,
         )
-        # The owner cannot use this session, so the next run starts another.
-        if session_id is not None:
-            await _release_session(deps, task, session_id)
         await recorder.finish(
             "failed",
             conversation_id=conv.id,
@@ -649,6 +629,22 @@ async def _run_fire_for_task(
             error_code="owner_grant_failed",
         )
         return
+    # Recorded only once its owner can use it, so another run that finds it can continue it.
+    # Compared as stored: ``effective`` carries this fire's resolved host.
+    stored = replace(task, agent_id=effective.agent_id, updated_at=effective.updated_at)
+    try:
+        await _keep_first_session(deps, stored, conv.id)
+    except _SessionTaken:
+        await _discard_session(deps, conv.id)
+        await recorder.finish(
+            "skipped",
+            error="another run already started the session this automation continues",
+            error_code="continued_session_busy",
+        )
+        return
+    await recorder.session_created(conv.id)
+
+    await _attach_cost_budget(deps, task, conv.id)
     _announce_session_added(
         effective.user_id if effective.user_id is not None else deps.single_user_owner, conv.id
     )
@@ -838,8 +834,8 @@ class _SessionTaken(Exception):
 async def _keep_first_session(deps: FireDeps, task: ScheduledTask, session_id: str) -> bool:
     """Record the session a continue task's first firing created as the one it continues.
 
-    Recorded only once the session exists, so a run never finds a recorded
-    session that is still being created. ``False`` for a ``"new"`` task, or
+    Recorded only once the session exists and its owner can use it, so a run
+    never finds a recorded session it cannot continue. ``False`` for a ``"new"`` task, or
     when the task changed since this firing read it: the run then uses a
     session the task does not keep, and the next firing starts one for the
     edited task.
@@ -872,7 +868,10 @@ async def _keep_first_session(deps: FireDeps, task: ScheduledTask, session_id: s
 
 
 async def _discard_session(deps: FireDeps, conversation_id: str) -> None:
-    """Delete a first firing's session that lost to another run's, before anything ran in it."""
+    """Delete a first firing's session that lost to another run's, before anything ran in it.
+
+    Deleting the session also drops its owner grant.
+    """
     try:
         await deps.conversation_store.delete_conversation(conversation_id)
     except Exception:
@@ -900,16 +899,6 @@ async def _continued_host_binding(deps: FireDeps, task: ScheduledTask) -> tuple[
     if earlier is None or earlier.host_id != host_id or earlier.workspace is None:
         return None
     return host_id, earlier.workspace
-
-
-async def _release_session(deps: FireDeps, task: ScheduledTask, session_id: str) -> None:
-    """Forget a recorded session the owner cannot use, so the next firing starts one."""
-    try:
-        await asyncio.to_thread(deps.scheduled_task_store.release_session, task.id, session_id)
-    except Exception:
-        _logger.exception(
-            "scheduled fire: could not clear session %s from task %s", session_id, task.id
-        )
 
 
 def _session_cost_usd(deps: FireDeps, conversation_id: str) -> float:
@@ -1668,8 +1657,23 @@ def _make_reuse_dispatch(deps: FireDeps) -> LaunchDispatch:
     """
 
     async def _dispatch(conv: Conversation, task: ScheduledTask) -> None:
-        from omnigent.server.routes.sessions import ensure_runner_connected
+        from omnigent.server.routes.sessions import (
+            _await_settled_managed_launch,
+            ensure_runner_connected,
+        )
 
+        launch = (
+            deps.managed_launches.get(conv.id)
+            if conv.host_id is None and deps.managed_launches is not None
+            else None
+        )
+        if launch is not None:
+            # The first run's sandbox is still provisioning. Wait for it the way a
+            # user's message does, then read the host and workspace it bound.
+            await _await_settled_managed_launch(launch)
+            conv = (
+                await asyncio.to_thread(deps.conversation_store.get_conversation, conv.id) or conv
+            )
         runner_client, conv = await ensure_runner_connected(
             session_id=conv.id,
             conv=conv,

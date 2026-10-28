@@ -278,37 +278,58 @@ class _HeldConversationStore(_ConversationStore):
 
     def __init__(self) -> None:
         super().__init__()
-        self.first_create_started = threading.Event()
+        self.first_started = threading.Event()
         self.release_first = threading.Event()
 
     def create_conversation(self, **kwargs: Any) -> _FakeConversation:
-        if not self.first_create_started.is_set():
-            self.first_create_started.set()
+        if not self.first_started.is_set():
+            self.first_started.set()
             assert self.release_first.wait(10)
         return super().create_conversation(**kwargs)
 
 
-async def test_a_run_never_finds_a_recorded_first_session_that_does_not_exist(store) -> None:
-    """A first session is recorded once it exists, so a run that fires while
-    another first run is creating one starts its own; the run that records
-    second deletes its session and is skipped."""
+class _HeldPermissionStore(FakePermissionStore):
+    """Holds the first owner grant until released, so another run can fire meanwhile."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_started = threading.Event()
+        self.release_first = threading.Event()
+
+    def grant(self, user_id: str, conversation_id: str, level: int) -> Any:
+        if not self.first_started.is_set():
+            self.first_started.set()
+            assert self.release_first.wait(10)
+        return super().grant(user_id, conversation_id, level)
+
+
+@pytest.mark.parametrize("held", ["creating the session", "granting its owner"])
+async def test_a_run_never_finds_a_recorded_first_session_it_cannot_continue(store, held) -> None:
+    """A first session is recorded once it exists and its owner can use it, so a
+    run that fires meanwhile starts its own; the run that records second deletes
+    its session and is skipped."""
     claimed = _claim(store, session_mode="continue")
     second = _second_claim(store, claimed)
-    conversations = _HeldConversationStore()
+    conversations = (
+        _HeldConversationStore() if held == "creating the session" else _ConversationStore()
+    )
+    permissions = _HeldPermissionStore() if held == "granting its owner" else FakePermissionStore()
+    gate = conversations if held == "creating the session" else permissions
     executor = ClaimedRunExecutor(
-        _deps(store, conversation_store=conversations), launch_dispatch=AsyncMock()
+        _deps(store, conversation_store=conversations, permission_store=permissions),
+        launch_dispatch=AsyncMock(),
     )
 
     first = asyncio.create_task(executor.fire(claimed.task, claimed.lease))
-    assert await asyncio.to_thread(conversations.first_create_started.wait, 10)
+    assert await asyncio.to_thread(gate.first_started.wait, 10)
     assert store.get(claimed.task.id).session_id is None
     await executor.fire(store.get(claimed.task.id), second)
-    conversations.release_first.set()
+    gate.release_first.set()
     await first
 
-    kept, discarded = conversations.ids
-    assert conversations.deleted == [discarded]
-    assert store.get(claimed.task.id).session_id == kept
+    kept = store.get(claimed.task.id).session_id
+    [discarded] = conversations.deleted
+    assert sorted(conversations.ids) == sorted([kept, discarded]) and kept != discarded
     outcomes = sorted((run.status, run.error_code) for run in _runs(store, claimed.task))
     assert outcomes == [("running", None), ("skipped", "continued_session_busy")]
 

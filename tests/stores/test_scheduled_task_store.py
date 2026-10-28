@@ -2249,16 +2249,6 @@ def test_adopt_session_records_only_an_unchanged_continue_task_without_one(
     assert store.adopt_session(continuing.id, _uid("c4"), snapshot=adopted) == "stale"
 
 
-def test_release_session_clears_only_the_session_it_names(
-    store: SqlAlchemyScheduledTaskStore,
-) -> None:
-    task = _session_task(store, "st_release", session_mode="continue", session_id=_uid("c1"))
-    store.release_session(task.id, _uid("other"))
-    assert store.get(task.id).session_id == _uid("c1")
-    store.release_session(task.id, _uid("c1"))
-    assert store.get(task.id).session_id is None
-
-
 def test_an_executor_records_succeeded_for_a_prompt_delivered_into_a_session(
     store: SqlAlchemyScheduledTaskStore,
 ) -> None:

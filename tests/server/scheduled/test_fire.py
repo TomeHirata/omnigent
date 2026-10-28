@@ -133,7 +133,6 @@ class FakeScheduledTaskStore:
         self.run_updates: list[dict[str, Any]] = []
         self.adopted: list[tuple[str, str]] = []
         self.adopt_outcome = "adopted"
-        self.released: list[tuple[str, str]] = []
 
     def get(self, scheduled_task_id: str) -> ScheduledTask | None:
         self.get_workspace_ids.append(current_workspace_id())
@@ -177,9 +176,6 @@ class FakeScheduledTaskStore:
     ) -> str:
         self.adopted.append((scheduled_task_id, session_id))
         return self.adopt_outcome
-
-    def release_session(self, scheduled_task_id: str, session_id: str) -> None:
-        self.released.append((scheduled_task_id, session_id))
 
     def get_running_run_by_conversation(self, conversation_id: str) -> Any:
         if conversation_id in self.running_runs:
@@ -2432,20 +2428,20 @@ async def test_a_first_run_that_cannot_create_its_session_records_none() -> None
 
     await _fire_once(_deps(store, conversation_store=conv_store))
 
-    assert (store.adopted, store.released) == ([], [])
+    assert store.adopted == []
     assert [(run["status"], run["error_code"]) for run in store.runs] == [
         ("failed", "session_create_failed")
     ]
 
 
 @pytest.mark.asyncio
-async def test_a_first_run_whose_owner_grant_fails_releases_its_session() -> None:
-    """The owner cannot use that session, so the next run starts another."""
+async def test_a_first_run_whose_owner_grant_fails_records_no_session() -> None:
+    """A session is recorded only once its owner can use it, so the next run starts another."""
     store = FakeScheduledTaskStore(rows={"task_1": _task(session_mode="continue")})
 
     await _fire_once(_deps(store, permission_store=FakePermissionStore(fail_grant=True)))
 
-    assert store.adopted and store.released == store.adopted
+    assert store.adopted == []
     assert [(run["status"], run["error_code"]) for run in store.runs] == [
         ("failed", "owner_grant_failed")
     ]
@@ -2757,6 +2753,42 @@ async def test_continue_with_budget_cleared_drops_the_earlier_cap() -> None:
 
     assert policy_store.deleted == ["pol_earlier", fire_mod._cost_budget_policy_id("conv_prev")]
     assert len(policy_store.created) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_continue_waits_for_the_first_sandbox_still_provisioning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The prompt is sent once the first run's sandbox binds, as a user's message would be."""
+    from omnigent.server.managed_hosts import ManagedLaunchTracker
+    from omnigent.server.routes import sessions
+
+    tracker = ManagedLaunchTracker()
+    tracker.begin("conv_prev")
+    conv_store = _ExistingConversationStore(_continued_session(host_id=None, workspace=None))
+    reached: list[str | None] = []
+
+    async def _connected(*, conv: Any, **_: Any) -> tuple[object, Any]:
+        # Stands in for the runner wake path, which this test does not exercise.
+        reached.append(conv.host_id)
+        return object(), conv
+
+    monkeypatch.setattr(sessions, "ensure_runner_connected", _connected)
+    monkeypatch.setattr(fire_mod, "_send_prompt", AsyncMock())
+    store = FakeScheduledTaskStore(rows={"task_1": _continuing_task()})
+    dispatch = fire_mod._make_reuse_dispatch(
+        _deps(store, conversation_store=conv_store, managed_launches=tracker)
+    )
+
+    sending = asyncio.create_task(dispatch(conv_store.existing["conv_prev"], _continuing_task()))
+    await asyncio.sleep(0.05)
+    assert not sending.done() and reached == []
+    conv_store.existing["conv_prev"] = _continued_session(host_id="host_box", workspace="/ws")
+    tracker.finish("conv_prev")
+    await sending
+
+    assert reached == ["host_box"]
+    fire_mod._send_prompt.assert_awaited_once()
 
 
 @pytest.mark.asyncio
