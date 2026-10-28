@@ -98,6 +98,11 @@ export interface ScheduledTaskRun {
    */
   conversationStatus: string | null;
   /**
+   * When the caller last saw the conversation (epoch seconds), as `viewer_last_seen` in
+   * `GET /v1/sessions`; `null` if never, or for runs without a conversation.
+   */
+  viewerLastSeen: number | null;
+  /**
    * Whether the caller has explicitly marked this conversation unread (server-side
    * `viewer_unread`); `null` for runs without a conversation. Hydrates
    * `useUnseenConversations` on load so the dot can be computed without per-row fetches.
@@ -200,6 +205,7 @@ interface ScheduledTaskRunWire {
   error_code: string | null;
   conversation_updated_at: number | null;
   conversation_status: string | null;
+  viewer_last_seen: number | null;
   viewer_unread: boolean | null;
 }
 
@@ -281,6 +287,7 @@ function runFromWire(wire: ScheduledTaskRunWire): ScheduledTaskRun {
     errorCode: wire.error_code,
     conversationUpdatedAt: wire.conversation_updated_at ?? null,
     conversationStatus: wire.conversation_status ?? null,
+    viewerLastSeen: wire.viewer_last_seen ?? null,
     viewerUnread: wire.viewer_unread ?? null,
   };
 }

@@ -1373,6 +1373,7 @@ async def test_list_runs_returns_history_for_owned_task(
     # The run's session doesn't exist, so it carries no session read state.
     assert newest["conversation_updated_at"] is None
     assert newest["conversation_status"] is None
+    assert newest["viewer_last_seen"] is None
     assert newest["viewer_unread"] is None
 
 
@@ -1416,9 +1417,10 @@ async def test_list_runs_includes_conversation_read_state_fields(
     conv = conv_store.create_conversation(conversation_id=uuid.uuid4().hex)
     conv_store.set_session_live_status(conv.id, "idle")
     _set_read_state("alice@example.com", conv.id, conv.updated_at - 1, True)
-    # A known session the viewer never flagged, waiting on its harness.
+    # A known session the viewer saw but never flagged, waiting on its harness.
     waiting = conv_store.create_conversation(conversation_id=uuid.uuid4().hex)
     conv_store.set_session_live_status(waiting.id, "waiting")
+    _set_read_state("alice@example.com", waiting.id, 1_700_000_100, False)
 
     succeeded_id = uuid.uuid4().hex
     running_id = uuid.uuid4().hex
@@ -1457,18 +1459,21 @@ async def test_list_runs_includes_conversation_read_state_fields(
     succ = runs[succeeded_id]
     assert succ["conversation_updated_at"] == conv_store.get_conversation(conv.id).updated_at
     assert succ["conversation_status"] == "idle"
+    assert succ["viewer_last_seen"] == conv.updated_at - 1
     assert succ["viewer_unread"] is True
 
     # Status reads as the sessions list reports it ("waiting" is "running"), and
     # an unflagged session is explicitly not unread rather than unknown.
     running = runs[running_id]
     assert running["conversation_status"] == "running"
+    assert running["viewer_last_seen"] == 1_700_000_100
     assert running["viewer_unread"] is False
 
     # The skipped run (no conversation_id) gets null for all three fields.
     skip = runs[skipped_id]
     assert skip["conversation_updated_at"] is None
     assert skip["conversation_status"] is None
+    assert skip["viewer_last_seen"] is None
     assert skip["viewer_unread"] is None
 
 

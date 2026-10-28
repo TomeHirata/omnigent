@@ -209,6 +209,7 @@ def _run_to_response(
     *,
     conversation_updated_at: int | None = None,
     conversation_status: str | None = None,
+    viewer_last_seen: int | None = None,
     viewer_unread: bool | None = None,
 ) -> dict[str, Any]:
     """Serialize a :class:`ScheduledTaskRun` to a JSON-safe dict.
@@ -223,6 +224,9 @@ def _run_to_response(
         reports it (``"idle"``, ``"running"`` or ``"failed"``; waiting and
         booting read as running), without that list's sub-agent roll-up. ``None``
         for runs without a conversation.
+    :param viewer_last_seen: When the caller last saw the conversation (epoch
+        seconds), or ``None`` if never or for runs without a conversation. Same
+        value as ``viewer_last_seen`` in ``GET /v1/sessions``.
     :param viewer_unread: The caller's ``viewer_unread`` flag for the
         conversation (in-memory read-state explicit-unread), or ``None`` for
         runs without a conversation. Hydrates ``useUnseenConversations`` on load
@@ -239,6 +243,7 @@ def _run_to_response(
         "error_code": run.error_code,
         "conversation_updated_at": conversation_updated_at,
         "conversation_status": conversation_status,
+        "viewer_last_seen": viewer_last_seen,
         "viewer_unread": viewer_unread,
     }
 
@@ -591,7 +596,7 @@ def create_scheduled_tasks_router(
         for r in runs:
             if r.conversation_id is not None and r.conversation_id in convs:
                 conv = convs[r.conversation_id]
-                _last_seen, explicit_unread = _read_state_entry(viewer_id, r.conversation_id)
+                last_seen, explicit_unread = _read_state_entry(viewer_id, r.conversation_id)
                 run_rows.append(
                     _run_to_response(
                         r,
@@ -599,6 +604,7 @@ def create_scheduled_tasks_router(
                         conversation_status=_list_status_with_starting(
                             _session_status_from_cache(conv.id, conv.live_status), conv.id
                         ),
+                        viewer_last_seen=last_seen,
                         viewer_unread=explicit_unread,
                     )
                 )

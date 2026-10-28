@@ -131,11 +131,11 @@ export function hasUnsettledRun(runs: ScheduledTaskRun[] | undefined): boolean {
  * component mounting this hook is mounted — TanStack Query tears the interval
  * down on unmount, so navigating away ends it with no manual cleanup.
  *
- * A run stuck in `running` (host died mid-turn) keeps the interval alive while
- * the page stays open. That is deliberate and self-limiting: each poll is a READ
- * of the runs endpoint, which is exactly what triggers the server's
- * lazy-on-read stale-run backstop (`force_fail_stale_runs`) that force-fails the
- * row and lets polling stop.
+ * A run row stuck in `running` (host died mid-turn) keeps the interval alive
+ * while the page stays open, until a poll's read triggers the server's stale-run
+ * backstop (`force_fail_stale_runs`) and fails the row. That backstop doesn't
+ * settle the run's session, though: a session that stays running or waiting
+ * keeps the page polling for as long as it's open.
  *
  * @param awaitingRun Whether a "Run now" was just fired and its row has not
  *     appeared yet. Load-bearing: `POST /run` returns 202 and writes the row a

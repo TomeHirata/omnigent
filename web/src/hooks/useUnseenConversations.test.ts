@@ -188,6 +188,37 @@ describe("seedRunUnreadBaseline", () => {
   });
 });
 
+describe("isConversationUnread", () => {
+  const SERVER_READ = { lastSeen: 5_000, unread: false };
+
+  it("applies the server's read state when this client has none", async () => {
+    const mod = await loadFresh();
+    expect(mod.isConversationUnread("conv-1", 5_001, "idle", SERVER_READ)).toBe(true);
+    expect(mod.isConversationUnread("conv-1", 5_000, "idle", SERVER_READ)).toBe(false);
+    expect(mod.isConversationUnread("conv-1", 5_001, "running", SERVER_READ)).toBe(false);
+    expect(mod.isConversationUnread("conv-1", 1, "idle", { lastSeen: null, unread: true })).toBe(
+      true,
+    );
+    // Never seen anywhere and never flagged: read, as the sidebar seeds it.
+    expect(
+      mod.isConversationUnread("conv-1", 5_001, "idle", { lastSeen: null, unread: null }),
+    ).toBe(false);
+  });
+
+  it("prefers this client's read state over the server snapshot", async () => {
+    const mod = await loadFresh();
+    mod.seedReadState([]);
+    mod.markConversationSeen("conv-1", 6_000);
+    expect(
+      mod.isConversationUnread("conv-1", 5_500, "idle", { lastSeen: 5_000, unread: true }),
+    ).toBe(false);
+    mod.markConversationUnread("conv-2", 5_000);
+    expect(
+      mod.isConversationUnread("conv-2", 5_000, "idle", { lastSeen: 9_000, unread: false }),
+    ).toBe(true);
+  });
+});
+
 describe("markConversationUnread", () => {
   it("pins the baseline just below updated_at and flags + PUTs unread", async () => {
     const mod = await loadFresh();

@@ -4,7 +4,7 @@
 // Custom frequencies (with INTERVAL, multi weekday/month-day selects, and
 // yearly BYMONTH), plus the 1-hour-floor validation.
 
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   describeRunFailure,
   describeSchedule,
@@ -460,6 +460,27 @@ describe("formatRunTimestamp", () => {
   // build the run instants relative to NOW's local midnight to stay
   // zone-independent.
   const NOW = new Date("2026-07-27T15:30:00");
+
+  // The formatter uses the runtime's locale; pin it so the labels don't depend
+  // on the machine running the tests.
+  beforeEach(() => {
+    const { toLocaleTimeString, toLocaleDateString } = Date.prototype;
+    vi.spyOn(Date.prototype, "toLocaleTimeString").mockImplementation(function (
+      this: Date,
+      _locales?: Intl.LocalesArgument,
+      options?: Intl.DateTimeFormatOptions,
+    ) {
+      return toLocaleTimeString.call(this, "en-US", options);
+    });
+    vi.spyOn(Date.prototype, "toLocaleDateString").mockImplementation(function (
+      this: Date,
+      _locales?: Intl.LocalesArgument,
+      options?: Intl.DateTimeFormatOptions,
+    ) {
+      return toLocaleDateString.call(this, "en-US", options);
+    });
+  });
+  afterEach(() => vi.restoreAllMocks());
 
   function atLocal(daysAgo: number, hour: number, minute: number): number {
     const d = new Date(NOW.getFullYear(), NOW.getMonth(), NOW.getDate() - daysAgo, hour, minute, 0);

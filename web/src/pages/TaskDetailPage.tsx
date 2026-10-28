@@ -37,9 +37,7 @@ import {
   useUpdateScheduledTask,
 } from "@/hooks/useScheduledTasks";
 import {
-  hasLocalReadState,
-  isConversationUnseen,
-  isExplicitlyUnread,
+  isConversationUnread,
   seedRunUnreadBaseline,
   useUnseenTick,
 } from "@/hooks/useUnseenConversations";
@@ -79,6 +77,7 @@ export function TaskDetailPage() {
     data: runs,
     isLoading: runsLoading,
     isError: runsError,
+    isFetchedAfterMount: runsFetchedAfterMount,
   } = useScheduledTaskRuns(taskId, taskId !== "", awaitingRunRow);
 
   const updateMutation = useUpdateScheduledTask();
@@ -125,14 +124,15 @@ export function TaskDetailPage() {
   //   1. ONCE-PER-SESSION: `autoMarkedRef` tracks every conversationId this
   //      component has already auto-marked. Re-marking on a subsequent poll
   //      would resurrect the dot for a run the user already opened.
-  //   2. NO-RETROACTIVE: the ref is seeded on the FIRST non-empty runs response
-  //      with all currently-terminal ids, so pre-existing history is never
-  //      mass-marked pink on page load. Only runs that appear as terminal AFTER
-  //      the baseline is established trigger a mark.
+  //   2. NO-RETROACTIVE: the ref is seeded from the first runs response fetched
+  //      after this page mounts, with all currently-terminal ids, so history is
+  //      never mass-marked on load. Cached data doesn't count: a run cached as
+  //      running may have finished while the page was closed. Only runs that
+  //      turn terminal after the baseline trigger a mark.
   const autoMarkedRef = useRef<Set<string>>(new Set());
   const baselineSeededRef = useRef(false);
   useEffect(() => {
-    if (!runs) return;
+    if (!runs || !runsFetchedAfterMount) return;
 
     if (!baselineSeededRef.current) {
       // Seed the baseline from the initial run list — skip all currently-terminal
@@ -163,7 +163,7 @@ export function TaskDetailPage() {
         seedRunUnreadBaseline(run.conversationId, run.conversationUpdatedAt);
       }
     }
-  }, [runs]);
+  }, [runs, runsFetchedAfterMount]);
 
   // Resolve the agent + host display labels from their catalogs. Both are
   // best-effort: an unknown id falls back to the raw id (agent) or a friendly
@@ -452,28 +452,21 @@ function ConfigField({ label, value, testId }: { label: string; value: string; t
  * Resolve whether a run's conversation is genuinely UNREAD from the enriched
  * run payload — with zero per-row session GETs.
  *
- * The runs endpoint returns `conversationUpdatedAt`, `conversationStatus`, and
- * `viewerUnread` (batched server-side). This client's read state wins whenever
- * it has any: the run payload can be up to a poll old, so its `viewerUnread`
- * only fills in for a conversation the client knows nothing about.
- * `useUnseenTick()` re-renders the instant the user opens the thread (marking
- * it read in the local mirror) so the dot clears without a refetch.
+ * The runs endpoint returns the session's read state alongside each run
+ * (batched server-side); `isConversationUnread` applies the sidebar's rules to
+ * it. `useUnseenTick()` re-renders the instant the user opens the thread
+ * (marking it read in the local mirror) so the dot clears without a refetch.
  */
 function useRunUnread(run: ScheduledTaskRun): boolean {
   // Re-render when the read-state mirror changes (open thread → mark read).
   useUnseenTick();
   if (run.conversationId === null || run.conversationUpdatedAt === null) return false;
-  if (hasLocalReadState(run.conversationId)) {
-    return (
-      isExplicitlyUnread(run.conversationId) ||
-      isConversationUnseen(
-        run.conversationId,
-        run.conversationUpdatedAt,
-        run.conversationStatus ?? undefined,
-      )
-    );
-  }
-  return run.viewerUnread === true;
+  return isConversationUnread(
+    run.conversationId,
+    run.conversationUpdatedAt,
+    run.conversationStatus ?? undefined,
+    { lastSeen: run.viewerLastSeen, unread: run.viewerUnread },
+  );
 }
 
 /**
@@ -606,7 +599,10 @@ function RunStatusIcon({ run, unread }: { run: ScheduledTaskRun; unread: boolean
   }
   if (run.status === "starting" || run.status === "running") {
     return (
-      <IndicatorWithTooltip tooltip={run.status === "starting" ? "Starting" : "Running"}>
+      <IndicatorWithTooltip
+        tooltip={run.status === "starting" ? "Starting" : "Running"}
+        announce={false}
+      >
         <Loader2Icon
           data-testid="run-status-icon"
           data-run-icon={run.status}
@@ -663,9 +659,12 @@ function isUnsuccessfulRun(run: ScheduledTaskRun): boolean {
  * directly (icon/dot) rather than a nested button. */
 function IndicatorWithTooltip({
   tooltip,
+  announce = true,
   children,
 }: {
   tooltip: string;
+  /** Also put the label in the row's accessible text; off where the row already shows it. */
+  announce?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -674,7 +673,10 @@ function IndicatorWithTooltip({
         {/* A span wrapper keeps the trigger focusable/hoverable for both the
             svg icon and the pure-CSS dot span. Vertical alignment to the
             timestamp baseline is set per-child (icons vs. the smaller dot). */}
-        <span className="inline-flex shrink-0">{children}</span>
+        <span className="inline-flex shrink-0">
+          {children}
+          {announce && <span className="sr-only">{tooltip}</span>}
+        </span>
       </TooltipTrigger>
       <TooltipContent data-testid="run-status-tooltip">{tooltip}</TooltipContent>
     </Tooltip>

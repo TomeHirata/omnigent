@@ -123,13 +123,8 @@ export function ScheduledTaskRow({
         "group relative flex items-center gap-3 rounded-xl border border-border bg-card py-3 pr-12 pl-4 transition-colors hover:bg-muted/40",
       )}
     >
-      {/* The card BODY is the navigation affordance. `after:absolute
-          after:inset-0` stretches its hit area over the whole card (behind the
-          ⋯ trigger, which sits above via its own stacking) so a click anywhere
-          on the row except the menu opens the detail page — while keeping ONE
-          real interactive element for a11y (no wrapping the ⋯ button inside
-          it). `text-left` + `min-w-0` keep the truncation behavior identical to
-          the plain div. The detail page ships behind automations_v2. */}
+      {/* Stretch the body's hit area across the card while keeping the menu
+          trigger above it. */}
       {detailPageEnabled ? (
         <button
           type="button"

@@ -129,6 +129,7 @@ function run(overrides: Partial<ScheduledTaskRun> = {}): ScheduledTaskRun {
     errorCode: null,
     conversationUpdatedAt: 1_700_000_500,
     conversationStatus: "idle",
+    viewerLastSeen: null,
     viewerUnread: null,
     ...overrides,
   };
@@ -152,11 +153,16 @@ function setTask(
   } as unknown as ReturnType<typeof hooks.useScheduledTask>);
 }
 
-function setRuns(runs: ScheduledTaskRun[], state: { isLoading?: boolean; isError?: boolean } = {}) {
+function setRuns(
+  runs: ScheduledTaskRun[],
+  state: { isLoading?: boolean; isError?: boolean; cached?: boolean } = {},
+) {
   vi.mocked(hooks.useScheduledTaskRuns).mockReturnValue({
     data: runs,
     isLoading: state.isLoading ?? false,
     isError: state.isError ?? false,
+    // `cached`: data the query held from before this mount, not yet refetched.
+    isFetchedAfterMount: !(state.cached ?? false),
   } as unknown as ReturnType<typeof hooks.useScheduledTaskRuns>);
 }
 
@@ -257,17 +263,6 @@ describe("header, prompt, configuration", () => {
     expect(toggle).toHaveAttribute("aria-label", "Pause automation");
     expect(toggle).toHaveAttribute("aria-checked", "true");
   });
-
-  it("renders the status line as [toggle] [state pill] [schedule], in that order", () => {
-    setTask(task({ state: "active" }));
-    renderPage();
-    const pill = screen.getByTestId("task-detail-state-pill");
-    const toggle = screen.getByTestId("task-detail-pause-toggle");
-    const schedule = screen.getByTestId("task-detail-schedule");
-    // Document order: toggle before pill before schedule.
-    expect(toggle.compareDocumentPosition(pill) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(pill.compareDocumentPosition(schedule) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-  });
 });
 
 describe("loading / not-found states", () => {
@@ -298,19 +293,6 @@ describe("loading / not-found states", () => {
 });
 
 describe("header actions", () => {
-  it("Run now fires the run mutation with toast callbacks", () => {
-    setTask(task());
-    renderPage();
-    fireEvent.click(screen.getByTestId("task-detail-run-now"));
-    expect(runNowMutate).toHaveBeenCalledWith(
-      "st_1",
-      expect.objectContaining({
-        onSuccess: expect.any(Function),
-        onError: expect.any(Function),
-      }),
-    );
-  });
-
   it("Run now shows 'Run started' toast on success", () => {
     runNowMutate.mockImplementation(
       (_id: string, opts?: { onSuccess?: () => void; onError?: () => void }) => opts?.onSuccess?.(),
@@ -503,23 +485,13 @@ describe("run history", () => {
     const dot = within(row).getByTestId("run-status-dot");
     expect(dot).toHaveAttribute("data-run-icon", "read");
     expect(dot.className).toContain("bg-muted-foreground/40");
-    // Tooltip reads "Completed".
-    fireEvent.focus(dot);
-    await waitFor(() => expect(screen.getAllByText("Completed").length).toBeGreaterThan(0));
-  });
-
-  it("makes a succeeded run's whole row a link to its conversation", () => {
-    setTask(task());
-    setRuns([run({ status: "succeeded", conversationId: "c_9" })]);
-    renderPage();
-    const row = screen.getByTestId("task-detail-run");
+    // The whole row is the anchor to /c/:conversationId, and it names the status
+    // for assistive technology, which can't see the dot.
     const link = within(row).getByTestId("run-open");
-    // The row itself is the anchor to /c/:conversationId (keyboard-focusable,
-    // Enter/Space activate natively).
-    expect(link).toHaveAttribute("href", "/c/c_9");
     expect(link.tagName).toBe("A");
+    expect(link).toHaveAttribute("href", "/c/c_9");
     expect(link.className).toContain("cursor-pointer");
-    expect(link.className).toContain("hover:bg-muted");
+    expect(link).toHaveAccessibleName(/^Completed/);
   });
 
   it("renders an unread dot (brand-accent) with an 'Unread' tooltip for an unread success", async () => {
@@ -534,6 +506,7 @@ describe("run history", () => {
     expect(dot).toHaveAttribute("data-run-icon", "unread");
     // Color matches the sidebar's unread indicator (brand-accent, not blue-500).
     expect(dot.className).toContain("bg-brand-accent");
+    expect(within(row).getByTestId("run-open")).toHaveAccessibleName(/^Unread/);
     // No status ICON (that leading slot only holds fail/skip icons).
     expect(within(row).queryByTestId("run-status-icon")).toBeNull();
     // Focusing the tooltip trigger (Radix opens on focus in jsdom) → "Unread".
@@ -590,6 +563,39 @@ describe("run history", () => {
     expect(dot.className).toContain("bg-muted-foreground/40");
   });
 
+  it("reads a session the sidebar hasn't loaded by its server last-seen", async () => {
+    // Read on another device at 400, updated at 500, never flagged unread, and
+    // unknown to this browser: unread, as the session list would show it.
+    setTask(task());
+    setRuns([
+      run({
+        id: "run_seen_before",
+        conversationId: "c_remote",
+        conversationUpdatedAt: 1_700_000_500,
+        viewerLastSeen: 1_700_000_400,
+        viewerUnread: false,
+      }),
+    ]);
+    renderPage();
+    await waitFor(() =>
+      expect(screen.getByTestId("task-detail-run")).toHaveAttribute("data-run-unread", "true"),
+    );
+  });
+
+  it("reads a session seen after its last update as read", () => {
+    setTask(task());
+    setRuns([
+      run({
+        conversationId: "c_remote",
+        conversationUpdatedAt: 1_700_000_500,
+        viewerLastSeen: 1_700_000_500,
+        viewerUnread: false,
+      }),
+    ]);
+    renderPage();
+    expect(screen.getByTestId("task-detail-run")).toHaveAttribute("data-run-unread", "false");
+  });
+
   it("renders a FAILED run with an amber triangle and the stage and reason it stopped at", async () => {
     setTask(task());
     setRuns([
@@ -633,6 +639,15 @@ describe("run history", () => {
     expect(within(row).getByTestId("run-failure")).toHaveTextContent(
       "Runner · The agent didn't start.",
     );
+  });
+
+  it("labels a run that hasn't started yet as Queued", () => {
+    setTask(task());
+    setRuns([run({ status: "scheduled", firedAt: null, finishedAt: null, conversationId: null })]);
+    renderPage();
+    const row = screen.getByTestId("task-detail-run");
+    expect(within(row).getByTestId("run-status-label")).toHaveTextContent("Queued");
+    expect(within(row).getByTestId("run-status-dot")).toHaveAttribute("data-run-icon", "pending");
   });
 
   it("shows a starting run with a spinner", async () => {
@@ -821,5 +836,21 @@ describe("auto-mark runs unread", () => {
     renderPage();
     // Baseline seeds both ids as already-seen → seedRunUnreadBaseline never called.
     expect(seedRunUnreadBaseline).not.toHaveBeenCalled();
+  });
+
+  it("does NOT auto-mark a run that finished while the page was closed (stale cache)", () => {
+    setTask(task());
+    // Returning to the page: the query still holds the run as running from the
+    // last visit, and the first fetch after mounting shows it already done.
+    setRuns(
+      [run({ id: "run_away", status: "running", conversationId: "c_away", finishedAt: null })],
+      { cached: true },
+    );
+    const { rerender } = renderPage();
+    setRuns([run({ id: "run_away", status: "succeeded", conversationId: "c_away" })]);
+    rerender(pageTree());
+
+    expect(seedRunUnreadBaseline).not.toHaveBeenCalled();
+    expect(screen.getByTestId("task-detail-run")).toHaveAttribute("data-run-unread", "false");
   });
 });

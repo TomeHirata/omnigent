@@ -25,24 +25,17 @@ that only the live server path can exercise.
 
 from __future__ import annotations
 
-import os
-import signal
-import subprocess
-import time
 from collections.abc import Iterator
 
-import httpx
 import pytest
 from playwright.sync_api import Page, expect
 
 from omnigent.db.utils import builtin_agent_id
 from omnigent.native.native_coding_agents import CLAUDE_NATIVE_AGENT_NAME
-from tests._helpers.compat import apply_server_env, compat_server_cwd, server_executable
-from tests.e2e_ui.conftest import _BUILD_OUTPUT, _REPO_ROOT, _find_free_port
+from tests._helpers.compat import compat_server_cwd, server_executable, server_pythonpath
+from tests._helpers.live_server import isolated_local_server
+from tests.e2e_ui.conftest import _BUILD_OUTPUT, _REPO_ROOT
 from tests.e2e_ui.scheduled.test_scheduled_tasks_page import _create_task, _row_by_name
-
-# The dedicated server cold-boots alongside the suite's shared one.
-_SERVER_BOOT_TIMEOUT_S = 180.0
 
 
 @pytest.fixture(scope="module")
@@ -50,76 +43,24 @@ def automations_v2_server(
     built_spa: None,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> Iterator[str]:
-    """Spawn a server with ``OMNIGENT_FEATURES=automations_v2`` and yield its URL.
+    """Run a server with ``OMNIGENT_FEATURES=automations_v2`` and yield its URL.
 
     It starts no runner and connects no host: every Run now here fails at the
     host stage, which is what the journey checks.
     """
-    port = _find_free_port()
-    server_tmp = tmp_path_factory.mktemp("automations_v2_server")
-    log_path = server_tmp / "server.log"
-    artifact_dir = server_tmp / "artifacts"
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    env = {
-        **os.environ,
-        "OMNIGENT_FEATURES": "automations_v2",
-        "OMNIGENT_WEB_UI_DIST": str(_BUILD_OUTPUT),
-    }
-    apply_server_env(env, _REPO_ROOT)
-    log_handle = open(log_path, "w")  # noqa: SIM115 — lives for the Popen; closed in finally
-    proc = subprocess.Popen(
-        [
-            server_executable(),
-            "-c",
-            "from omnigent.cli import main; main()",
-            "server",
-            "--host",
-            "127.0.0.1",
-            "--port",
-            str(port),
-            "--database-uri",
-            f"sqlite:///{server_tmp / 'test.db'}",
-            "--artifact-location",
-            str(artifact_dir),
-        ],
-        env=env,
+    with isolated_local_server(
+        tmp_path_factory.mktemp("automations_v2_server"),
+        env={
+            "OMNIGENT_FEATURES": "automations_v2",
+            "OMNIGENT_WEB_UI_DIST": str(_BUILD_OUTPUT),
+            "PYTHONPATH": server_pythonpath(_REPO_ROOT),
+        },
+        executable=server_executable(),
         cwd=compat_server_cwd(),
-        stdout=log_handle,
-        stderr=subprocess.STDOUT,
-    )
-    base_url = f"http://127.0.0.1:{port}"
-    try:
-        deadline = time.monotonic() + _SERVER_BOOT_TIMEOUT_S
-        ready = False
-        last_error = "not polled yet"
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                last_error = f"server exited early with code {proc.returncode}"
-                break
-            try:
-                # trust_env=False: a CI HTTP(S) proxy must not intercept loopback.
-                if httpx.get(f"{base_url}/health", timeout=2, trust_env=False).status_code == 200:
-                    ready = True
-                    break
-            except httpx.HTTPError as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
-            time.sleep(0.5)
-        if not ready:
-            log_handle.flush()
-            raise RuntimeError(
-                f"automations_v2 server not healthy within {_SERVER_BOOT_TIMEOUT_S:.0f}s on "
-                f"{base_url} (last_error={last_error}).\n{log_path.read_text()[-3000:]}"
-            )
+        # Cold-boots alongside the suite's shared server.
+        health_timeout=180.0,
+    ) as base_url:
         yield base_url
-    finally:
-        if proc.poll() is None:
-            proc.send_signal(signal.SIGTERM)
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=10)
-        log_handle.close()
 
 
 def test_scheduled_task_detail_page_run_now_records_run_row(

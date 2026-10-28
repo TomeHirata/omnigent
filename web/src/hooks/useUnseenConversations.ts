@@ -275,11 +275,25 @@ export function seedRunUnreadBaseline(conversationId: string, updatedAt: number)
 }
 
 /**
- * True when this client holds read state for the conversation. It is newer
- * than any server snapshot fetched earlier, so callers prefer it.
+ * Unread state for a conversation whose read state the server sent outside the
+ * session list, e.g. with an automation's run history. This client's read state
+ * wins when it has any, as the sidebar does; it may be newer than that server
+ * snapshot. Otherwise the server's explicit unread and last-seen apply with the
+ * list's rules, so a session the sidebar hasn't loaded reads the same way.
  */
-export function hasLocalReadState(conversationId: string): boolean {
-  return lastSeenMap[conversationId] !== undefined || explicitlyUnread.has(conversationId);
+export function isConversationUnread(
+  conversationId: string,
+  updatedAt: number,
+  status: string | undefined,
+  server: { lastSeen: number | null; unread: boolean | null },
+): boolean {
+  if (lastSeenMap[conversationId] !== undefined || explicitlyUnread.has(conversationId)) {
+    return (
+      explicitlyUnread.has(conversationId) ||
+      isUnseenSince(lastSeenMap[conversationId], updatedAt, status)
+    );
+  }
+  return server.unread === true || isUnseenSince(server.lastSeen ?? undefined, updatedAt, status);
 }
 
 /**
@@ -379,10 +393,17 @@ export function isConversationUnseen(
   updatedAt: number,
   status: string | undefined,
 ): boolean {
+  return isUnseenSince(lastSeenMap[conversationId], updatedAt, status);
+}
+
+function isUnseenSince(
+  baseline: number | undefined,
+  updatedAt: number,
+  status: string | undefined,
+): boolean {
   if (status === "running" || status === undefined) return false;
-  const stored = lastSeenMap[conversationId];
-  if (stored === undefined) return false;
-  return updatedAt > stored;
+  if (baseline === undefined) return false;
+  return updatedAt > baseline;
 }
 
 /** True when the app window currently has focus (SSR-safe default true). */

@@ -1271,7 +1271,7 @@ describe("Sidebar session list", () => {
     expect(screen.getByTestId("scheduled-tasks-nav").className).toContain(
       "bg-[var(--sidebar-active)]",
     );
-    // New session must NOT be highlighted — it was wrongly lit before this fix.
+    // The detail route must not activate New session.
     expect(screen.getByTestId("new-chat-button").className).not.toContain(
       "bg-[var(--sidebar-active)]",
     );

@@ -129,6 +129,7 @@ describe("listScheduledTaskRuns", () => {
       // An older server sends no session read state.
       conversationUpdatedAt: null,
       conversationStatus: null,
+      viewerLastSeen: null,
       viewerUnread: null,
     });
   });
@@ -148,6 +149,7 @@ describe("listScheduledTaskRuns", () => {
             error_code: null,
             conversation_updated_at: 1_700_000_060,
             conversation_status: "idle",
+            viewer_last_seen: 1_700_000_055,
             viewer_unread: false,
           },
         ],
@@ -157,6 +159,7 @@ describe("listScheduledTaskRuns", () => {
     expect(run).toMatchObject({
       conversationUpdatedAt: 1_700_000_060,
       conversationStatus: "idle",
+      viewerLastSeen: 1_700_000_055,
       viewerUnread: false,
     });
   });

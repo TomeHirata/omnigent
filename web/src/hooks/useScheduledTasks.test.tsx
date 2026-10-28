@@ -1,7 +1,7 @@
 // Tests for the scheduled-tasks React-Query hooks: the list query shape, the
 // invalidate-on-success contract of the create / update / delete mutations, and
 // the status-aware run-history refetchInterval that drives a run row to its
-// terminal state live (replacing the old accelerated post-run-now poll).
+// terminal state live.
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
@@ -74,6 +74,7 @@ const RUN: api.ScheduledTaskRun = {
   errorCode: null,
   conversationUpdatedAt: 1_700_000_500,
   conversationStatus: "running",
+  viewerLastSeen: null,
   viewerUnread: false,
 };
 
@@ -202,9 +203,10 @@ function countRunRefetches(spy: { mock: { calls: unknown[][] } }) {
 }
 
 describe("hasUnsettledRun (the refetchInterval stop condition)", () => {
-  it("is true while a run row is still running or scheduled", () => {
+  it("is true while a run row is still scheduled, starting or running", () => {
     expect(hasUnsettledRun([RUNNING_RUN])).toBe(true);
     expect(hasUnsettledRun([{ ...RUN, status: "scheduled", conversationStatus: null }])).toBe(true);
+    expect(hasUnsettledRun([{ ...RUN, status: "starting", conversationStatus: null }])).toBe(true);
   });
 
   it("stays true while the run row is terminal but its CONVERSATION still runs", () => {
