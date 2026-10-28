@@ -596,12 +596,13 @@ export function InboxPage() {
     const replySending = replyStatus?.state === "sending";
     const replyAwaitingAnswer =
       replyStatus?.state === "sent" && !settledReplyIds.includes(sessionId);
-    // A send needs the current output to tell the agent's answer from it.
-    const previewLoading = previewQuery?.isPending !== false;
+    // A send records the current output to tell the agent's answer from it, so
+    // only a loaded preview will do; a failed fetch leaves no baseline.
+    const previewReady = previewQuery?.isSuccess === true;
     const showReplyField = canReply && !replyAwaitingAnswer;
     const sendIsPrimary = showReplyField && replyDraft.trim() !== "";
     const sendReply = () => {
-      if (!replyDraft.trim() || replySending || previewLoading) return;
+      if (!replyDraft.trim() || replySending || !previewReady) return;
       // One telemetry point for both the button and the keyboard shortcut.
       trackClick("inbox.unread.reply", "button");
       // Like the composer: an untouched retry reuses the failed id; editing drops it.
@@ -711,6 +712,11 @@ export function InboxPage() {
             preventsKeyboardSubmit={preventsKeyboardSubmit}
           />
         )}
+        {showReplyField && previewQuery?.isError && (
+          <p className="text-sm text-muted-foreground">
+            Couldn’t load the latest reply, so replying here is paused. Open the session to reply.
+          </p>
+        )}
         <InboxActions>
           <Button
             variant="outline"
@@ -756,7 +762,7 @@ export function InboxPage() {
               variant={sendIsPrimary ? "default" : "outline"}
               size="xs"
               className={sendIsPrimary ? PRIMARY_ACTION : OUTLINE_ACTION}
-              disabled={!replyDraft.trim() || replySending || previewLoading}
+              disabled={!replyDraft.trim() || replySending || !previewReady}
               onClick={sendReply}
             >
               {replySending ? (

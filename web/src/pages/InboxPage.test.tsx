@@ -957,6 +957,36 @@ describe("InboxPage replies", () => {
     await waitFor(() => expect(send).toBeEnabled());
   });
 
+  it("won't send until a preview loads, even after the preview fetch fails", async () => {
+    // WHY: a failed fetch carries no baseline; sending anyway would record
+    // `null` and read the next fetch's old reply as the agent's answer.
+    const row = unreadConversation();
+    vi.mocked(sessionsApi.fetchSessionItemsPage).mockRejectedValue(new Error("boom"));
+    const pushRows = renderWithRows([row]);
+
+    await screen.findByTestId("inbox-unread");
+    const item = expandUnread();
+    const box = within(item).getByRole("textbox", { name: /Reply to/ });
+    fireEvent.change(box, { target: { value: "Ship it" } });
+    // The preview query retries once before settling into its error state.
+    expect(
+      await within(item).findByText(/replying here is paused/, {}, { timeout: 3_000 }),
+    ).toBeInTheDocument();
+    const send = within(item).getByRole("button", { name: "Send" });
+    expect(send).toBeDisabled();
+    fireEvent.keyDown(box, { key: "Enter" });
+    fireEvent.click(send);
+    expect(sessionsApi.postEvent).not.toHaveBeenCalled();
+
+    // A later successful fetch supplies the baseline.
+    sessionItems({ ...assistantReply("Refactor done."), id: "item_done" });
+    pushRows([{ ...row, updated_at: row.updated_at + 1 }]);
+    await waitFor(() => expect(send).toBeEnabled());
+    expect(within(item).queryByText(/replying here is paused/)).not.toBeInTheDocument();
+    fireEvent.click(send);
+    await waitFor(() => expect(sessionsApi.postEvent).toHaveBeenCalledTimes(1));
+  });
+
   it("sends on Enter and leaves Shift+Enter to the textarea", async () => {
     const row = unreadConversation();
     vi.mocked(conversationsHook.useConversations).mockReturnValue(conversationsStub([row]));
