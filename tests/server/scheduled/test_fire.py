@@ -135,10 +135,15 @@ class FakeScheduledTaskStore:
         self.adopted: list[tuple[str, str]] = []
         self.adopt_outcome = "adopted"
         self.adopted_hosts: list[str | None] = []
+        # Fail adopt_session, after committing the session when ``adopt_commits``.
+        self.adopt_error: Exception | None = None
+        self.adopt_commits = False
 
     def get(self, scheduled_task_id: str) -> ScheduledTask | None:
         self.get_workspace_ids.append(current_workspace_id())
-        return self._rows.get(scheduled_task_id)
+        return self._rows.get(scheduled_task_id) or next(
+            (t for t in self._rows.values() if t.id == scheduled_task_id), None
+        )
 
     def update(self, scheduled_task_id: str, **kwargs: Any) -> ScheduledTask | None:
         self.update_workspace_ids.append(current_workspace_id())
@@ -183,6 +188,11 @@ class FakeScheduledTaskStore:
     ) -> str:
         self.adopted.append((scheduled_task_id, session_id))
         self.adopted_hosts.append(host_id)
+        if self.adopt_error is not None:
+            if self.adopt_commits:
+                key = next(k for k, t in self._rows.items() if t.id == scheduled_task_id)
+                self._rows[key] = replace(self._rows[key], session_id=session_id)
+            raise self.adopt_error
         return self.adopt_outcome
 
     def get_running_run_by_conversation(self, conversation_id: str) -> Any:
@@ -406,6 +416,31 @@ class FakePolicyStore:
 
     def get(self, policy_id: str, session_id: str) -> Any:
         return next((p for p in self._live(session_id) if p.id == policy_id), None)
+
+    def update(
+        self,
+        policy_id: str,
+        session_id: str,
+        *,
+        factory_params: dict[str, Any] | None = None,
+        enabled: bool | None = None,
+    ) -> Any:
+        row = next(
+            (
+                p
+                for p in self.created
+                if (p["policy_id"], p["session_id"]) == (policy_id, session_id)
+                and policy_id not in self.deleted
+            ),
+            None,
+        )
+        if row is None:
+            return None
+        if factory_params is not None:
+            row["factory_params"] = factory_params
+        if enabled is not None:
+            row["enabled"] = enabled
+        return SimpleNamespace(id=policy_id, name=row["name"])
 
     def delete(self, policy_id: str, session_id: str) -> bool:
         self.deleted.append(policy_id)
@@ -2430,6 +2465,29 @@ async def test_an_unpinned_first_run_pins_the_host_its_session_runs_on() -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("committed", [False, True])
+async def test_a_first_run_whose_session_record_fails_never_runs_unbound(committed: bool) -> None:
+    """Running anyway would put this run's work in a session later runs never see."""
+    conv_store = FakeConversationStore()
+    store = FakeScheduledTaskStore(rows={"task_1": _task(session_mode="continue")})
+    store.adopt_error = RuntimeError("connection reset")
+    store.adopt_commits = committed
+
+    launched = await _fire_once(_deps(store, conversation_store=conv_store))
+
+    if committed:
+        # The write landed before the error, so the session is the task's.
+        assert [conv.id for conv in launched] == ["conv_1"]
+        assert conv_store.deleted == []
+    else:
+        assert launched == []
+        assert conv_store.deleted == ["conv_1"]
+        assert [(run["status"], run["error_code"]) for run in store.runs] == [
+            ("failed", "session_record_failed")
+        ]
+
+
+@pytest.mark.asyncio
 async def test_a_first_run_skips_when_another_run_already_started_the_session() -> None:
     """The run that records its session second deletes it before anything ran in it."""
     conv_store = FakeConversationStore()
@@ -2749,7 +2807,7 @@ async def test_continue_sends_while_an_earlier_turn_is_still_going(live_status: 
 async def test_continue_budget_is_per_fire_on_top_of_session_spend() -> None:
     """The baseline is the spend the budget policy enforces, sub-agents included.
 
-    The earlier run's cap is replaced by the session's fixed id, without reading
+    The earlier run's cap is updated by the session's fixed id, without reading
     the session's policies.
     """
     conv_store = _ExistingConversationStore(
@@ -2775,10 +2833,12 @@ async def test_continue_budget_is_per_fire_on_top_of_session_spend() -> None:
 
     await _fire_once(_deps(store, conversation_store=conv_store, policy_store=policy_store))
 
+    # Updated in place, so a failed write would leave the earlier cap in force.
     assert policy_store.session_reads == 0
-    assert policy_store.deleted == [fire_mod._cost_budget_policy_id("conv_prev")]
-    assert policy_store.created[-1]["policy_id"] == fire_mod._cost_budget_policy_id("conv_prev")
-    assert policy_store.created[-1]["factory_params"] == {"max_cost_usd": 5.25}
+    assert policy_store.deleted == []
+    [cap] = policy_store.created
+    assert cap["policy_id"] == fire_mod._cost_budget_policy_id("conv_prev")
+    assert cap["factory_params"] == {"max_cost_usd": 5.25}
 
 
 def _seeded_budget(policy_store: Any, policy_id: str) -> None:
@@ -2814,11 +2874,35 @@ async def test_continue_fails_on_a_cost_cap_it_did_not_set() -> None:
 
 
 class _RacingPolicyStore(FakePolicyStore):
-    """Another run re-creates the fixed-id cap right after this run deletes it."""
+    """Another run creates the fixed-id cap between this run's update and its create."""
 
-    def delete(self, policy_id: str, session_id: str) -> bool:
-        self.deleted.append(policy_id)
-        return True
+    def update(self, policy_id: str, session_id: str, **_: Any) -> Any:
+        return None
+
+
+class _FailingUpdatePolicyStore(FakePolicyStore):
+    def update(self, policy_id: str, session_id: str, **_: Any) -> Any:
+        raise RuntimeError("policy store unavailable")
+
+
+@pytest.mark.asyncio
+async def test_continue_fails_when_its_cost_cap_cannot_be_set() -> None:
+    """The earlier cap stays in force and no prompt runs without the configured budget."""
+    conv_store = _ExistingConversationStore(_continued_session())
+    policy_store = _FailingUpdatePolicyStore()
+    _seeded_budget(policy_store, fire_mod._cost_budget_policy_id("conv_prev"))
+    store = FakeScheduledTaskStore(rows={"task_1": _continuing_task(max_cost_usd=2.0)})
+
+    launched = await _fire_once(
+        _deps(store, conversation_store=conv_store, policy_store=policy_store)
+    )
+
+    assert launched == []
+    assert [(run["status"], run["error_code"]) for run in store.runs] == [
+        ("failed", "continued_session_budget_failed")
+    ]
+    assert policy_store.deleted == []
+    assert policy_store.created[0]["factory_params"] == {"max_cost_usd": 2.0}
 
 
 @pytest.mark.asyncio
@@ -2857,17 +2941,24 @@ async def test_continue_with_budget_cleared_drops_the_earlier_cap() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("launch_begins", ["before", "after"])
 async def test_a_continue_waits_for_the_first_sandbox_still_provisioning(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, launch_begins: str
 ) -> None:
-    """The prompt is sent once the first run's sandbox binds, as a user's message would be."""
+    """The prompt is sent once the first run's sandbox binds, as a user's message would be.
+
+    The first run records its session a moment before it begins the launch, so a
+    run may also arrive before the launch is tracked.
+    """
     from omnigent.server.managed_hosts import ManagedLaunchTracker
     from omnigent.server.routes import sessions
 
     task = _sandbox_continue_task(session_id="conv_prev")
     own = continued_sandbox_host_id(task.id, task.workspace_id)
+    monkeypatch.setattr(fire_mod, "_LAUNCH_START_POLL_S", 0.01)
     tracker = ManagedLaunchTracker()
-    tracker.begin("conv_prev")
+    if launch_begins == "before":
+        tracker.begin("conv_prev")
     conv_store = _ExistingConversationStore(_continued_session(host_id=None, workspace=None))
     reached: list[str | None] = []
 
@@ -2885,6 +2976,9 @@ async def test_a_continue_waits_for_the_first_sandbox_still_provisioning(
 
     sending = asyncio.create_task(dispatch(conv_store.existing["conv_prev"], task))
     await asyncio.sleep(0.05)
+    if launch_begins == "after":
+        tracker.begin("conv_prev")
+        await asyncio.sleep(0.05)
     assert not sending.done() and reached == []
     conv_store.existing["conv_prev"] = _continued_session(host_id=own, workspace="/ws")
     tracker.finish("conv_prev")
@@ -2904,6 +2998,8 @@ async def test_a_sandbox_continue_never_reaches_a_runner_outside_its_sandbox(
 
     connect = AsyncMock()
     monkeypatch.setattr(sessions, "ensure_runner_connected", connect)
+    monkeypatch.setattr(fire_mod, "_LAUNCH_START_WAIT_S", 0.05)
+    monkeypatch.setattr(fire_mod, "_LAUNCH_START_POLL_S", 0.01)
     task = _sandbox_continue_task(session_id="conv_prev")
     conv_store = _ExistingConversationStore(_continued_session(host_id=None, workspace=None))
     dispatch = fire_mod._make_reuse_dispatch(

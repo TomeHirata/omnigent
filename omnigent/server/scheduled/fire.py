@@ -97,7 +97,7 @@ from omnigent.server.schemas import SessionEventInput
 from omnigent.stores.conversation_store import SCHEDULED_TASK_ORIGIN_LABEL_KEY
 
 if TYPE_CHECKING:
-    from omnigent.server.managed_hosts import ManagedLaunchTracker
+    from omnigent.server.managed_hosts import ManagedLaunch, ManagedLaunchTracker
 
 _logger = logging.getLogger(__name__)
 
@@ -646,6 +646,16 @@ async def _run_fire_for_task(
             error_code="continued_session_busy",
         )
         return
+    except _SessionNotRecorded as exc:
+        # Running anyway would put this run's work in a session later runs never see.
+        if exc.certain:
+            await _discard_session(deps, conv.id)
+        await recorder.finish(
+            "failed",
+            error="could not record the session this automation continues",
+            error_code="session_record_failed",
+        )
+        return
     await recorder.session_created(conv.id)
 
     await _attach_cost_budget(deps, task, conv.id)
@@ -740,6 +750,20 @@ async def _continue_session(
     spent_usd = await asyncio.to_thread(_session_cost_usd, deps, session_id)
     try:
         await _attach_cost_budget(deps, task, session_id, spent_usd=spent_usd, replace=True)
+    except _BudgetNotSet:
+        _logger.exception(
+            "scheduled fire: task %s could not set the cost cap on session %s",
+            task.id,
+            session_id,
+        )
+        await recorder.finish(
+            "failed",
+            conversation_id=session_id,
+            error="could not set the automation's cost cap on the session; any cap it "
+            "already had stays in place",
+            error_code="continued_session_budget_failed",
+        )
+        return
     except _BudgetConflict:
         _logger.warning(
             "scheduled fire: task %s session %s already has a cost cap it did not set",
@@ -839,6 +863,18 @@ async def continued_session_problem(
     return None
 
 
+class _SessionNotRecorded(Exception):
+    """Recording a first firing's session on its task failed.
+
+    ``certain`` means the task was re-read and does not hold the session, so
+    the session is safe to delete.
+    """
+
+    def __init__(self, *, certain: bool) -> None:
+        super().__init__()
+        self.certain = certain
+
+
 class _SessionTaken(Exception):
     """Another run already recorded the session a continue task's first firing created."""
 
@@ -855,6 +891,8 @@ async def _keep_first_session(
     edited task.
 
     :raises _SessionTaken: Another first firing recorded its session first.
+    :raises _SessionNotRecorded: The write failed, and re-reading the task did
+        not show it landed.
     """
     if task.session_mode != "continue":
         return False
@@ -870,7 +908,15 @@ async def _keep_first_session(
         _logger.exception(
             "scheduled fire: could not record the session task %s continues", task.id
         )
-        return False
+        # The write may have committed before the error reached here.
+        try:
+            stored = await asyncio.to_thread(deps.scheduled_task_store.get, task.id)
+        except Exception:
+            _logger.exception("scheduled fire: could not re-read task %s", task.id)
+            raise _SessionNotRecorded(certain=False) from None
+        if stored is not None and stored.session_id == session_id:
+            return True
+        raise _SessionNotRecorded(certain=True) from None
     if outcome == "taken":
         raise _SessionTaken
     if outcome == "stale":
@@ -1316,6 +1362,10 @@ class _BudgetConflict(Exception):
     """The session already has a cost cap under another id than its fixed one."""
 
 
+class _BudgetNotSet(Exception):
+    """A continued session's cap could not be set; whatever cap it had stays."""
+
+
 async def _attach_cost_budget(
     deps: FireDeps,
     task: ScheduledTask,
@@ -1328,25 +1378,37 @@ async def _attach_cost_budget(
 
     The budget is per fire, and the policy gates cumulative session spend, so a
     continued session's cap is set to ``spent_usd`` plus the budget. With
-    ``replace``, the cap an earlier fire attached is dropped first by its fixed
-    id, also when the budget was since cleared.
+    ``replace``, the cap an earlier fire set under the session's fixed id is
+    updated in place, so a failed write leaves it in force; a budget since
+    cleared deletes it.
 
-    Non-fatal: a failure logs a warning but does not fail the fire — an
-    uncapped session is better than a dead run.
+    For a new session a failure only logs a warning — an uncapped new session
+    is better than a dead run.
 
     :raises _BudgetConflict: With ``replace``, when the session already has a
         cap under another id, such as one set before caps had a fixed id. That
         cap would keep applying, so the run should not go on.
+    :raises _BudgetNotSet: With ``replace``, when the cap could not be set.
     """
     if deps.policy_store is None or (task.max_cost_usd is None and not replace):
         return
     from omnigent.runtime.policies.builder import invalidate_session_policy_specs_cache
 
     policy_id = _cost_budget_policy_id(conversation_id)
+    cap = None if task.max_cost_usd is None else {"max_cost_usd": spent_usd + task.max_cost_usd}
     try:
-        if replace:
+        if cap is None:
             await asyncio.to_thread(deps.policy_store.delete, policy_id, conversation_id)
-        if task.max_cost_usd is not None:
+        elif not replace or (
+            await asyncio.to_thread(
+                deps.policy_store.update,
+                policy_id,
+                conversation_id,
+                factory_params=cap,
+                enabled=True,
+            )
+            is None
+        ):
             try:
                 await asyncio.to_thread(
                     deps.policy_store.create,
@@ -1355,7 +1417,7 @@ async def _attach_cost_budget(
                     name=_COST_BUDGET_POLICY_NAME,
                     type="python",
                     handler=_COST_BUDGET_HANDLER,
-                    factory_params={"max_cost_usd": spent_usd + task.max_cost_usd},
+                    factory_params=cap,
                     enabled=True,
                 )
             except IntegrityError:
@@ -1372,7 +1434,9 @@ async def _attach_cost_budget(
             invalidate_session_policy_specs_cache(conversation_id)
     except _BudgetConflict:
         raise
-    except Exception:
+    except Exception as exc:
+        if replace:
+            raise _BudgetNotSet from exc
         _logger.warning(
             "scheduled fire: failed to attach cost budget for task %s (session %s)",
             task.id,
@@ -1667,6 +1731,32 @@ def _make_connected_host_dispatch(deps: FireDeps) -> LaunchDispatch:
     return _dispatch
 
 
+# The first run records its session a moment before it starts the sandbox
+# launch; a run continuing the session meanwhile waits this long for it.
+_LAUNCH_START_WAIT_S = 30.0
+_LAUNCH_START_POLL_S = 0.25
+
+
+async def _await_launch_start(
+    deps: FireDeps, conv: Conversation
+) -> tuple[Conversation, ManagedLaunch | None]:
+    """Wait for a hostless sandbox session's launch to begin, or its host to bind.
+
+    Returns the session as last read and its launch, if one is in flight.
+    """
+    if deps.managed_launches is None:
+        return conv, None
+    deadline = time.monotonic() + _LAUNCH_START_WAIT_S
+    while True:
+        launch = deps.managed_launches.get(conv.id)
+        if launch is not None or time.monotonic() >= deadline:
+            return conv, launch
+        await asyncio.sleep(_LAUNCH_START_POLL_S)
+        conv = await asyncio.to_thread(deps.conversation_store.get_conversation, conv.id) or conv
+        if conv.host_id is not None:
+            return conv, None
+
+
 def _make_reuse_dispatch(deps: FireDeps) -> LaunchDispatch:
     """Build the seam that sends a task's prompt into an existing session.
 
@@ -1681,11 +1771,9 @@ def _make_reuse_dispatch(deps: FireDeps) -> LaunchDispatch:
             ensure_runner_connected,
         )
 
-        launch = (
-            deps.managed_launches.get(conv.id)
-            if conv.host_id is None and deps.managed_launches is not None
-            else None
-        )
+        launch = None
+        if conv.host_id is None and task.execution_target == "managed_sandbox":
+            conv, launch = await _await_launch_start(deps, conv)
         if launch is not None:
             # The first run's sandbox is still provisioning. Wait for it the way a
             # user's message does, then read the host and workspace it bound.
