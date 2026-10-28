@@ -276,10 +276,10 @@ export function seedRunUnreadBaseline(conversationId: string, updatedAt: number)
 
 /**
  * Unread state for a conversation whose read state the server sent outside the
- * session list, e.g. with an automation's run history. This client's read state
- * wins when it has any, as the sidebar does; it may be newer than that server
- * snapshot. Otherwise the server's explicit unread and last-seen apply with the
- * list's rules, so a session the sidebar hasn't loaded reads the same way.
+ * session list, e.g. with an automation's run history. Uses the sidebar's merge:
+ * the newer of this client's and the server's last-seen. When this client has
+ * read state, the server's unread flag is ignored: it may predate a read made
+ * here since that snapshot. Without local read state, the flag applies.
  */
 export function isConversationUnread(
   conversationId: string,
@@ -287,13 +287,14 @@ export function isConversationUnread(
   status: string | undefined,
   server: { lastSeen: number | null; unread: boolean | null },
 ): boolean {
-  if (lastSeenMap[conversationId] !== undefined || explicitlyUnread.has(conversationId)) {
-    return (
-      explicitlyUnread.has(conversationId) ||
-      isUnseenSince(lastSeenMap[conversationId], updatedAt, status)
-    );
+  if (explicitlyUnread.has(conversationId)) return true;
+  const local = lastSeenMap[conversationId];
+  const serverLastSeen = server.lastSeen ?? undefined;
+  if (local === undefined) {
+    return server.unread === true || isUnseenSince(serverLastSeen, updatedAt, status);
   }
-  return server.unread === true || isUnseenSince(server.lastSeen ?? undefined, updatedAt, status);
+  const baseline = serverLastSeen === undefined ? local : Math.max(local, serverLastSeen);
+  return isUnseenSince(baseline, updatedAt, status);
 }
 
 /**

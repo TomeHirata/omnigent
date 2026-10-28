@@ -152,11 +152,7 @@ export function ScheduledTaskRow({
             aria-label={`Actions for ${task.name}`}
             data-testid="task-row-menu"
             disabled={busy}
-            // `relative z-10` lifts the trigger above the body button's
-            // stretched `after` hit area; `onClick`/`onPointerDown`
-            // stopPropagation so opening the menu never bubbles to the
-            // card-body navigation. (Radix opens on pointerdown, so both are
-            // guarded.)
+            // Sit above the body's hit area; don't bubble into card navigation.
             onClick={(e) => e.stopPropagation()}
             onPointerDown={(e) => e.stopPropagation()}
             className={cn(

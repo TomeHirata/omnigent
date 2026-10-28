@@ -217,6 +217,20 @@ describe("isConversationUnread", () => {
       mod.isConversationUnread("conv-2", 5_000, "idle", { lastSeen: 9_000, unread: false }),
     ).toBe(true);
   });
+
+  it("takes a newer read from another device over an older one here", async () => {
+    const mod = await loadFresh();
+    mod.seedReadState([]);
+    mod.markConversationSeen("conv-1", 100);
+    // Read here at 100, updated at 150, read on another device at 200.
+    expect(mod.isConversationUnread("conv-1", 150, "idle", { lastSeen: 200, unread: false })).toBe(
+      false,
+    );
+    // An update after both reads is still unread.
+    expect(mod.isConversationUnread("conv-1", 250, "idle", { lastSeen: 200, unread: false })).toBe(
+      true,
+    );
+  });
 });
 
 describe("markConversationUnread", () => {
