@@ -85,6 +85,8 @@ def test_scheduled_tasks_columns(db_engine: Engine) -> None:
         timestamp_type = sa.Integer if db_engine.dialect.name == "cockroachdb" else sa.BigInteger
         assert isinstance(columns[name]["type"], timestamp_type)
         assert columns[name]["nullable"] is (name != "created_at")
+    assert columns["session_mode"]["nullable"] is False
+    assert columns["session_id"]["nullable"] is True
     cols = set(columns)
     assert cols == {
         "workspace_id",
