@@ -376,6 +376,17 @@ def test_update_schema_accepts_a_project_id_or_null(project_id: str | None) -> N
     jsonschema.validate({"scheduled_task_id": _TASK_ID, "project_id": project_id}, parameters)
 
 
+@pytest.mark.parametrize("field", ["project_id", "session_id"])
+@pytest.mark.parametrize("value", [_TASK_ID, None])
+def test_update_schema_spells_nullable_ids_without_a_type_list(
+    field: str, value: str | None
+) -> None:
+    """Gemini rejects a list-valued ``type`` and fails every request that carries the tool."""
+    parameters = SysScheduledTaskUpdateTool().get_schema()["function"]["parameters"]
+    assert not isinstance(parameters["properties"][field].get("type"), list)
+    jsonschema.validate({"scheduled_task_id": _TASK_ID, field: value}, parameters)
+
+
 @pytest.mark.asyncio
 async def test_delete_by_id() -> None:
     client = _RecordingClient(_Resp(body={"deleted": True, "id": "t1"}))
