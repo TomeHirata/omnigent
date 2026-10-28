@@ -41,7 +41,7 @@ To provision a fresh sandbox per firing, set `execution_target: "managed_sandbox
 | The session is archived | `failed` | `continued_session_archived` |
 | The owner no longer owns the session | `failed` | `continued_session_forbidden` |
 | The session already has a cost cap this automation did not set, such as one from before this release | `failed` | `continued_session_budget_conflict` |
-| The session runs a different agent, on a different host or workspace than the task pins, in a sandbox when the task targets a connected host (or the reverse), or in a sandbox the task did not start | `failed` | `continued_session_incompatible` |
+| The session runs a different agent, on a different host or workspace than the task pins, in a sandbox when the task targets a connected host (or the reverse), or, for a `managed_sandbox` task, outside the sandbox the task started | `failed` | `continued_session_incompatible` |
 
 Send `session_id: null` in a `PATCH` (**Start a new session on the next run** in the edit dialog) so the next firing creates a new session that later firings continue. A `PATCH` that changes `agent_id`, `host_id`, `workspace`, or `execution_target` without sending `session_id` does the same, since the old session cannot follow the change, and switching to `session_mode: "new"` clears `session_id`.
 

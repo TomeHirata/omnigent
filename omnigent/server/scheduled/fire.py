@@ -807,17 +807,19 @@ async def continued_session_problem(
             "the session runs on a different host or workspace than the automation pins",
             "continued_session_incompatible",
         )
-    # A continue task routes by its own sandbox host, so a session on another
-    # sandbox would be unreachable from the replica running the task.
-    if (
-        task.execution_target == "managed_sandbox"
-        and conv.host_id is not None
-        and conv.host_id != continued_sandbox_host_id(task.id, task.workspace_id)
-    ):
-        return (
-            "the session runs in a sandbox this automation did not start",
-            "continued_session_incompatible",
-        )
+    if task.execution_target == "managed_sandbox":
+        if conv.host_id is None:
+            # Hostless only while the task's own first run provisions its sandbox.
+            # The origin label is server-set, so no other session can claim it.
+            if conv.labels.get(SCHEDULED_TASK_ORIGIN_LABEL_KEY) != task.id:
+                return "the session does not run in a sandbox", "continued_session_incompatible"
+        elif conv.host_id != continued_sandbox_host_id(task.id, task.workspace_id):
+            # A continue task routes by its own sandbox host, so a session on another
+            # sandbox would be unreachable from the replica running the task.
+            return (
+                "the session runs in a sandbox this automation did not start",
+                "continued_session_incompatible",
+            )
     host = (
         await asyncio.to_thread(host_store.get_host, conv.host_id)
         if host_store is not None and conv.host_id is not None
@@ -1685,6 +1687,12 @@ def _make_reuse_dispatch(deps: FireDeps) -> LaunchDispatch:
             conv = (
                 await asyncio.to_thread(deps.conversation_store.get_conversation, conv.id) or conv
             )
+        if task.execution_target == "managed_sandbox" and conv.host_id != (
+            continued_sandbox_host_id(task.id, task.workspace_id)
+        ):
+            # A sandbox automation's prompt never goes to a runner outside its
+            # sandbox, such as a local one a hostless session may have.
+            raise RuntimeError(f"session {conv.id} is not bound to the automation's sandbox")
         runner_client, conv = await ensure_runner_connected(
             session_id=conv.id,
             conv=conv,

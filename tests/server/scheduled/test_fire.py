@@ -2480,6 +2480,17 @@ async def test_new_session_mode_never_keeps_the_session() -> None:
             {"host_id": None, "workspace": None},
             "continued_session_incompatible",
         ),
+        # A local session has no host; a sandbox task must not run in it.
+        (
+            _continued_session(host_id=None, workspace=None),
+            {
+                "id": "5a1d0c9e8b7f4a3d2c1b0a9f8e7d6c5b",
+                "execution_target": "managed_sandbox",
+                "host_id": None,
+                "workspace": None,
+            },
+            "continued_session_incompatible",
+        ),
     ],
 )
 async def test_continue_never_replaces_an_unusable_session(
@@ -2517,19 +2528,39 @@ def _sandbox_continue_task(**overrides: Any) -> ScheduledTask:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("on_own_host", "error_code"), [(True, None), (False, "continued_session_incompatible")]
+    ("host", "origin", "error_code"),
+    [
+        ("own", None, None),
+        ("other", None, "continued_session_incompatible"),
+        # Hostless: only the task's own first session, still provisioning its sandbox.
+        (None, "task", None),
+        (None, None, "continued_session_incompatible"),
+        (None, "another task", "continued_session_incompatible"),
+    ],
 )
 async def test_a_sandbox_task_continues_only_a_session_on_its_own_host(
-    on_own_host: bool, error_code: str | None
+    host: str | None, origin: str | None, error_code: str | None
 ) -> None:
-    """A session on another sandbox is unreachable from the replica that runs the task."""
+    """A session on another sandbox is unreachable from the replica that runs the task,
+    and a hostless one would run outside any sandbox."""
     task = _sandbox_continue_task(session_id="conv_prev")
-    host_id = continued_sandbox_host_id(task.id, task.workspace_id) if on_own_host else "host_box"
-    hosts = FakeHostStore({host_id: _FakeHost(host_id, "local", sandbox_provider="agent_sandbox")})
+    host_id = {
+        "own": continued_sandbox_host_id(task.id, task.workspace_id),
+        "other": "host_box",
+        None: None,
+    }[host]
+    hosts = FakeHostStore(
+        {host_id: _FakeHost(host_id, "local", sandbox_provider="agent_sandbox")} if host_id else {}
+    )
+    labels = (
+        {}
+        if origin is None
+        else {fire_mod.SCHEDULED_TASK_ORIGIN_LABEL_KEY: task.id if origin == "task" else "task_2"}
+    )
 
     problem = await fire_mod.continued_session_problem(
         task,
-        _continued_session(host_id=host_id, workspace="/sandbox/ws"),
+        _continued_session(host_id=host_id, workspace="/sandbox/ws", labels=labels),
         host_store=hosts,
         permission_store=None,
     )
@@ -2798,6 +2829,8 @@ async def test_a_continue_waits_for_the_first_sandbox_still_provisioning(
     from omnigent.server.managed_hosts import ManagedLaunchTracker
     from omnigent.server.routes import sessions
 
+    task = _sandbox_continue_task(session_id="conv_prev")
+    own = continued_sandbox_host_id(task.id, task.workspace_id)
     tracker = ManagedLaunchTracker()
     tracker.begin("conv_prev")
     conv_store = _ExistingConversationStore(_continued_session(host_id=None, workspace=None))
@@ -2810,20 +2843,45 @@ async def test_a_continue_waits_for_the_first_sandbox_still_provisioning(
 
     monkeypatch.setattr(sessions, "ensure_runner_connected", _connected)
     monkeypatch.setattr(fire_mod, "_send_prompt", AsyncMock())
-    store = FakeScheduledTaskStore(rows={"task_1": _continuing_task()})
+    store = FakeScheduledTaskStore(rows={"task_1": task})
     dispatch = fire_mod._make_reuse_dispatch(
         _deps(store, conversation_store=conv_store, managed_launches=tracker)
     )
 
-    sending = asyncio.create_task(dispatch(conv_store.existing["conv_prev"], _continuing_task()))
+    sending = asyncio.create_task(dispatch(conv_store.existing["conv_prev"], task))
     await asyncio.sleep(0.05)
     assert not sending.done() and reached == []
-    conv_store.existing["conv_prev"] = _continued_session(host_id="host_box", workspace="/ws")
+    conv_store.existing["conv_prev"] = _continued_session(host_id=own, workspace="/ws")
     tracker.finish("conv_prev")
     await sending
 
-    assert reached == ["host_box"]
+    assert reached == [own]
     fire_mod._send_prompt.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_continue_never_reaches_a_runner_outside_its_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no sandbox launch in flight, a hostless session's runner is a local one."""
+    from omnigent.server.managed_hosts import ManagedLaunchTracker
+    from omnigent.server.routes import sessions
+
+    connect = AsyncMock()
+    monkeypatch.setattr(sessions, "ensure_runner_connected", connect)
+    task = _sandbox_continue_task(session_id="conv_prev")
+    conv_store = _ExistingConversationStore(_continued_session(host_id=None, workspace=None))
+    dispatch = fire_mod._make_reuse_dispatch(
+        _deps(
+            FakeScheduledTaskStore(rows={"task_1": task}),
+            conversation_store=conv_store,
+            managed_launches=ManagedLaunchTracker(),
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="not bound to the automation's sandbox"):
+        await dispatch(conv_store.existing["conv_prev"], task)
+    connect.assert_not_awaited()
 
 
 @pytest.mark.asyncio
