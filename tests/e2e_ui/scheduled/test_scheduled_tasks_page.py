@@ -835,11 +835,14 @@ def test_scheduled_task_trigger_template_creates_hourly_manager_task(
     )
 
     page.get_by_test_id("task-name-input").fill(name)
-    page.get_by_test_id("task-trigger-watch").fill("project = ES AND labels = omnigent")
+    expect(page.get_by_test_id("task-trigger-event")).to_contain_text("Ticket created")
+    page.get_by_test_id("task-trigger-scope").fill("ES")
+    page.get_by_test_id("task-trigger-add-condition").click()
+    page.get_by_test_id("task-trigger-condition-0-value").fill("omnigent")
     page.get_by_test_id("task-trigger-instructions").fill("Triage the ticket.")
     page.get_by_test_id("task-trigger-preview").locator("summary").click()
     expect(page.get_by_test_id("task-trigger-preview")).to_contain_text(
-        "(project = ES AND labels = omnigent) AND created >= <that time>"
+        '(project = "ES" AND labels = "omnigent") AND created >= <that time>'
     )
     page.get_by_test_id("create-scheduled-task-submit").click()
 

@@ -1,19 +1,38 @@
 // Trigger section of the automation dialog, shown in place of the Prompt field
-// while a Jira/Slack/GitHub template is active. See `triggerTemplates.ts`.
+// while a Jira/Slack/GitHub template is active: a sentence-style condition
+// builder ("Ticket created in project equals ES, and Label equals bug, then
+// comment the session link"). See `triggerTemplates.ts`.
 
+import { PlusIcon, XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/scheduled/Label";
 import {
   MAX_INSTRUCTIONS_CHARS,
   MAX_SESSIONS_PER_RUN,
+  TRIGGER_OPERATOR_LABELS,
   TRIGGER_TEMPLATES,
   triggerServiceName,
+  type TriggerCondition,
   type TriggerFields,
+  type TriggerOperator,
   type TriggerSource,
 } from "@/components/scheduled/triggerTemplates";
+import { cn } from "@/lib/utils";
+
+/** Tinted, compact styling shared by the builder's selects, inputs and fixed words. */
+const CHIP = "h-7 rounded-md border-0 bg-primary/10 px-2 text-sm text-primary shadow-none";
+
+const LINK_BACK = "link";
+const NO_LINK_BACK = "none";
 
 export function TriggerTemplateFields({
   source,
@@ -21,6 +40,7 @@ export function TriggerTemplateFields({
   onChange,
   renderedPrompt,
   onEditAsPrompt,
+  onSelectOpenChange,
 }: {
   source: TriggerSource;
   fields: TriggerFields;
@@ -29,36 +49,233 @@ export function TriggerTemplateFields({
   renderedPrompt: string;
   /** Leave the template and edit the rendered prompt as a plain prompt. */
   onEditAsPrompt: () => void;
+  /** Forwarded to each Select so the dialog's dismiss guard knows one is open. */
+  onSelectOpenChange: (open: boolean) => void;
 }) {
   const template = TRIGGER_TEMPLATES[source];
+  const Icon = template.icon;
   const instructionsTooLong = fields.instructions.trim().length > MAX_INSTRUCTIONS_CHARS;
+
+  function setCondition(index: number, next: TriggerCondition) {
+    onChange({
+      ...fields,
+      conditions: fields.conditions.map((c, i) => (i === index ? next : c)),
+    });
+  }
+
+  function addCondition() {
+    const field = template.fields[0];
+    onChange({
+      ...fields,
+      conditions: [
+        ...fields.conditions,
+        { field: field.id, operator: field.operators[0], value: "" },
+      ],
+    });
+  }
+
   return (
     <div className="flex flex-col gap-4" data-testid="task-trigger-fields">
       <div className="flex flex-col gap-1.5">
-        <Label htmlFor="task-trigger-watch">{template.watchLabel}</Label>
-        <Input
-          id="task-trigger-watch"
-          value={fields.watch}
-          placeholder={template.watchPlaceholder}
-          data-testid="task-trigger-watch"
-          className="text-ui"
-          onChange={(e) => onChange({ ...fields, watch: e.target.value })}
-        />
-      </div>
+        <Label>Trigger</Label>
+        <p className="text-sm text-muted-foreground">
+          Each run starts a session for each of these {template.itemPlural} created since the
+          previous run that meets every condition by then. Older {template.itemPlural} don&apos;t,
+          even if they change or start matching later.
+        </p>
+        <div
+          className="flex flex-col gap-2 rounded-lg border border-border p-3"
+          data-testid="task-trigger-builder"
+        >
+          <div className="flex flex-wrap items-center gap-1.5 text-sm">
+            <Icon className={cn("size-4 shrink-0", template.iconClassName)} />
+            {template.events.length > 1 ? (
+              <Select
+                value={fields.event}
+                onValueChange={(event) => onChange({ ...fields, event })}
+                onOpenChange={onSelectOpenChange}
+              >
+                <SelectTrigger
+                  size="sm"
+                  className={CHIP}
+                  aria-label="Event"
+                  data-testid="task-trigger-event"
+                >
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent position="popper" align="start">
+                  {template.events.map((e) => (
+                    <SelectItem key={e.id} value={e.id} data-testid={`task-trigger-event-${e.id}`}>
+                      {e.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            ) : (
+              <span className={cn(CHIP, "flex items-center")} data-testid="task-trigger-event">
+                {template.events[0].label}
+              </span>
+            )}
+            <span className="text-muted-foreground">{template.scopeLabel}</span>
+            <span className={cn(CHIP, "flex items-center")}>equals</span>
+            <Input
+              value={fields.scope}
+              placeholder={template.scopePlaceholder}
+              aria-label={template.scopeLabel}
+              data-testid="task-trigger-scope"
+              className={cn(CHIP, "min-w-28 flex-1 placeholder:text-primary/50")}
+              onChange={(e) => onChange({ ...fields, scope: e.target.value })}
+            />
+          </div>
 
-      {template.filterLabel !== null && (
-        <div className="flex flex-col gap-1.5">
-          <Label htmlFor="task-trigger-filter">{template.filterLabel}</Label>
-          <Input
-            id="task-trigger-filter"
-            value={fields.filter}
-            placeholder={template.filterPlaceholder}
-            data-testid="task-trigger-filter"
-            className="text-ui"
-            onChange={(e) => onChange({ ...fields, filter: e.target.value })}
-          />
+          {fields.conditions.map((condition, index) => {
+            const field =
+              template.fields.find((f) => f.id === condition.field) ?? template.fields[0];
+            return (
+              <div
+                // Rows have no identity beyond their position.
+                // eslint-disable-next-line react/no-array-index-key
+                key={index}
+                className="flex flex-wrap items-center gap-1.5 pl-6 text-sm"
+                data-testid={`task-trigger-condition-${index}`}
+              >
+                <span className="text-muted-foreground">and</span>
+                <Select
+                  value={field.id}
+                  onValueChange={(id) => {
+                    const next = template.fields.find((f) => f.id === id) ?? field;
+                    setCondition(index, { field: next.id, operator: next.operators[0], value: "" });
+                  }}
+                  onOpenChange={onSelectOpenChange}
+                >
+                  <SelectTrigger
+                    size="sm"
+                    className={CHIP}
+                    aria-label="Field"
+                    data-testid={`task-trigger-condition-${index}-field`}
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent position="popper" align="start">
+                    {template.fields.map((f) => (
+                      <SelectItem
+                        key={f.id}
+                        value={f.id}
+                        data-testid={`task-trigger-condition-${index}-field-${f.id}`}
+                      >
+                        {f.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {field.operators.length > 1 ? (
+                  <Select
+                    value={condition.operator}
+                    onValueChange={(operator) =>
+                      setCondition(index, { ...condition, operator: operator as TriggerOperator })
+                    }
+                    onOpenChange={onSelectOpenChange}
+                  >
+                    <SelectTrigger
+                      size="sm"
+                      className={CHIP}
+                      aria-label="Operator"
+                      data-testid={`task-trigger-condition-${index}-operator`}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent position="popper" align="start">
+                      {field.operators.map((op) => (
+                        <SelectItem
+                          key={op}
+                          value={op}
+                          data-testid={`task-trigger-condition-${index}-operator-${op}`}
+                        >
+                          {TRIGGER_OPERATOR_LABELS[op]}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                ) : (
+                  <span className={cn(CHIP, "flex items-center")}>
+                    {TRIGGER_OPERATOR_LABELS[field.operators[0]]}
+                  </span>
+                )}
+                <Input
+                  value={condition.value}
+                  placeholder={field.placeholder}
+                  aria-label={`${field.label} value`}
+                  data-testid={`task-trigger-condition-${index}-value`}
+                  className={cn(CHIP, "min-w-24 flex-1 placeholder:text-primary/50")}
+                  onChange={(e) => setCondition(index, { ...condition, value: e.target.value })}
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label="Remove condition"
+                  data-testid={`task-trigger-condition-${index}-remove`}
+                  componentId="tasks.scheduled.trigger_remove_condition"
+                  onClick={() =>
+                    onChange({
+                      ...fields,
+                      conditions: fields.conditions.filter((_, i) => i !== index),
+                    })
+                  }
+                >
+                  <XIcon className="size-3.5" />
+                </Button>
+              </div>
+            );
+          })}
+
+          <div className="pl-6">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-muted-foreground"
+              data-testid="task-trigger-add-condition"
+              componentId="tasks.scheduled.trigger_add_condition"
+              onClick={addCondition}
+            >
+              <PlusIcon className="size-3.5" />
+              Add condition
+            </Button>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5 pl-6 text-sm">
+            <span className="text-muted-foreground">then</span>
+            <Select
+              value={fields.linkBack ? LINK_BACK : NO_LINK_BACK}
+              onValueChange={(v) => onChange({ ...fields, linkBack: v === LINK_BACK })}
+              onOpenChange={onSelectOpenChange}
+            >
+              <SelectTrigger
+                size="sm"
+                className={CHIP}
+                aria-label="Then"
+                data-testid="task-trigger-then"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent position="popper" align="start">
+                <SelectItem value={LINK_BACK} data-testid="task-trigger-then-link">
+                  {template.linkBackLabel}
+                </SelectItem>
+                <SelectItem value={NO_LINK_BACK} data-testid="task-trigger-then-none">
+                  Only start the session
+                </SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
-      )}
+        {fields.conditions.some((c) => c.value.trim() === "") && (
+          <p className="text-sm text-muted-foreground" data-testid="task-trigger-empty-condition">
+            Fill in or remove each condition.
+          </p>
+        )}
+      </div>
 
       <div className="flex flex-col gap-1.5">
         <Label htmlFor="task-trigger-instructions">Instructions for each session</Label>
@@ -79,25 +296,12 @@ export function TriggerTemplateFields({
           </p>
         ) : (
           <p className="text-sm text-muted-foreground">
-            Each run looks for newly created {template.itemPlural} that match and starts one session
-            for each, up to {MAX_SESSIONS_PER_RUN} per run. Older ones that change or start matching
-            later don&apos;t.
+            Each run checks for new {template.itemPlural} and starts up to {MAX_SESSIONS_PER_RUN}{" "}
+            sessions.
           </p>
         )}
       </div>
 
-      <div className="flex items-center gap-2">
-        <Checkbox
-          id="task-trigger-link-back"
-          checked={fields.linkBack}
-          onCheckedChange={(checked) => onChange({ ...fields, linkBack: checked === true })}
-          data-testid="task-trigger-link-back"
-          componentId="tasks.scheduled.trigger_link_back"
-        />
-        <label htmlFor="task-trigger-link-back" className="cursor-pointer text-sm">
-          {template.linkBackLabel}
-        </label>
-      </div>
       <p className="text-sm text-muted-foreground" data-testid="task-trigger-untrusted-note">
         Anyone who can write in what you watch can try to steer these sessions, which run with your
         tools.

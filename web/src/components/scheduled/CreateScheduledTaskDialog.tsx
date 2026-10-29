@@ -33,6 +33,7 @@ import { ScheduleFields } from "@/components/scheduled/ScheduleFields";
 import { ModelEffortFields } from "@/components/scheduled/ModelEffortFields";
 import { TriggerTemplateFields } from "@/components/scheduled/TriggerTemplateFields";
 import {
+  emptyTriggerFields,
   renderTriggerPrompt,
   TRIGGER_TEMPLATES,
   triggerFieldsComplete,
@@ -254,7 +255,9 @@ export function CreateScheduledTaskDialog({
   // An active trigger template replaces the Prompt field; the saved prompt is
   // rendered from its fields. Create-only: an edit always shows the prompt.
   const [trigger, setTrigger] = useState<TriggerSource | null>(null);
-  const [triggerFields, setTriggerFields] = useState<TriggerFields>(EMPTY_TRIGGER_FIELDS);
+  const [triggerFields, setTriggerFields] = useState<TriggerFields>(() =>
+    emptyTriggerFields("jira"),
+  );
   const [error, setError] = useState<string | null>(null);
   const [scheduleUnsupported, setScheduleUnsupported] = useState(false);
 
@@ -297,7 +300,7 @@ export function CreateScheduledTaskDialog({
         setSessionMode(initialTrigger ? "continue" : "new");
         setStartNewSession(false);
         setTrigger(initialTrigger);
-        setTriggerFields(EMPTY_TRIGGER_FIELDS);
+        setTriggerFields(emptyTriggerFields(initialTrigger ?? "jira"));
         setSchedule(initialTrigger ? HOURLY_SCHEDULE_MODEL : DEFAULT_SCHEDULE_MODEL);
         setScheduleUnsupported(false);
         setHostId("");
@@ -390,7 +393,7 @@ export function CreateScheduledTaskDialog({
     setProjectChoice(null);
     setPickedProjectId(null);
     setTrigger(null);
-    setTriggerFields(EMPTY_TRIGGER_FIELDS);
+    setTriggerFields(emptyTriggerFields("jira"));
     setError(null);
     setScheduleUnsupported(false);
   }
@@ -535,6 +538,7 @@ export function CreateScheduledTaskDialog({
               source={trigger}
               fields={triggerFields}
               onChange={setTriggerFields}
+              onSelectOpenChange={handleSelectOpenChange}
               renderedPrompt={renderedTriggerPrompt}
               onEditAsPrompt={() => {
                 setPrompt(renderedTriggerPrompt);
@@ -910,13 +914,6 @@ async function projectChangeInput(
   if (pickedId !== null) return pickedId === savedProjectId ? {} : { projectId: pickedId };
   return { projectId: await resolveProjectId(choice) };
 }
-
-const EMPTY_TRIGGER_FIELDS: TriggerFields = {
-  watch: "",
-  filter: "",
-  instructions: "",
-  linkBack: true,
-};
 
 const HOURLY_SCHEDULE_MODEL: ScheduleModel = { ...DEFAULT_SCHEDULE_MODEL, preset: "hourly" };
 

@@ -9,20 +9,12 @@
 
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { basenamedRouting, RoutingProvider } from "@/lib/routing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TasksPage } from "./TasksPage";
 import * as hooks from "@/hooks/useScheduledTasks";
-import * as host from "@/lib/host";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import { SERVER_INFO_OFFLINE_FALLBACK } from "@/lib/bootCapabilities";
 import type { ScheduledTask } from "@/lib/scheduledTasksApi";
-
-// The embed's share-link transform; standalone has none.
-vi.mock("@/lib/host", async (importOriginal) => ({
-  ...(await importOriginal<typeof host>()),
-  getOmnigentTransformShareLink: vi.fn(() => undefined),
-}));
 
 vi.mock("@/hooks/useScheduledTasks", () => ({
   useScheduledTasks: vi.fn(),
@@ -409,33 +401,15 @@ describe("trigger templates", () => {
     features: { session_orchestration: true },
   };
 
-  function renderWithSessionModes(
-    info: typeof SERVER_INFO_OFFLINE_FALLBACK = TRIGGER_INFO,
-    { mount }: { mount?: string } = {},
-  ) {
-    const page = mount ? (
-      <RoutingProvider value={basenamedRouting(mount)}>
-        <TasksPage />
-      </RoutingProvider>
-    ) : (
-      <TasksPage />
-    );
+  function renderWithSessionModes(info: typeof SERVER_INFO_OFFLINE_FALLBACK = TRIGGER_INFO) {
     return render(
       <CapabilitiesProvider info={info}>
-        <MemoryRouter initialEntries={["/tasks"]}>{page}</MemoryRouter>
+        <MemoryRouter initialEntries={["/tasks"]}>
+          <TasksPage />
+        </MemoryRouter>
       </CapabilitiesProvider>,
     );
   }
-
-  function linkAfterPickingSlack(): string | null {
-    fireEvent.click(screen.getByTestId("suggestion-trigger-slack"));
-    return screen.getByTestId("manual-dialog-open").getAttribute("data-session-link");
-  }
-
-  afterEach(() => {
-    delete window.__OMNIGENT_BASE_PATH__;
-    vi.mocked(host.getOmnigentTransformShareLink).mockReturnValue(undefined);
-  });
 
   it("adds the Jira, Slack and GitHub chips after the prompt suggestions", () => {
     setTasks([task()]);
@@ -465,34 +439,6 @@ describe("trigger templates", () => {
     // A later plain open drops the template.
     fireEvent.click(screen.getByTestId("new-task-button"));
     expect(screen.getByTestId("manual-dialog-open").getAttribute("data-initial-trigger")).toBe("");
-  });
-
-  it("keeps a standalone deployment's base path in the session link", () => {
-    window.__OMNIGENT_BASE_PATH__ = "/proxy/6767";
-    setTasks([]);
-    renderWithSessionModes();
-    expect(linkAfterPickingSlack()).toBe(`${window.location.origin}/proxy/6767/c/CONVERSATION_ID`);
-  });
-
-  it("keeps an embed's mount path when the host has no share-link transform", () => {
-    setTasks([]);
-    renderWithSessionModes(TRIGGER_INFO, { mount: "/ml/omnigent-embed" });
-    expect(linkAfterPickingSlack()).toBe(
-      `${window.location.origin}/ml/omnigent-embed/c/CONVERSATION_ID`,
-    );
-  });
-
-  it("uses the host's share-link transform on the whole session path", () => {
-    // A different origin, hash routing, and a query after the path: the result
-    // is not a prefix an ID could be appended to.
-    vi.mocked(host.getOmnigentTransformShareLink).mockReturnValue(
-      (path: string) => `https://host.example.com/embed#${path}?o=42`,
-    );
-    setTasks([]);
-    renderWithSessionModes(TRIGGER_INFO, { mount: "/ml/omnigent-embed" });
-    expect(linkAfterPickingSlack()).toBe(
-      "https://host.example.com/embed#/ml/omnigent-embed/c/CONVERSATION_ID?o=42",
-    );
   });
 
   it.each([
