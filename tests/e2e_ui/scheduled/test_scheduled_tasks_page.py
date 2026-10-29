@@ -826,24 +826,11 @@ def test_scheduled_task_trigger_template_creates_hourly_manager_task(
     page.goto(f"{live_server}/tasks")
     page.get_by_test_id("suggestion-trigger-jira").click()
     expect(page.get_by_test_id("create-scheduled-task-dialog")).to_be_visible(timeout=30_000)
-    expect(page.get_by_test_id("task-name-input")).to_have_value("Jira tickets")
-    expect(page.get_by_test_id("task-prompt-input")).to_have_count(0)
-    expect(page.get_by_test_id("schedule-preset-trigger")).to_contain_text("Hourly")
-    expect(page.get_by_test_id("task-session-mode-trigger")).to_be_disabled()
-    expect(page.get_by_test_id("task-session-mode-trigger")).to_contain_text(
-        "Continue one session"
-    )
-
     page.get_by_test_id("task-name-input").fill(name)
-    expect(page.get_by_test_id("task-trigger-event")).to_contain_text("Ticket created")
     page.get_by_test_id("task-trigger-scope").fill("ES")
     page.get_by_test_id("task-trigger-add-condition").click()
     page.get_by_test_id("task-trigger-condition-0-value").fill("omnigent")
     page.get_by_test_id("task-trigger-instructions").fill("Triage the ticket.")
-    page.get_by_test_id("task-trigger-preview").locator("summary").click()
-    expect(page.get_by_test_id("task-trigger-preview")).to_contain_text(
-        '(project = "ES" AND labels = "omnigent") AND created >= <that time>'
-    )
     page.get_by_test_id("create-scheduled-task-submit").click()
 
     expect(_row_by_name(page, name)).to_be_visible(timeout=30_000)
@@ -852,6 +839,7 @@ def test_scheduled_task_trigger_template_creates_hourly_manager_task(
     assert created["session_mode"] == "continue", created
     assert created["rrule"].startswith("FREQ=HOURLY"), created
     prompt = created["prompt"]
+    assert '(project = "ES" AND labels = "omnigent") AND created >= <that time>' in prompt, prompt
     assert 'placement "same_host"' in prompt, prompt
     assert f'Comment "Omnigent session: {live_server}/c/CONVERSATION_ID"' in prompt, prompt
     assert prompt.endswith("Instructions for each session:\nTriage the ticket."), prompt

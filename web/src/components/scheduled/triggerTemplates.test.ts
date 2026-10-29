@@ -212,8 +212,10 @@ describe("renderTriggerPrompt", () => {
     );
     // The window ends when the search starts, so an item arriving during a long
     // run falls inside the next run's search.
+    // The window opens 5 minutes before the previous run's end, for slow indexing;
+    // the form discloses that an item created in that overlap can still count.
     expect(prompt).toContain(
-      "Note the current UTC time; it ends this run's window. Then search from 5 minutes before the check time",
+      "Note the current UTC time; it ends this run's window. Then search from 5 minutes before the check time, because new items can take a few minutes to appear.",
     );
     expect(prompt).toContain(
       'End with "Checked through: <time>" in ISO 8601 UTC: the time you noted before searching if you read every result and handled every match; otherwise the time the last ticket you handled (started or skipped) before you stopped was created, or the previous check time if you handled none',
@@ -342,6 +344,21 @@ describe("renderTriggerPrompt", () => {
     );
     expect(unfiltered).toContain("Watch: new Slack messages in #eng-support\n");
     expect(unfiltered).toContain("Every top-level message counts.");
+  });
+
+  it("shell-quotes the GitHub example so an apostrophe can't break it", () => {
+    const prompt = renderTriggerPrompt(
+      "github",
+      fields({
+        event: "issue",
+        scope: "acme/app",
+        conditions: [{ field: "label", operator: "is", value: "won't fix" }],
+      }),
+      CTX,
+    );
+    expect(prompt).toContain(
+      `-f q='repo:acme/app is:issue label:"won'\\''t fix" created:>=<that time>' -f sort=created`,
+    );
   });
 
   it("builds the GitHub search from the repository, event and conditions", () => {

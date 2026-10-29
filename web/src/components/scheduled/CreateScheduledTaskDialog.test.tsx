@@ -1426,7 +1426,7 @@ describe("CreateScheduledTaskDialog trigger template", () => {
       "Continue one session",
     );
     expect(screen.getByTestId("task-trigger-fields")).toHaveTextContent(
-      "Each run starts a session for each of these tickets created since the previous run that meets every condition by then. Older tickets don't, even if they change or start matching later.",
+      "Each run starts a session for each of these tickets created since the previous run that meets every condition by then. To allow for slow search indexing, the window starts 5 minutes early, so one created just before the previous run can still count. Older tickets don't, even if they change or start matching later.",
     );
     // The form says the source is untrusted and that link-back writes there.
     const note = screen.getByTestId("task-trigger-untrusted-note");
@@ -1479,32 +1479,25 @@ describe("CreateScheduledTaskDialog trigger template", () => {
     pick("task-trigger-condition-1-field", "task-trigger-condition-1-field-issuetype");
     pick("task-trigger-condition-1-operator", "task-trigger-condition-1-operator-is_not");
     type("task-trigger-condition-1-value", "Epic");
+    fireEvent.click(screen.getByTestId("task-trigger-add-condition"));
+    pick("task-trigger-condition-2-field", "task-trigger-condition-2-field-jql");
+    // A raw JQL row has one operator, shown as a fixed word.
+    expect(screen.queryByTestId("task-trigger-condition-2-operator")).toBeNull();
+    expect(screen.getByTestId("task-trigger-condition-2")).toHaveTextContent("matches");
+    type("task-trigger-condition-2-value", 'summary ~ "crash"');
 
     const prompt = await submittedPrompt();
     const arg = mutateAsync.mock.calls[0][0];
     expect(arg).toMatchObject({ name: "Jira tickets", sessionMode: "continue" });
     expect(arg.rrule).toMatch(/^FREQ=HOURLY/);
     expect(prompt).toContain(
-      '(project = "ES" AND labels = "omnigent" AND issuetype != "Epic") AND created >= <that time> ORDER BY created ASC',
+      '(project = "ES" AND labels = "omnigent" AND issuetype != "Epic" AND (summary ~ "crash")) AND created >= <that time> ORDER BY created ASC',
     );
     expect(prompt).toContain('placement "same_host"');
     expect(prompt).toContain(
       'Comment "Omnigent session: https://host.example.com/embed#/c/CONVERSATION_ID?o=42" on each ticket',
     );
     expect(prompt).toMatch(/Instructions for each session:\nTriage it\.$/);
-  });
-
-  it("ANDs an advanced JQL row onto the other conditions", async () => {
-    renderTrigger("jira");
-    fillJira();
-    fireEvent.click(screen.getByTestId("task-trigger-add-condition"));
-    pick("task-trigger-condition-0-field", "task-trigger-condition-0-field-jql");
-    // A raw JQL row has one operator, shown as a fixed word.
-    expect(screen.queryByTestId("task-trigger-condition-0-operator")).toBeNull();
-    expect(screen.getByTestId("task-trigger-condition-0")).toHaveTextContent("matches");
-    type("task-trigger-condition-0-value", 'summary ~ "crash"');
-
-    expect(await submittedPrompt()).toContain('(project = "ES" AND (summary ~ "crash"))');
   });
 
   it("starts each worker in its own sandbox when the automation runs in a sandbox", async () => {

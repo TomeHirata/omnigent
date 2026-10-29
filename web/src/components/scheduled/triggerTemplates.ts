@@ -289,6 +289,11 @@ export function compileJiraJql(fields: TriggerFields): string {
   return clauses.join(" AND ");
 }
 
+/** `value` as one single-quoted shell word, e.g. `won't` → `'won'\''t'`. */
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
 function githubValue(value: string): string {
   const v = value.trim();
   return /[\s"]/.test(v) ? `"${v.replace(/"/g, "")}"` : v;
@@ -393,7 +398,7 @@ function sourceText(source: TriggerSource, fields: TriggerFields): SourceText {
     watch: () =>
       `Watch: new GitHub ${GITHUB_ITEM_PLURALS[fields.event] ?? GITHUB_ITEM_PLURALS.any} matching: ${query}`,
     search: () =>
-      `Use the GitHub CLI or your GitHub tools to search for: ${query} created:>=<that time>, oldest first, through every page (for example gh api -X GET search/issues -f q='${query} created:>=<that time>' -f sort=created -f order=asc -f per_page=100 --paginate). GitHub's search returns at most 1000 results in all: if you reach that, search again from the creation time of the last result and keep going, skipping results you have already seen, until a search returns fewer.`,
+      `Use the GitHub CLI or your GitHub tools to search for: ${query} created:>=<that time>, oldest first, through every page (for example gh api -X GET search/issues -f q=${shellQuote(`${query} created:>=<that time>`)} -f sort=created -f order=asc -f per_page=100 --paginate). GitHub's search returns at most 1000 results in all: if you reach that, search again from the creation time of the last result and keep going, skipping results you have already seen, until a search returns fewer.`,
     createdAt: "created",
     item,
     fence: "github-item",
