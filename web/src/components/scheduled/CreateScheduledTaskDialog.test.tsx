@@ -1374,6 +1374,7 @@ describe("CreateScheduledTaskDialog trigger template", () => {
   function renderTrigger(
     source: "jira" | "slack" | "github",
     extraInfo: Partial<typeof SERVER_INFO_OFFLINE_FALLBACK> = {},
+    sessionLink = "https://omni.example.com/c/CONVERSATION_ID",
   ) {
     return render(
       <CapabilitiesProvider
@@ -1383,7 +1384,7 @@ describe("CreateScheduledTaskDialog trigger template", () => {
           open
           onOpenChange={vi.fn()}
           initialTrigger={source}
-          sessionLinkBase="https://omni.example.com/c/"
+          sessionLink={sessionLink}
         />
       </CapabilitiesProvider>,
     );
@@ -1450,8 +1451,19 @@ describe("CreateScheduledTaskDialog trigger template", () => {
     expect(arg.rrule).toMatch(/^FREQ=HOURLY/);
     expect(arg.prompt).toContain("(project = ES) AND updated >= <that time>");
     expect(arg.prompt).toContain('placement "same_host"');
-    expect(arg.prompt).toContain("https://omni.example.com/c/<conversation_id>");
+    expect(arg.prompt).toContain("https://omni.example.com/c/CONVERSATION_ID");
     expect(arg.prompt).toMatch(/Instructions for each session:\nTriage it\.$/);
+  });
+
+  it("links back with the host-transformed session URL as given", async () => {
+    renderTrigger("jira", {}, "https://host.example.com/embed#/c/CONVERSATION_ID?o=42");
+    fillJira();
+    fireEvent.click(screen.getByTestId("create-scheduled-task-submit"));
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(1));
+    expect(mutateAsync.mock.calls[0][0].prompt).toContain(
+      'Comment "Omnigent session: https://host.example.com/embed#/c/CONVERSATION_ID?o=42" on each ticket',
+    );
   });
 
   it("starts each worker in its own sandbox when the automation runs in a sandbox", async () => {

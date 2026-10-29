@@ -13,9 +13,16 @@ import { basenamedRouting, RoutingProvider } from "@/lib/routing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TasksPage } from "./TasksPage";
 import * as hooks from "@/hooks/useScheduledTasks";
+import * as host from "@/lib/host";
 import { CapabilitiesProvider } from "@/lib/CapabilitiesContext";
 import { SERVER_INFO_OFFLINE_FALLBACK } from "@/lib/bootCapabilities";
 import type { ScheduledTask } from "@/lib/scheduledTasksApi";
+
+// The embed's share-link transform; standalone has none.
+vi.mock("@/lib/host", async (importOriginal) => ({
+  ...(await importOriginal<typeof host>()),
+  getOmnigentTransformShareLink: vi.fn(() => undefined),
+}));
 
 vi.mock("@/hooks/useScheduledTasks", () => ({
   useScheduledTasks: vi.fn(),
@@ -33,14 +40,14 @@ vi.mock("@/components/scheduled/CreateScheduledTaskDialog", () => ({
     initialName,
     initialPrompt,
     initialTrigger,
-    sessionLinkBase,
+    sessionLink,
     editingTask,
   }: {
     open: boolean;
     initialName?: string;
     initialPrompt?: string;
     initialTrigger?: string | null;
-    sessionLinkBase?: string;
+    sessionLink?: string;
     editingTask?: ScheduledTask | null;
   }) =>
     open ? (
@@ -49,7 +56,7 @@ vi.mock("@/components/scheduled/CreateScheduledTaskDialog", () => ({
         data-initial-name={initialName ?? ""}
         data-initial-prompt={initialPrompt ?? ""}
         data-initial-trigger={initialTrigger ?? ""}
-        data-session-link-base={sessionLinkBase ?? ""}
+        data-session-link={sessionLink ?? ""}
         data-editing-task-id={editingTask?.id ?? ""}
         data-editing-task-name={editingTask?.name ?? ""}
       />
@@ -404,7 +411,7 @@ describe("trigger templates", () => {
 
   function renderWithSessionModes(
     info: typeof SERVER_INFO_OFFLINE_FALLBACK = TRIGGER_INFO,
-    { basename, mount }: { basename?: string; mount?: string } = {},
+    { mount }: { mount?: string } = {},
   ) {
     const page = mount ? (
       <RoutingProvider value={basenamedRouting(mount)}>
@@ -415,17 +422,20 @@ describe("trigger templates", () => {
     );
     return render(
       <CapabilitiesProvider info={info}>
-        <MemoryRouter basename={basename} initialEntries={[`${basename ?? ""}/tasks`]}>
-          {page}
-        </MemoryRouter>
+        <MemoryRouter initialEntries={["/tasks"]}>{page}</MemoryRouter>
       </CapabilitiesProvider>,
     );
   }
 
-  function linkBaseAfterPickingSlack(): string | null {
+  function linkAfterPickingSlack(): string | null {
     fireEvent.click(screen.getByTestId("suggestion-trigger-slack"));
-    return screen.getByTestId("manual-dialog-open").getAttribute("data-session-link-base");
+    return screen.getByTestId("manual-dialog-open").getAttribute("data-session-link");
   }
+
+  afterEach(() => {
+    delete window.__OMNIGENT_BASE_PATH__;
+    vi.mocked(host.getOmnigentTransformShareLink).mockReturnValue(undefined);
+  });
 
   it("adds the Jira, Slack and GitHub chips after the prompt suggestions", () => {
     setTasks([task()]);
@@ -441,30 +451,48 @@ describe("trigger templates", () => {
     ]);
   });
 
-  it("opens the dialog on the picked template with an absolute session link base", () => {
+  it("opens the dialog on the picked template with an absolute session link", () => {
     setTasks([]);
     renderWithSessionModes();
     fireEvent.click(screen.getByTestId("suggestion-trigger-slack"));
     const dialog = screen.getByTestId("manual-dialog-open");
     expect(dialog.getAttribute("data-initial-trigger")).toBe("slack");
     expect(dialog.getAttribute("data-initial-prompt")).toBe("");
-    expect(dialog.getAttribute("data-session-link-base")).toBe(`${window.location.origin}/c/`);
+    expect(dialog.getAttribute("data-session-link")).toBe(
+      `${window.location.origin}/c/CONVERSATION_ID`,
+    );
 
     // A later plain open drops the template.
     fireEvent.click(screen.getByTestId("new-task-button"));
     expect(screen.getByTestId("manual-dialog-open").getAttribute("data-initial-trigger")).toBe("");
   });
 
-  it("keeps a standalone base path in the session link base", () => {
+  it("keeps a standalone deployment's base path in the session link", () => {
+    window.__OMNIGENT_BASE_PATH__ = "/proxy/6767";
     setTasks([]);
-    renderWithSessionModes(TRIGGER_INFO, { basename: "/proxy/6767" });
-    expect(linkBaseAfterPickingSlack()).toBe(`${window.location.origin}/proxy/6767/c/`);
+    renderWithSessionModes();
+    expect(linkAfterPickingSlack()).toBe(`${window.location.origin}/proxy/6767/c/CONVERSATION_ID`);
   });
 
-  it("keeps an embed's mount path, under the host router's basename, in the link base", () => {
+  it("keeps an embed's mount path when the host has no share-link transform", () => {
     setTasks([]);
-    renderWithSessionModes(TRIGGER_INFO, { basename: "/host", mount: "/ml/omnigent-embed" });
-    expect(linkBaseAfterPickingSlack()).toBe(`${window.location.origin}/host/ml/omnigent-embed/c/`);
+    renderWithSessionModes(TRIGGER_INFO, { mount: "/ml/omnigent-embed" });
+    expect(linkAfterPickingSlack()).toBe(
+      `${window.location.origin}/ml/omnigent-embed/c/CONVERSATION_ID`,
+    );
+  });
+
+  it("uses the host's share-link transform on the whole session path", () => {
+    // A different origin, hash routing, and a query after the path: the result
+    // is not a prefix an ID could be appended to.
+    vi.mocked(host.getOmnigentTransformShareLink).mockReturnValue(
+      (path: string) => `https://host.example.com/embed#${path}?o=42`,
+    );
+    setTasks([]);
+    renderWithSessionModes(TRIGGER_INFO, { mount: "/ml/omnigent-embed" });
+    expect(linkAfterPickingSlack()).toBe(
+      "https://host.example.com/embed#/ml/omnigent-embed/c/CONVERSATION_ID?o=42",
+    );
   });
 
   it.each([

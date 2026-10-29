@@ -12,7 +12,6 @@
  */
 
 import { useMemo, useState } from "react";
-import { useHref } from "react-router-dom";
 import { ClockIcon, Loader2Icon, SearchIcon, TriangleAlertIcon } from "lucide-react";
 import { PageScroll } from "@/components/PageScroll";
 import { Button } from "@/components/ui/button";
@@ -25,6 +24,7 @@ import {
   type ScheduledTaskSuggestion,
 } from "@/components/scheduled/suggestions";
 import {
+  SESSION_LINK_ID_PLACEHOLDER,
   TRIGGER_SOURCES,
   TRIGGER_TEMPLATES,
   type TriggerSource,
@@ -32,6 +32,7 @@ import {
 import { useServerInfo } from "@/lib/CapabilitiesContext";
 import { isFeatureEnabled } from "@/lib/capabilities";
 import { useRebasePath } from "@/lib/routing";
+import { getShareableSessionLink } from "@/lib/shareLink";
 import {
   useDeleteScheduledTask,
   useRunScheduledTaskNow,
@@ -78,11 +79,10 @@ export function TasksPage() {
     info !== "loading" &&
     info.scheduled_task_session_modes === true &&
     isFeatureEnabled(info, "session_orchestration");
-  // Workers' links are posted outside Omnigent, so they must be absolute: the
-  // embed's mount path first, then the router's own basename.
+  // Workers' links are posted outside Omnigent, so they go through the same
+  // share-link path as the Share dialog, host transform included.
   const rebasePath = useRebasePath();
-  const sessionHref = useHref(rebasePath("/c/"));
-  const sessionLinkBase = new URL(sessionHref, window.location.origin).toString();
+  const sessionLink = getShareableSessionLink(SESSION_LINK_ID_PLACEHOLDER, rebasePath);
 
   function openManual() {
     setPrefill(null);
@@ -308,7 +308,7 @@ export function TasksPage() {
         initialName={prefill?.name}
         initialPrompt={prefill?.prompt}
         initialTrigger={trigger}
-        sessionLinkBase={sessionLinkBase}
+        sessionLink={sessionLink}
         editingTask={editingTask}
       />
     </PageScroll>

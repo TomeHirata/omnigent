@@ -850,5 +850,5 @@ def test_scheduled_task_trigger_template_creates_hourly_manager_task(
     assert created["rrule"].startswith("FREQ=HOURLY"), created
     prompt = created["prompt"]
     assert 'placement "same_host"' in prompt, prompt
-    assert f'Comment "Omnigent session: {live_server}/c/<conversation_id>"' in prompt, prompt
+    assert f'Comment "Omnigent session: {live_server}/c/CONVERSATION_ID"' in prompt, prompt
     assert prompt.endswith("Instructions for each session:\nTriage the ticket."), prompt

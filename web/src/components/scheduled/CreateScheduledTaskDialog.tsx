@@ -76,7 +76,7 @@ export function CreateScheduledTaskDialog({
   initialName,
   initialPrompt,
   initialTrigger = null,
-  sessionLinkBase = "",
+  sessionLink = "",
   editingTask = null,
 }: {
   open: boolean;
@@ -87,8 +87,8 @@ export function CreateScheduledTaskDialog({
   initialPrompt?: string;
   /** Open on a Jira/Slack/GitHub trigger template instead of a plain prompt. */
   initialTrigger?: TriggerSource | null;
-  /** Absolute session URL prefix the trigger prompt links back with. */
-  sessionLinkBase?: string;
+  /** Shareable session URL the trigger prompt links back with; see `SESSION_LINK_ID_PLACEHOLDER`. */
+  sessionLink?: string;
   editingTask?: ScheduledTask | null;
 }) {
   const { data: agents } = useAvailableAgents({ enabled: open });
@@ -358,7 +358,7 @@ export function CreateScheduledTaskDialog({
           // Workers run where the manager runs: beside it on a connected host,
           // or each in its own sandbox.
           placement: sandboxMode ? "managed" : "same_host",
-          sessionLinkBase,
+          sessionLink,
           model: showModelEffort && pickedModel !== "" ? pickedModel : undefined,
           effort: showModelEffort && pickedEffort !== "" ? pickedEffort : undefined,
         })

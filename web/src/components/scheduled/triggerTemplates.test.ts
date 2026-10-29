@@ -10,7 +10,7 @@ import {
 
 const CTX: TriggerPromptContext = {
   placement: "same_host",
-  sessionLinkBase: "https://omni.example.com/c/",
+  sessionLink: "https://omni.example.com/c/CONVERSATION_ID",
 };
 
 function fields(overrides: Partial<TriggerFields> = {}): TriggerFields {
@@ -62,7 +62,10 @@ describe("renderTriggerPrompt", () => {
     );
     expect(prompt).toContain("Shorten the ticket's text to fit, never the instructions.");
     expect(prompt).toContain(
-      'Comment "Omnigent session: https://omni.example.com/c/<conversation_id>" on each ticket',
+      'Comment "Omnigent session: https://omni.example.com/c/CONVERSATION_ID" on each ticket',
+    );
+    expect(prompt).toContain(
+      "Replace CONVERSATION_ID with the conversation_id that sys_session_create returned",
     );
     expect(prompt.endsWith("Instructions for each session:\nInvestigate the ticket.")).toBe(true);
   });
