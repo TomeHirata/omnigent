@@ -387,6 +387,54 @@ def test_inline_databricks_gateway_keeps_gemini_off_the_anthropic_wire(
 
 
 @pytest.mark.parametrize(
+    ("fast_tier", "fast_option"),
+    [
+        ("system.ai.claude-haiku-5-5", "omnigent/system.ai.claude-haiku-5-5"),
+        ("system.ai.gemini-3-5-flash", "omnigent-mlflow/system.ai.gemini-3-5-flash"),
+    ],
+)
+def test_databricks_anthropic_gateway_picker_lists_the_same_live_claude_rows(
+    monkeypatch: pytest.MonkeyPatch, fast_tier: str, fast_option: str
+) -> None:
+    """A tier that moves to another surface leaves the picker's live Claude rows alone.
+
+    The Anthropic surface's listing also names other vendors' endpoints, which its
+    Messages API answers with 404, so the picker offers only its Claude rows.
+    """
+
+    def _unexpected(host: str, token: str):
+        raise AssertionError("a curated tier map must not trigger enumeration")
+
+    monkeypatch.setattr(creds, "_fetch_pi_model_lists", _unexpected)
+    listed: list[str] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        listed.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {"id": "system.ai.claude-opus-5"},
+                    {"id": "system.ai.claude-sonnet-5-5"},
+                    {"id": "anthropic-aigw-12e8d1ee-system.ai.gpt-5-6-sol"},
+                ]
+            },
+        )
+
+    options = creds.pi_native_model_options(
+        config_loader=lambda: _databricks_anthropic_gateway_config(fast=fast_tier),
+        transport=httpx.MockTransport(_handler),
+    )
+
+    assert listed == ["https://wkspc.cloud.databricks.com/ai-gateway/anthropic/v1/models"]
+    assert {o["model"] for o in options} == {
+        "omnigent/system.ai.claude-opus-5",
+        "omnigent/system.ai.claude-sonnet-5-5",
+        fast_option,
+    }
+
+
+@pytest.mark.parametrize(
     ("model_id", "provider_id", "api", "path"),
     [
         ("system.ai.gpt-5-5", "omnigent-openai", "openai-responses", "/ai-gateway/codex/v1"),

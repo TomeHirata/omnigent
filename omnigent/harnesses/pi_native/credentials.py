@@ -251,8 +251,8 @@ class PiProviderConfig:
     :param listing_provider: Model-catalog descriptor of the key/gateway/local
         endpoint whose live model inventory the pre-launch picker enumerates.
         Metadata for the picker only — never rendered into ``models.json`` — and
-        ``None`` for the Databricks / cli-config / subscription paths, which
-        resolve their models elsewhere.
+        ``None`` for the workspace-enumerated Databricks, cli-config, and
+        subscription paths, which resolve their models elsewhere.
     """
 
     provider_id: str
@@ -1517,10 +1517,20 @@ def _live_family_model_entries(
         )
         return list(provider.extra_models)
 
+    # The Databricks Anthropic surface also lists other vendors' endpoints, which
+    # its Messages API answers with 404.
+    claude_only = listing_provider.base_url is not None and (
+        _databricks_workspace_gateway_surface(listing_provider.base_url)
+        is DatabricksPiSurface.ANTHROPIC
+    )
     entries = list(provider.extra_models)
     seen = {entry.get("id") for entry in entries}
     for model_entry in listing.models:
         if model_entry.id in seen:
+            continue
+        if claude_only and (
+            databricks_pi_surface_for_model(model_entry.id) is not DatabricksPiSurface.ANTHROPIC
+        ):
             continue
         seen.add(model_entry.id)
         entries.append(pi_generic_model_json_entry(model_entry.id))
@@ -1559,6 +1569,7 @@ def _spread_over_databricks_surfaces(
     model: str,
     shortlist: list[_PiModelEntry],
     curated_models: bool,
+    listing_provider: model_catalog.ResolvedModelProvider,
 ) -> PiProviderConfig | None:
     """Move the selected Databricks gateway family's models onto their own surfaces.
 
@@ -1577,6 +1588,8 @@ def _spread_over_databricks_surfaces(
     :param model: The launch model id.
     :param shortlist: The model entries the single-family config would register.
     :param curated_models: Whether *shortlist* is a configured tier shortlist.
+    :param listing_provider: The family endpoint the single-family config lets
+        the pre-launch picker list.
     :returns: A multi-surface config, or ``None`` when every model already fits
         the family's surface.
     """
@@ -1630,6 +1643,11 @@ def _spread_over_databricks_surfaces(
             if surface is not DatabricksPiSurface.ANTHROPIC
         },
         curated_models=curated_models,
+        # Moving a tier must not change what the picker lists. The listing feeds the
+        # primary, so it stays only while the primary is the family's own endpoint.
+        listing_provider=(
+            listing_provider if declared_surface is DatabricksPiSurface.ANTHROPIC else None
+        ),
     )
 
 
@@ -1749,6 +1767,16 @@ def _inline_family_pi_provider(
                         configured_max_output_tokens=family.max_output_tokens,
                     )
                 )
+        # Record the endpoint the pre-launch picker can enumerate live; no
+        # I/O happens here so session launch stays off the network.
+        listing_provider = model_catalog.ResolvedModelProvider(
+            kind=entry.kind,
+            family=family_name,
+            base_url=family.base_url,
+            api_key=family.api_key,
+            auth_command=family.auth_command,
+            detail=f"provider {entry.name!r}",
+        )
         if declared_surface is not None:
             spread = _spread_over_databricks_surfaces(
                 family_base_url=family.base_url,
@@ -1759,6 +1787,7 @@ def _inline_family_pi_provider(
                 model=resolved_model,
                 shortlist=shortlist,
                 curated_models=curated_models,
+                listing_provider=listing_provider,
             )
             if spread is not None:
                 return spread
@@ -1774,16 +1803,7 @@ def _inline_family_pi_provider(
             credential_warning=_cross_family_routing_warning(entry, family_name, resolved_model),
             extra_models=shortlist,
             curated_models=curated_models,
-            # Record the endpoint the pre-launch picker can enumerate live; no
-            # I/O happens here so session launch stays off the network.
-            listing_provider=model_catalog.ResolvedModelProvider(
-                kind=entry.kind,
-                family=family_name,
-                base_url=family.base_url,
-                api_key=family.api_key,
-                auth_command=family.auth_command,
-                detail=f"provider {entry.name!r}",
-            ),
+            listing_provider=listing_provider,
         )
     return None
 
