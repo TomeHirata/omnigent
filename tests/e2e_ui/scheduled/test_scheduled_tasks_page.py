@@ -815,3 +815,40 @@ def test_scheduled_task_create_persists_continuing_one_session(
     tasks = httpx.get(f"{live_server}/v1/scheduled-tasks", timeout=10.0).json()["scheduled_tasks"]
     created = next(t for t in tasks if t["name"] == "Continue create")
     assert (created["session_mode"], created["session_id"]) == ("continue", None), created
+
+
+def test_scheduled_task_trigger_template_creates_hourly_manager_task(
+    page: Page,
+    live_server: str,
+) -> None:
+    """The Jira trigger chip saves an hourly continue task with the rendered prompt."""
+    name = f"Jira trigger {uuid.uuid4().hex[:8]}"
+    page.goto(f"{live_server}/tasks")
+    page.get_by_test_id("suggestion-trigger-jira").click()
+    expect(page.get_by_test_id("create-scheduled-task-dialog")).to_be_visible(timeout=30_000)
+    expect(page.get_by_test_id("task-name-input")).to_have_value("Jira tickets")
+    expect(page.get_by_test_id("task-prompt-input")).to_have_count(0)
+    expect(page.get_by_test_id("schedule-preset-trigger")).to_contain_text("Hourly")
+    expect(page.get_by_test_id("task-session-mode-trigger")).to_be_disabled()
+    expect(page.get_by_test_id("task-session-mode-trigger")).to_contain_text(
+        "Continue one session"
+    )
+
+    page.get_by_test_id("task-name-input").fill(name)
+    page.get_by_test_id("task-trigger-watch").fill("project = ES AND labels = omnigent")
+    page.get_by_test_id("task-trigger-instructions").fill("Triage the ticket.")
+    page.get_by_test_id("task-trigger-preview").locator("summary").click()
+    expect(page.get_by_test_id("task-trigger-preview")).to_contain_text(
+        "(project = ES AND labels = omnigent) AND updated >= <that time>"
+    )
+    page.get_by_test_id("create-scheduled-task-submit").click()
+
+    expect(_row_by_name(page, name)).to_be_visible(timeout=30_000)
+    tasks = httpx.get(f"{live_server}/v1/scheduled-tasks", timeout=10.0).json()["scheduled_tasks"]
+    created = next(t for t in tasks if t["name"] == name)
+    assert created["session_mode"] == "continue", created
+    assert created["rrule"].startswith("FREQ=HOURLY"), created
+    prompt = created["prompt"]
+    assert 'placement "same_host"' in prompt, prompt
+    assert f'Comment "Omnigent session: {live_server}/c/<conversation_id>"' in prompt, prompt
+    assert prompt.endswith("Instructions for each session:\nTriage the ticket."), prompt

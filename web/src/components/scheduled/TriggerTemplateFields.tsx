@@ -1,0 +1,112 @@
+// Trigger section of the automation dialog, shown in place of the Prompt field
+// while a Jira/Slack/GitHub template is active. See `triggerTemplates.ts`.
+
+import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
+import { Label } from "@/components/scheduled/Label";
+import {
+  MAX_SESSIONS_PER_RUN,
+  TRIGGER_TEMPLATES,
+  type TriggerFields,
+  type TriggerSource,
+} from "@/components/scheduled/triggerTemplates";
+
+export function TriggerTemplateFields({
+  source,
+  fields,
+  onChange,
+  renderedPrompt,
+  onEditAsPrompt,
+}: {
+  source: TriggerSource;
+  fields: TriggerFields;
+  onChange: (next: TriggerFields) => void;
+  /** The prompt the task will save; "" until the required fields are filled. */
+  renderedPrompt: string;
+  /** Leave the template and edit the rendered prompt as a plain prompt. */
+  onEditAsPrompt: () => void;
+}) {
+  const template = TRIGGER_TEMPLATES[source];
+  return (
+    <div className="flex flex-col gap-4" data-testid="task-trigger-fields">
+      <div className="flex flex-col gap-1.5">
+        <Label htmlFor="task-trigger-watch">{template.watchLabel}</Label>
+        <Input
+          id="task-trigger-watch"
+          value={fields.watch}
+          placeholder={template.watchPlaceholder}
+          data-testid="task-trigger-watch"
+          className="text-ui"
+          onChange={(e) => onChange({ ...fields, watch: e.target.value })}
+        />
+      </div>
+
+      {template.filterLabel !== null && (
+        <div className="flex flex-col gap-1.5">
+          <Label htmlFor="task-trigger-filter">{template.filterLabel}</Label>
+          <Input
+            id="task-trigger-filter"
+            value={fields.filter}
+            placeholder={template.filterPlaceholder}
+            data-testid="task-trigger-filter"
+            className="text-ui"
+            onChange={(e) => onChange({ ...fields, filter: e.target.value })}
+          />
+        </div>
+      )}
+
+      <div className="flex flex-col gap-1.5">
+        <Label htmlFor="task-trigger-instructions">Instructions for each session</Label>
+        <Textarea
+          id="task-trigger-instructions"
+          value={fields.instructions}
+          rows={3}
+          placeholder={template.instructionsPlaceholder}
+          data-testid="task-trigger-instructions"
+          componentId="tasks.scheduled.trigger_instructions"
+          className="resize-none text-ui"
+          onChange={(e) => onChange({ ...fields, instructions: e.target.value })}
+        />
+        <p className="text-sm text-muted-foreground">
+          Each run checks for new matches and starts one session per match, up to{" "}
+          {MAX_SESSIONS_PER_RUN} per run.
+        </p>
+      </div>
+
+      <div className="flex items-center gap-2">
+        <Checkbox
+          id="task-trigger-link-back"
+          checked={fields.linkBack}
+          onCheckedChange={(checked) => onChange({ ...fields, linkBack: checked === true })}
+          data-testid="task-trigger-link-back"
+          componentId="tasks.scheduled.trigger_link_back"
+        />
+        <label htmlFor="task-trigger-link-back" className="cursor-pointer text-sm">
+          {template.linkBackLabel}
+        </label>
+      </div>
+
+      {renderedPrompt !== "" && (
+        <details className="group" data-testid="task-trigger-preview">
+          <summary className="cursor-pointer text-sm text-muted-foreground">Preview prompt</summary>
+          <pre className="mt-2 max-h-56 overflow-y-auto rounded-md border border-border bg-muted/40 p-2 font-sans text-sm whitespace-pre-wrap">
+            {renderedPrompt}
+          </pre>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="mt-2"
+            onClick={onEditAsPrompt}
+            data-testid="task-trigger-edit-as-prompt"
+            componentId="tasks.scheduled.trigger_edit_as_prompt"
+          >
+            Edit as prompt
+          </Button>
+        </details>
+      )}
+    </div>
+  );
+}

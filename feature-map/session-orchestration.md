@@ -28,7 +28,9 @@ workers on its host or a new managed sandbox. This is enabled by default, with
   the sender private restores eligibility.
 - `scheduled`: scheduled runs, their forks and children use the new sends and
   independent creates like any private session their owner owns, so an
-  automation can message the owner's other sessions or start workers.
+  automation can message the owner's other sessions or start workers. The
+  Automations page's Jira/Slack/GitHub trigger templates rely on this: their
+  kept session starts one worker per match (`docs/AUTOMATIONS.md`).
 - `refusal`: disabled flag, another owner, shared sender or wrong runner binding
   refuses the operation. Unsupported servers reject independent creation without
   falling back to ordinary creation. Timeouts, 408/429/5xx responses and invalid

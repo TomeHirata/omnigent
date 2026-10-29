@@ -1369,3 +1369,123 @@ describe("CreateScheduledTaskDialog session mode", () => {
     expect(screen.queryByTestId("task-start-new-session")).toBeNull();
   });
 });
+
+describe("CreateScheduledTaskDialog trigger template", () => {
+  function renderTrigger(
+    source: "jira" | "slack" | "github",
+    extraInfo: Partial<typeof SERVER_INFO_OFFLINE_FALLBACK> = {},
+  ) {
+    return render(
+      <CapabilitiesProvider
+        info={{ ...SERVER_INFO_OFFLINE_FALLBACK, scheduled_task_session_modes: true, ...extraInfo }}
+      >
+        <CreateScheduledTaskDialog
+          open
+          onOpenChange={vi.fn()}
+          initialTrigger={source}
+          sessionLinkBase="https://omni.example.com/c/"
+        />
+      </CapabilitiesProvider>,
+    );
+  }
+
+  function fillJira() {
+    fireEvent.change(screen.getByTestId("task-trigger-watch"), {
+      target: { value: "project = ES" },
+    });
+    fireEvent.change(screen.getByTestId("task-trigger-instructions"), {
+      target: { value: "Triage it." },
+    });
+  }
+
+  it("replaces the prompt with trigger fields, runs hourly and locks one kept session", () => {
+    renderTrigger("jira");
+
+    expect(screen.getByTestId("task-name-input")).toHaveValue("Jira tickets");
+    expect(screen.queryByTestId("task-prompt-input")).toBeNull();
+    expect(screen.getByTestId("task-trigger-fields")).toBeInTheDocument();
+    // Jira's condition is all JQL, so there is no separate filter.
+    expect(screen.queryByTestId("task-trigger-filter")).toBeNull();
+    expect(screen.getByTestId("schedule-preset-trigger")).toHaveTextContent("Hourly");
+    expect(screen.getByTestId("task-session-mode-trigger")).toBeDisabled();
+    expect(screen.getByTestId("task-session-mode-trigger")).toHaveTextContent(
+      "Continue one session",
+    );
+  });
+
+  it("keeps submit disabled until the watch value and instructions are filled", () => {
+    renderTrigger("jira");
+    const submit = screen.getByTestId("create-scheduled-task-submit");
+    expect(submit).toBeDisabled();
+    expect(screen.queryByTestId("task-trigger-preview")).toBeNull();
+
+    fillJira();
+    expect(submit).toBeEnabled();
+    expect(screen.getByTestId("task-trigger-preview")).toHaveTextContent("project = ES");
+  });
+
+  it("creates an hourly continue-mode task whose prompt is the rendered template", async () => {
+    renderTrigger("jira");
+    fillJira();
+    fireEvent.click(screen.getByTestId("create-scheduled-task-submit"));
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(1));
+    const arg = mutateAsync.mock.calls[0][0];
+    expect(arg).toMatchObject({ name: "Jira tickets", sessionMode: "continue" });
+    expect(arg.rrule).toMatch(/^FREQ=HOURLY/);
+    expect(arg.prompt).toContain("(project = ES) AND updated >= <that time>");
+    expect(arg.prompt).toContain('placement "same_host"');
+    expect(arg.prompt).toContain("https://omni.example.com/c/<conversation_id>");
+    expect(arg.prompt).toMatch(/Instructions for each session:\nTriage it\.$/);
+  });
+
+  it("starts each worker in its own sandbox when the automation runs in a sandbox", async () => {
+    renderTrigger("jira", { managed_sandboxes_enabled: true });
+    fillJira();
+    const host = screen.getByTestId("task-host-trigger");
+    fireEvent.pointerDown(host, new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    fireEvent.click(host);
+    fireEvent.click(screen.getByTestId("task-host-sandbox-option"));
+    fireEvent.click(screen.getByTestId("create-scheduled-task-submit"));
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(1));
+    const arg = mutateAsync.mock.calls[0][0];
+    expect(arg).toMatchObject({ executionTarget: "managed_sandbox" });
+    expect(arg.prompt).toContain('placement "managed"');
+  });
+
+  it("leaves the link-back step out when its checkbox is cleared", async () => {
+    renderTrigger("slack");
+    fireEvent.change(screen.getByTestId("task-trigger-watch"), {
+      target: { value: "#eng-support" },
+    });
+    fireEvent.change(screen.getByTestId("task-trigger-filter"), {
+      target: { value: "report a bug" },
+    });
+    fireEvent.change(screen.getByTestId("task-trigger-instructions"), {
+      target: { value: "Reproduce it." },
+    });
+    fireEvent.click(screen.getByTestId("task-trigger-link-back"));
+    fireEvent.click(screen.getByTestId("create-scheduled-task-submit"));
+
+    await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(1));
+    const { prompt } = mutateAsync.mock.calls[0][0];
+    expect(prompt).toContain("Slack messages in #eng-support that report a bug");
+    expect(prompt).not.toContain("Omnigent session:");
+  });
+
+  it("hands the rendered prompt to the plain Prompt field on Edit as prompt", () => {
+    renderTrigger("github");
+    fireEvent.change(screen.getByTestId("task-trigger-watch"), { target: { value: "acme/app" } });
+    fireEvent.change(screen.getByTestId("task-trigger-instructions"), {
+      target: { value: "Fix it." },
+    });
+    fireEvent.click(screen.getByTestId("task-trigger-edit-as-prompt"));
+
+    expect(screen.queryByTestId("task-trigger-fields")).toBeNull();
+    const prompt = screen.getByTestId("task-prompt-input") as HTMLTextAreaElement;
+    expect(prompt.value).toContain("repo:acme/app updated:>=<that time>");
+    // The kept session stays, but the user may now change it.
+    expect(screen.getByTestId("task-session-mode-trigger")).toBeEnabled();
+  });
+});
