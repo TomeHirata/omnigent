@@ -247,6 +247,10 @@ describe("renderTriggerPrompt", () => {
       'If a call times out or its result is unclear, the session may exist without its task: don\'t retry it in this run; list its title as "<title> unconfirmed" on a "Delivery pending:" line and stop there.',
     );
     expect(prompt).not.toContain("before retrying");
+    // Stopping ends session starts only; the run's bookkeeping still happens.
+    expect(prompt).toContain(
+      "Stopping means starting no more sessions in this run; still post link-backs for the sessions you did start and write your reply.",
+    );
   });
 
   it("carries failed link-backs to later runs without starting new sessions", () => {
@@ -355,11 +359,11 @@ describe("renderTriggerPrompt", () => {
       "starts one Omnigent session for each newly created issue that matches.",
     );
     expect(prompt).toContain(
-      "search for: repo:acme/app is:issue label:bug created:>=<that time>, oldest first (for example gh search issues --sort created --order asc --limit 100).",
+      "search for: repo:acme/app is:issue label:bug created:>=<that time>, oldest first, through every page (for example gh api -X GET search/issues -f q='repo:acme/app is:issue label:bug created:>=<that time>' -f sort=created -f order=asc -f per_page=100 --paginate).",
     );
-    // --limit caps the total, so a full result set ends this run's range.
+    // A creation window denser than the search cap is walked forward, not re-read.
     expect(prompt).toContain(
-      "The limit caps the total, not a page: if you get as many results as the limit, there may be more, so treat the last one as the last result you read.",
+      "GitHub's search returns at most 1000 results in all: if you reach that, search again from the creation time of the last result and keep going, skipping results you have already seen, until a search returns fewer.",
     );
     expect(prompt).toContain('title "GitHub <owner/repo>#<number>"');
 
@@ -370,7 +374,7 @@ describe("renderTriggerPrompt", () => {
     );
     expect(either).toContain("Watch: new GitHub issues or pull requests matching: repo:acme/app");
     expect(either).toContain(
-      "search for: repo:acme/app created:>=<that time>, oldest first (for example gh search issues --include-prs --sort created --order asc --limit 100).",
+      "search for: repo:acme/app created:>=<that time>, oldest first, through every page (for example gh api -X GET search/issues -f q='repo:acme/app created:>=<that time>' -f sort=created -f order=asc -f per_page=100 --paginate).",
     );
   });
 });
