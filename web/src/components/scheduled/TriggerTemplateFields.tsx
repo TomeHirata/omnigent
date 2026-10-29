@@ -15,9 +15,10 @@ import { Label } from "@/components/scheduled/Label";
 import {
   MAX_INSTRUCTIONS_CHARS,
   MAX_SESSIONS_PER_RUN,
-  TRIGGER_OPERATOR_LABELS,
   TRIGGER_TEMPLATES,
+  triggerOperatorLabel,
   triggerServiceName,
+  VALUELESS_OPERATORS,
   type TriggerCondition,
   type TriggerFields,
   type TriggerOperator,
@@ -190,24 +191,28 @@ export function TriggerTemplateFields({
                           value={op}
                           data-testid={`task-trigger-condition-${index}-operator-${op}`}
                         >
-                          {TRIGGER_OPERATOR_LABELS[op]}
+                          {triggerOperatorLabel(field, op)}
                         </SelectItem>
                       ))}
                     </SelectContent>
                   </Select>
                 ) : (
                   <span className={cn(CHIP, "flex items-center")}>
-                    {TRIGGER_OPERATOR_LABELS[field.operators[0]]}
+                    {triggerOperatorLabel(field, field.operators[0])}
                   </span>
                 )}
-                <Input
-                  value={condition.value}
-                  placeholder={field.placeholder}
-                  aria-label={`${field.label} value`}
-                  data-testid={`task-trigger-condition-${index}-value`}
-                  className={cn(CHIP, "min-w-24 flex-1 placeholder:text-primary/50")}
-                  onChange={(e) => setCondition(index, { ...condition, value: e.target.value })}
-                />
+                {VALUELESS_OPERATORS.has(condition.operator) ? (
+                  <span className="flex-1" />
+                ) : (
+                  <Input
+                    value={condition.value}
+                    placeholder={field.placeholder}
+                    aria-label={`${field.label} value`}
+                    data-testid={`task-trigger-condition-${index}-value`}
+                    className={cn(CHIP, "min-w-24 flex-1 placeholder:text-primary/50")}
+                    onChange={(e) => setCondition(index, { ...condition, value: e.target.value })}
+                  />
+                )}
                 <Button
                   type="button"
                   variant="ghost"
@@ -269,7 +274,9 @@ export function TriggerTemplateFields({
             </Select>
           </div>
         </div>
-        {fields.conditions.some((c) => c.value.trim() === "") && (
+        {fields.conditions.some(
+          (c) => !VALUELESS_OPERATORS.has(c.operator) && c.value.trim() === "",
+        ) && (
           <p className="text-sm text-muted-foreground" data-testid="task-trigger-empty-condition">
             Fill in or remove each condition.
           </p>

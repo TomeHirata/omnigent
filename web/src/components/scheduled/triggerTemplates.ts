@@ -9,7 +9,8 @@ export type TriggerSource = "jira" | "slack" | "github";
 export type WorkerPlacement = "same_host" | "managed";
 
 /** How a condition row compares its field with its value. */
-export type TriggerOperator = "is" | "is_not" | "contains" | "not_contains" | "about" | "matches";
+export type TriggerOperator =
+  "is" | "is_not" | "contains" | "not_contains" | "about" | "matches" | "empty" | "not_empty";
 
 export const TRIGGER_OPERATOR_LABELS: Record<TriggerOperator, string> = {
   is: "equals",
@@ -18,7 +19,12 @@ export const TRIGGER_OPERATOR_LABELS: Record<TriggerOperator, string> = {
   not_contains: "doesn't contain",
   about: "is about",
   matches: "matches",
+  empty: "is empty",
+  not_empty: "is set",
 };
+
+/** Operators that compare against nothing, so their row has no value to fill in. */
+export const VALUELESS_OPERATORS: ReadonlySet<TriggerOperator> = new Set(["empty", "not_empty"]);
 
 /** One "and <field> <operator> <value>" row of a trigger. */
 export interface TriggerCondition {
@@ -64,7 +70,17 @@ export interface TriggerConditionField {
   label: string;
   /** The first is the default for a new row. */
   operators: TriggerOperator[];
+  /** Field-specific wording for an operator, e.g. Assignee's "is unassigned". */
+  operatorLabels?: Partial<Record<TriggerOperator, string>>;
   placeholder: string;
+}
+
+/** How a row shows `operator` for `field`. */
+export function triggerOperatorLabel(
+  field: TriggerConditionField,
+  operator: TriggerOperator,
+): string {
+  return field.operatorLabels?.[operator] ?? TRIGGER_OPERATOR_LABELS[operator];
 }
 
 export interface TriggerTemplate {
@@ -103,6 +119,13 @@ export const TRIGGER_TEMPLATES: Record<TriggerSource, TriggerTemplate> = {
       { id: "issuetype", label: "Issue type", operators: ["is", "is_not"], placeholder: "Bug" },
       { id: "component", label: "Component", operators: ["is", "is_not"], placeholder: "Backend" },
       { id: "priority", label: "Priority", operators: ["is", "is_not"], placeholder: "High" },
+      {
+        id: "assignee",
+        label: "Assignee",
+        operators: ["is", "is_not", "empty", "not_empty"],
+        operatorLabels: { empty: "is unassigned", not_empty: "is assigned" },
+        placeholder: "me, or an account ID",
+      },
       {
         id: "jql",
         label: "JQL (advanced)",
@@ -153,6 +176,14 @@ export const TRIGGER_TEMPLATES: Record<TriggerSource, TriggerTemplate> = {
     fields: [
       { id: "label", label: "Label", operators: ["is", "is_not"], placeholder: "bug" },
       { id: "author", label: "Author", operators: ["is", "is_not"], placeholder: "octocat" },
+      {
+        id: "assignee",
+        label: "Assignee",
+        // GitHub search can match no assignee, but has no "any assignee" qualifier.
+        operators: ["is", "is_not", "empty"],
+        operatorLabels: { empty: "is unassigned" },
+        placeholder: "me, or a username",
+      },
       {
         id: "qualifiers",
         label: "Search qualifiers (advanced)",
@@ -237,7 +268,7 @@ export function triggerFieldsComplete(fields: TriggerFields): boolean {
   const instructions = fields.instructions.trim();
   return (
     scopeList(fields.scope).length > 0 &&
-    fields.conditions.every((c) => c.value.trim() !== "") &&
+    fields.conditions.every((c) => VALUELESS_OPERATORS.has(c.operator) || c.value.trim() !== "") &&
     instructions !== "" &&
     instructions.length <= MAX_INSTRUCTIONS_CHARS
   );
@@ -279,6 +310,15 @@ export function compileJiraJql(fields: TriggerFields): string {
       case "priority":
         clauses.push(`${c.field} ${c.operator === "is" ? "=" : "!="} ${value}`);
         break;
+      case "assignee": {
+        // "me" is the owner, whose Jira tools the manager runs with.
+        const who = c.value.trim().toLowerCase() === "me" ? "currentUser()" : value;
+        if (c.operator === "empty") clauses.push("assignee is EMPTY");
+        else if (c.operator === "not_empty") clauses.push("assignee is not EMPTY");
+        else if (c.operator === "is") clauses.push(`assignee = ${who}`);
+        else clauses.push(`(assignee is EMPTY OR assignee != ${who})`);
+        break;
+      }
       case "jql": {
         const { where } = splitJqlOrderBy(c.value);
         if (where !== "") clauses.push(`(${where})`);
@@ -309,6 +349,11 @@ export function compileGithubQuery(fields: TriggerFields): string {
     if (c.field === "label") parts.push(`${negate}label:${githubValue(c.value)}`);
     if (c.field === "author")
       parts.push(`${negate}author:${githubValue(c.value).replace(/^@/, "")}`);
+    if (c.field === "assignee") {
+      const who =
+        c.value.trim().toLowerCase() === "me" ? "@me" : githubValue(c.value).replace(/^@/, "");
+      parts.push(c.operator === "empty" ? "no:assignee" : `${negate}assignee:${who}`);
+    }
     if (c.field === "qualifiers") parts.push(c.value.trim());
   }
   return parts.join(" ");

@@ -41,6 +41,11 @@ describe("triggerFieldsComplete", () => {
     // Commas alone parse to no entries, which would drop GitHub's repo filter.
     ["comma-only scope", { scope: " , ," }, false],
     ["a condition with no value", { conditions: [{ ...LABEL_OMNIGENT, value: " " }] }, false],
+    [
+      "a valueless condition",
+      { conditions: [{ field: "assignee", operator: "empty", value: "" }] },
+      true,
+    ],
     ["empty instructions", { instructions: "" }, false],
     ["instructions at the cap", { instructions: "x".repeat(MAX_INSTRUCTIONS_CHARS) }, true],
     ["instructions over the cap", { instructions: "x".repeat(MAX_INSTRUCTIONS_CHARS + 1) }, false],
@@ -92,6 +97,20 @@ describe("compileJiraJql", () => {
     );
   });
 
+  it("compiles assignee rows, with me as the owner and unassigned kept on doesn't-equal", () => {
+    const assignee = (operator: TriggerCondition["operator"], value = "") =>
+      jql("ES", { field: "assignee", operator, value });
+    expect(assignee("is", "me")).toBe('project = "ES" AND assignee = currentUser()');
+    expect(assignee("is", "5b10a2844c20165700ede21g")).toBe(
+      'project = "ES" AND assignee = "5b10a2844c20165700ede21g"',
+    );
+    expect(assignee("is_not", "Me")).toBe(
+      'project = "ES" AND (assignee is EMPTY OR assignee != currentUser())',
+    );
+    expect(assignee("empty")).toBe('project = "ES" AND assignee is EMPTY');
+    expect(assignee("not_empty")).toBe('project = "ES" AND assignee is not EMPTY');
+  });
+
   it("escapes quotes in values and wraps a raw JQL row without its ORDER BY", () => {
     expect(jql("ES", { field: "label", operator: "is", value: 'say "hi"' })).toBe(
       'project = "ES" AND labels = "say \\"hi\\""',
@@ -114,6 +133,18 @@ describe("compileGithubQuery", () => {
     expect(query("issue")).toBe("repo:acme/app is:issue");
     expect(query("pr")).toBe("repo:acme/app is:pr");
     expect(query("any")).toBe("repo:acme/app");
+  });
+
+  it("compiles assignee rows, with me as @me", () => {
+    expect(query("issue", { field: "assignee", operator: "is", value: "me" })).toBe(
+      "repo:acme/app is:issue assignee:@me",
+    );
+    expect(query("issue", { field: "assignee", operator: "is_not", value: "@octocat" })).toBe(
+      "repo:acme/app is:issue -assignee:octocat",
+    );
+    expect(query("issue", { field: "assignee", operator: "empty", value: "" })).toBe(
+      "repo:acme/app is:issue no:assignee",
+    );
   });
 
   it("compiles label, author and raw qualifier rows", () => {

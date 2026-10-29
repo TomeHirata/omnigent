@@ -1500,6 +1500,22 @@ describe("CreateScheduledTaskDialog trigger template", () => {
     expect(prompt).toMatch(/Instructions for each session:\nTriage it\.$/);
   });
 
+  it("hides the value box for an assignee row that is unassigned", async () => {
+    renderTrigger("jira");
+    fillJira();
+    fireEvent.click(screen.getByTestId("task-trigger-add-condition"));
+    pick("task-trigger-condition-0-field", "task-trigger-condition-0-field-assignee");
+    pick("task-trigger-condition-0-operator", "task-trigger-condition-0-operator-empty");
+    expect(screen.getByTestId("task-trigger-condition-0-operator")).toHaveTextContent(
+      "is unassigned",
+    );
+    // Nothing to fill in, so the row neither shows a value box nor blocks saving.
+    expect(screen.queryByTestId("task-trigger-condition-0-value")).toBeNull();
+    expect(screen.queryByTestId("task-trigger-empty-condition")).toBeNull();
+
+    expect(await submittedPrompt()).toContain('(project = "ES" AND assignee is EMPTY)');
+  });
+
   it("starts each worker in its own sandbox when the automation runs in a sandbox", async () => {
     renderTrigger("jira", { managed_sandboxes_enabled: true });
     fillJira();
