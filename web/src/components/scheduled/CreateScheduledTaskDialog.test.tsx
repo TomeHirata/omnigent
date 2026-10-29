@@ -1442,6 +1442,9 @@ describe("CreateScheduledTaskDialog trigger template", () => {
     expect(submit).toBeDisabled();
     expect(screen.queryByTestId("task-trigger-preview")).toBeNull();
 
+    type("task-trigger-scope", ",");
+    type("task-trigger-instructions", "Triage it.");
+    expect(submit).toBeDisabled();
     fillJira();
     expect(submit).toBeEnabled();
     expect(screen.getByTestId("task-trigger-preview")).toHaveTextContent('project = "ES"');

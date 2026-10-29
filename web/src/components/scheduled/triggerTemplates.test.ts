@@ -38,6 +38,8 @@ describe("triggerFieldsComplete", () => {
   it.each<[string, Partial<TriggerFields>, boolean]>([
     ["scope and instructions, no conditions", { conditions: [] }, true],
     ["blank scope", { scope: "  " }, false],
+    // Commas alone parse to no entries, which would drop GitHub's repo filter.
+    ["comma-only scope", { scope: " , ," }, false],
     ["a condition with no value", { conditions: [{ ...LABEL_OMNIGENT, value: " " }] }, false],
     ["empty instructions", { instructions: "" }, false],
     ["instructions at the cap", { instructions: "x".repeat(MAX_INSTRUCTIONS_CHARS) }, true],
@@ -257,13 +259,16 @@ describe("renderTriggerPrompt", () => {
     expect(prompt).toContain(
       "2. For each pending delivery, find its session: by its conversation_id, or, for an unconfirmed start listed without one, by its title among the sessions you created (sys_session_list with include_archived true).",
     );
-    // An unconfirmed start that never happened goes back to being a new ticket.
+    // An unconfirmed start that never happened is fetched again by key, since the
+    // checkpoint may have moved past its creation time while it was pending.
     expect(prompt).toContain(
-      "If no such session exists, the start never happened: drop the entry, and the search below finds the ticket again.",
+      "If no such session exists, the start never happened: drop the entry, fetch that ticket again by the key in its title, and handle it with this run's matches below, since the search window may have moved past it.",
     );
+    // A task missing from history may still be queued, so it is never resent.
     expect(prompt).toContain(
-      "Otherwise read that session's history with sys_session_get_history. If your task message is there, it was delivered: drop the entry. If the session has no message from you, rebuild the message for that ticket (fetch it again if needed) and send it with sys_session_message. If you can't tell, or sending fails or is unclear, keep it pending. Never create another session for it.",
+      "Otherwise read that session's history with sys_session_get_history. If your task message is there, it was delivered: drop the entry. If it isn't, keep the entry pending and point the owner to that session in your reply: the task may still be queued where the history can't show it, so never resend it and never create another session for it.",
     );
+    expect(prompt).not.toContain("send it with sys_session_message");
   });
 
   it("replaces a raw JQL row's ORDER BY with creation order", () => {

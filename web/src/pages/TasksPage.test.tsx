@@ -444,6 +444,8 @@ describe("trigger templates", () => {
   it.each([
     ["can't keep one session per automation", { scheduled_task_session_modes: false }],
     ["has session orchestration turned off", { features: { session_orchestration: false } }],
+    // Older servers don't report the feature at all.
+    ["doesn't report session orchestration", { features: {} }],
   ])("hides the chips when the server %s", (_name, overrides) => {
     setTasks([]);
     renderWithSessionModes({ ...TRIGGER_INFO, ...overrides });

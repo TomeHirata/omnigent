@@ -228,11 +228,15 @@ export function splitJqlOrderBy(jql: string): { where: string; orderBy: string }
   return { where: jql.slice(0, orderByAt).trim(), orderBy: jql.slice(orderByAt).trim() };
 }
 
-/** Whether the fields can render a prompt: a scope, filled-in rows, and instructions within budget. */
+/**
+ * Whether the fields can render a prompt: at least one scope entry (`","`
+ * alone would drop GitHub's repo filter), filled-in rows, and instructions
+ * within budget.
+ */
 export function triggerFieldsComplete(fields: TriggerFields): boolean {
   const instructions = fields.instructions.trim();
   return (
-    fields.scope.trim() !== "" &&
+    scopeList(fields.scope).length > 0 &&
     fields.conditions.every((c) => c.value.trim() !== "") &&
     instructions !== "" &&
     instructions.length <= MAX_INSTRUCTIONS_CHARS
@@ -425,7 +429,7 @@ export function renderTriggerPrompt(
   ];
   const steps = [
     `Read your state from your most recent reply in this session that has a "${CHECKED_THROUGH}" line: that check time, and any ${pendingLines.join(" and ")} lines. On the first run, use one hour ago and nothing pending.`,
-    `For each pending delivery, find its session: by its conversation_id, or, for an unconfirmed start listed without one, by its title among the sessions you created (sys_session_list with include_archived true). If no such session exists, the start never happened: drop the entry, and the search below finds the ${text.item} again. Otherwise read that session's history with sys_session_get_history. If your task message is there, it was delivered: drop the entry. If the session has no message from you, rebuild the message for that ${text.item} (fetch it again if needed) and send it with sys_session_message. If you can't tell, or sending fails or is unclear, keep it pending. Never create another session for it.`,
+    `For each pending delivery, find its session: by its conversation_id, or, for an unconfirmed start listed without one, by its title among the sessions you created (sys_session_list with include_archived true). If no such session exists, the start never happened: drop the entry, fetch that ${text.item} again by the key in its title, and handle it with this run's matches below, since the search window may have moved past it. Otherwise read that session's history with sys_session_get_history. If your task message is there, it was delivered: drop the entry. If it isn't, keep the entry pending and point the owner to that session in your reply: the task may still be queued where the history can't show it, so never resend it and never create another session for it.`,
     ...(fields.linkBack
       ? [
           `Post each pending link-back, the same way as below. Don't start sessions for them; one that fails again stays pending.`,

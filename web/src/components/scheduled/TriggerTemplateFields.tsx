@@ -1,7 +1,4 @@
-// Trigger section of the automation dialog, shown in place of the Prompt field
-// while a Jira/Slack/GitHub template is active: a sentence-style condition
-// builder ("Ticket created in project equals ES, and Label equals bug, then
-// comment the session link"). See `triggerTemplates.ts`.
+// Trigger-template fields shown in place of the scheduled-task prompt.
 
 import { PlusIcon, XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
