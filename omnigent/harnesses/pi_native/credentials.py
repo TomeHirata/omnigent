@@ -618,9 +618,7 @@ def pi_native_model_options(
         provider = resolve_pi_native_provider(config_loader=config_loader)
     if provider is None:
         return pi_own_login_model_options()
-    provider = replace(
-        provider, extra_models=_live_family_model_entries(provider, transport=transport)
-    )
+    provider = _with_live_family_models(provider, transport=transport)
 
     rendered = provider.to_models_config()
     default_option = f"{_default_model_provider_id(provider, rendered)}/{provider.model}"
@@ -1474,30 +1472,30 @@ def _cross_family_routing_warning(
     )
 
 
-def _live_family_model_entries(
+def _with_live_family_models(
     provider: PiProviderConfig,
     *,
     transport: httpx.BaseTransport | None,
-) -> list[_PiModelEntry]:
-    """Enumerate a key/gateway endpoint's models for the pre-launch picker.
+) -> PiProviderConfig:
+    """Add a key/gateway endpoint's live models for the pre-launch picker.
 
     The rendered ``models.json`` otherwise carries only the configured default,
     so the picker offered one row while the endpoint served several. Ask the
     endpoint's own listing through the shared model-catalog fetchers — the lane
-    the Databricks paths already use — and keep the configured default first:
-    it still launches when the listing is unreachable.
+    the Databricks paths already use — and keep the configured models first:
+    they still launch when the listing is unreachable.
 
     :param provider: The resolved provider; its ``listing_provider`` names the
-        endpoint to list and ``extra_models`` holds the configured default.
+        endpoint to list.
     :param transport: Optional httpx transport override for tests.
-    :returns: The configured entries followed by every live model id, deduped;
-        unchanged when the listing fails.
+    :returns: *provider* with every live model id registered after the
+        configured entries, deduped; unchanged when the listing fails.
     """
     if provider.model_allowlist is not None:
-        return list(provider.extra_models)
+        return provider
     listing_provider = provider.listing_provider
     if listing_provider is None:
-        return list(provider.extra_models)
+        return provider
     try:
         # Mirror the catalog's routing: only a real Anthropic key speaks the
         # Anthropic models API; a gateway's family endpoint proxies messages,
@@ -1515,26 +1513,66 @@ def _live_family_model_entries(
             listing_provider.detail or listing_provider.kind,
             exc_info=True,
         )
-        return list(provider.extra_models)
+        return provider
 
-    # The Databricks Anthropic surface also lists other vendors' endpoints, which
-    # its Messages API answers with 404.
-    claude_only = listing_provider.base_url is not None and (
-        _databricks_workspace_gateway_surface(listing_provider.base_url)
-        is DatabricksPiSurface.ANTHROPIC
-    )
-    entries = list(provider.extra_models)
-    seen = {entry.get("id") for entry in entries}
+    listing_url = listing_provider.base_url
+    declared_surface = _databricks_workspace_gateway_surface(listing_url) if listing_url else None
+    extra_models = list(provider.extra_models)
+    additional = dict(provider.additional_providers)
+    seen = {entry.get("id") for entry in extra_models}
+    seen.update(entry.get("id") for payload in additional.values() for entry in payload["models"])
     for model_entry in listing.models:
         if model_entry.id in seen:
             continue
-        if claude_only and (
-            databricks_pi_surface_for_model(model_entry.id) is not DatabricksPiSurface.ANTHROPIC
-        ):
-            continue
         seen.add(model_entry.id)
-        entries.append(pi_generic_model_json_entry(model_entry.id))
-    return entries
+        entry = pi_generic_model_json_entry(model_entry.id)
+        provider_id = _listed_model_provider_id(provider, declared_surface, model_entry.id)
+        if provider_id == provider.provider_id:
+            extra_models.append(entry)
+        elif provider_id in additional:
+            payload = additional[provider_id]
+            additional[provider_id] = {**payload, "models": [*payload["models"], entry]}
+        elif provider_id is not None and declared_surface is not None and listing_url:
+            additional[provider_id] = _databricks_openai_provider(
+                provider.api_key,
+                listing_url,
+                [entry],
+                api_type=_databricks_surface_api_type(declared_surface),
+            )
+    return replace(provider, extra_models=extra_models, additional_providers=additional)
+
+
+def _listed_model_provider_id(
+    provider: PiProviderConfig, declared_surface: DatabricksPiSurface | None, model_id: str
+) -> str | None:
+    """Return the provider a live-listed model is offered under, or ``None`` to drop it.
+
+    Rows follow the tier routing of :func:`_spread_over_databricks_surfaces`: in a
+    multi-surface config, Claude ids sit on the Anthropic primary and other ids on
+    the listed family's own surface. The Databricks Anthropic surface also lists
+    other vendors' endpoints, which its Messages API answers with 404.
+
+    :param provider: The resolved provider whose picker rows are being built.
+    :param declared_surface: The Databricks gateway surface the listed endpoint
+        names, or ``None`` for any other endpoint.
+    :param model_id: A live-listed model id, e.g. ``"system.ai.gpt-5-mini"``.
+    """
+    if declared_surface is None or (
+        declared_surface is not DatabricksPiSurface.ANTHROPIC and not provider.databricks_surfaces
+    ):
+        return provider.provider_id
+    if databricks_pi_surface_for_model(model_id) is DatabricksPiSurface.ANTHROPIC:
+        return provider.provider_id
+    if declared_surface is DatabricksPiSurface.ANTHROPIC:
+        return None
+    return _SURFACE_PROVIDER_IDS[declared_surface]
+
+
+def _databricks_surface_api_type(surface: DatabricksPiSurface) -> str:
+    """Return the Pi API type for a model moved onto an OpenAI-protocol *surface*."""
+    if surface is DatabricksPiSurface.RESPONSES:
+        return "openai-responses"
+    return "openai-completions"
 
 
 def _databricks_surface_urls(
@@ -1589,7 +1627,7 @@ def _spread_over_databricks_surfaces(
     :param shortlist: The model entries the single-family config would register.
     :param curated_models: Whether *shortlist* is a configured tier shortlist.
     :param listing_provider: The family endpoint the single-family config lets
-        the pre-launch picker list.
+        the pre-launch picker list; its rows are routed like the tiers.
     :returns: A multi-surface config, or ``None`` when every model already fits
         the family's surface.
     """
@@ -1618,12 +1656,7 @@ def _spread_over_databricks_surfaces(
             surface_models.setdefault(surface, []).append(model_entry)
     additional: dict[str, _PiProviderPayload] = {}
     for surface, models in surface_models.items():
-        if surface is declared_surface:
-            api_type = api
-        elif surface is DatabricksPiSurface.RESPONSES:
-            api_type = "openai-responses"
-        else:
-            api_type = "openai-completions"
+        api_type = api if surface is declared_surface else _databricks_surface_api_type(surface)
         additional[_SURFACE_PROVIDER_IDS[surface]] = _databricks_openai_provider(
             api_key, surface_urls[surface], models, api_type=api_type
         )
@@ -1643,11 +1676,8 @@ def _spread_over_databricks_surfaces(
             if surface is not DatabricksPiSurface.ANTHROPIC
         },
         curated_models=curated_models,
-        # Moving a tier must not change what the picker lists. The listing feeds the
-        # primary, so it stays only while the primary is the family's own endpoint.
-        listing_provider=(
-            listing_provider if declared_surface is DatabricksPiSurface.ANTHROPIC else None
-        ),
+        # Moving a tier must not change what the picker lists.
+        listing_provider=listing_provider,
     )
 
 

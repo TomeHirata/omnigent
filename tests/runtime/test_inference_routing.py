@@ -18,7 +18,7 @@ from omnigent.harnesses.claude_native.main import resolve_native_claude_config
 from omnigent.harnesses.codex_native.app_server import resolve_native_codex_launch
 from omnigent.harnesses.opencode_native.provider import resolve_bound_opencode_gateway
 from omnigent.harnesses.pi_native.credentials import (
-    _live_family_model_entries,
+    _with_live_family_models,
     pi_native_model_options,
     resolve_pi_native_provider,
 )
@@ -289,9 +289,8 @@ def test_pi_single_model_policy_preserves_literal_ids_and_stays_curated(
         assert provider is not None
         assert provider.model == model
         assert provider.curated_models
-        assert [row["id"] for row in _live_family_model_entries(provider, transport=None)] == [
-            model
-        ]
+        listed = _with_live_family_models(provider, transport=None)
+        assert [row["id"] for row in listed.extra_models] == [model]
         prefix = str(option["model"]).split("/", 1)[0]
         for unlisted in ("unlisted", f"{prefix}/unlisted"):
             with pytest.raises(OmnigentError, match="configured model list"):

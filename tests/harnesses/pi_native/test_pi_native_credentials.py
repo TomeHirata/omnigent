@@ -386,20 +386,117 @@ def test_inline_databricks_gateway_keeps_gemini_off_the_anthropic_wire(
     assert staged == ["omnigent-mlflow"]
 
 
+def _databricks_mlflow_gateway_config(**models: str) -> dict[str, object]:
+    return {
+        "providers": {
+            "unity": {
+                "kind": "gateway",
+                "default": "pi",
+                "openai": {
+                    "base_url": "https://wkspc.cloud.databricks.com/ai-gateway/mlflow/v1",
+                    "api_key": "gw-token",
+                    "wire_api": "chat",
+                    "models": models,
+                },
+            }
+        }
+    }
+
+
 @pytest.mark.parametrize(
-    ("fast_tier", "fast_option"),
+    ("config", "listing_path", "listing", "expected"),
     [
-        ("system.ai.claude-haiku-5-5", "omnigent/system.ai.claude-haiku-5-5"),
-        ("system.ai.gemini-3-5-flash", "omnigent-mlflow/system.ai.gemini-3-5-flash"),
+        pytest.param(
+            _databricks_anthropic_gateway_config(fast="system.ai.claude-haiku-5-5"),
+            "/ai-gateway/anthropic/v1/models",
+            [
+                "system.ai.claude-opus-5",
+                "system.ai.claude-sonnet-5-5",
+                "anthropic-aigw-12e8d1ee-system.ai.gpt-5-6-sol",
+            ],
+            {
+                "omnigent/system.ai.claude-opus-5",
+                "omnigent/system.ai.claude-haiku-5-5",
+                "omnigent/system.ai.claude-sonnet-5-5",
+            },
+            id="anthropic-family",
+        ),
+        pytest.param(
+            _databricks_anthropic_gateway_config(fast="system.ai.gemini-3-5-flash"),
+            "/ai-gateway/anthropic/v1/models",
+            [
+                "system.ai.claude-opus-5",
+                "system.ai.claude-sonnet-5-5",
+                "anthropic-aigw-12e8d1ee-system.ai.gpt-5-6-sol",
+            ],
+            {
+                "omnigent/system.ai.claude-opus-5",
+                "omnigent-mlflow/system.ai.gemini-3-5-flash",
+                "omnigent/system.ai.claude-sonnet-5-5",
+            },
+            id="anthropic-family-moved-gemini",
+        ),
+        pytest.param(
+            _databricks_openai_gateway_config(fast="system.ai.claude-haiku-5-5"),
+            "/ai-gateway/codex/v1/models",
+            ["system.ai.gpt-5", "system.ai.gpt-5-mini", "system.ai.claude-sonnet-5-5"],
+            {
+                "omnigent-openai/system.ai.gpt-5",
+                "omnigent/system.ai.claude-haiku-5-5",
+                "omnigent-openai/system.ai.gpt-5-mini",
+                "omnigent/system.ai.claude-sonnet-5-5",
+            },
+            id="responses-family-moved-claude",
+        ),
+        pytest.param(
+            _databricks_mlflow_gateway_config(
+                default="system.ai.gemini-3-5-flash", fast="system.ai.claude-haiku-5-5"
+            ),
+            "/ai-gateway/mlflow/v1/models",
+            ["system.ai.gemini-3-5-pro", "system.ai.claude-sonnet-5-5"],
+            {
+                "omnigent-mlflow/system.ai.gemini-3-5-flash",
+                "omnigent/system.ai.claude-haiku-5-5",
+                "omnigent-mlflow/system.ai.gemini-3-5-pro",
+                "omnigent/system.ai.claude-sonnet-5-5",
+            },
+            id="mlflow-family-moved-claude",
+        ),
+        # Every tier moves, so the listed Gemini row needs its own provider.
+        pytest.param(
+            _databricks_mlflow_gateway_config(
+                default="system.ai.claude-opus-5", fast="system.ai.claude-haiku-5-5"
+            ),
+            "/ai-gateway/mlflow/v1/models",
+            ["system.ai.gemini-3-5-pro", "system.ai.claude-sonnet-5-5"],
+            {
+                "omnigent/system.ai.claude-opus-5",
+                "omnigent/system.ai.claude-haiku-5-5",
+                "omnigent-mlflow/system.ai.gemini-3-5-pro",
+                "omnigent/system.ai.claude-sonnet-5-5",
+            },
+            id="mlflow-family-all-claude-tiers",
+        ),
     ],
 )
-def test_databricks_anthropic_gateway_picker_lists_the_same_live_claude_rows(
-    monkeypatch: pytest.MonkeyPatch, fast_tier: str, fast_option: str
+def test_databricks_gateway_picker_keeps_live_rows_when_a_tier_moves(
+    monkeypatch: pytest.MonkeyPatch,
+    config: dict[str, object],
+    listing_path: str,
+    listing: list[str],
+    expected: set[str],
 ) -> None:
-    """A tier that moves to another surface leaves the picker's live Claude rows alone.
+    """A tier that moves to another surface leaves the family's live picker rows in place.
 
-    The Anthropic surface's listing also names other vendors' endpoints, which its
-    Messages API answers with 404, so the picker offers only its Claude rows.
+    Each listed row is offered where a tier with that id would run: Claude on the
+    Anthropic passthrough, anything else on the family's own surface. The
+    Anthropic surface's listing also names other vendors' endpoints, which its
+    Messages API answers with 404, so those rows are dropped.
+
+    :param config: The omnigent config with a curated Databricks gateway family.
+    :param listing_path: The family endpoint's model-listing path.
+    :param listing: Live model ids the endpoint returns.
+    :param expected: The picker's qualified model ids.
     """
 
     def _unexpected(host: str, token: str):
@@ -410,28 +507,14 @@ def test_databricks_anthropic_gateway_picker_lists_the_same_live_claude_rows(
 
     def _handler(request: httpx.Request) -> httpx.Response:
         listed.append(str(request.url))
-        return httpx.Response(
-            200,
-            json={
-                "data": [
-                    {"id": "system.ai.claude-opus-5"},
-                    {"id": "system.ai.claude-sonnet-5-5"},
-                    {"id": "anthropic-aigw-12e8d1ee-system.ai.gpt-5-6-sol"},
-                ]
-            },
-        )
+        return httpx.Response(200, json={"data": [{"id": row} for row in listing]})
 
     options = creds.pi_native_model_options(
-        config_loader=lambda: _databricks_anthropic_gateway_config(fast=fast_tier),
-        transport=httpx.MockTransport(_handler),
+        config_loader=lambda: config, transport=httpx.MockTransport(_handler)
     )
 
-    assert listed == ["https://wkspc.cloud.databricks.com/ai-gateway/anthropic/v1/models"]
-    assert {o["model"] for o in options} == {
-        "omnigent/system.ai.claude-opus-5",
-        "omnigent/system.ai.claude-sonnet-5-5",
-        fast_option,
-    }
+    assert listed == [f"https://wkspc.cloud.databricks.com{listing_path}"]
+    assert {o["model"] for o in options} == expected
 
 
 @pytest.mark.parametrize(
