@@ -477,13 +477,31 @@ def _databricks_mlflow_gateway_config(**models: str) -> dict[str, object]:
             },
             id="mlflow-family-all-claude-tiers",
         ),
+        # A failed listing still offers every configured tier on its own provider.
+        pytest.param(
+            _databricks_anthropic_gateway_config(fast="system.ai.gemini-3-5-flash"),
+            "/ai-gateway/anthropic/v1/models",
+            None,
+            {
+                "omnigent/system.ai.claude-opus-5",
+                "omnigent-mlflow/system.ai.gemini-3-5-flash",
+            },
+            id="anthropic-family-moved-gemini-listing-401",
+        ),
+        pytest.param(
+            _databricks_openai_gateway_config(fast="system.ai.claude-haiku-5-5"),
+            "/ai-gateway/codex/v1/models",
+            None,
+            {"omnigent-openai/system.ai.gpt-5", "omnigent/system.ai.claude-haiku-5-5"},
+            id="responses-family-moved-claude-listing-401",
+        ),
     ],
 )
 def test_databricks_gateway_picker_keeps_live_rows_when_a_tier_moves(
     monkeypatch: pytest.MonkeyPatch,
     config: dict[str, object],
     listing_path: str,
-    listing: list[str],
+    listing: list[str] | None,
     expected: set[str],
 ) -> None:
     """A tier that moves to another surface leaves the family's live picker rows in place.
@@ -495,7 +513,8 @@ def test_databricks_gateway_picker_keeps_live_rows_when_a_tier_moves(
 
     :param config: The omnigent config with a curated Databricks gateway family.
     :param listing_path: The family endpoint's model-listing path.
-    :param listing: Live model ids the endpoint returns.
+    :param listing: Live model ids the endpoint returns, or ``None`` when it
+        answers 401.
     :param expected: The picker's qualified model ids.
     """
 
@@ -507,6 +526,8 @@ def test_databricks_gateway_picker_keeps_live_rows_when_a_tier_moves(
 
     def _handler(request: httpx.Request) -> httpx.Response:
         listed.append(str(request.url))
+        if listing is None:
+            return httpx.Response(401, json={"error_code": "UNAUTHENTICATED"})
         return httpx.Response(200, json={"data": [{"id": row} for row in listing]})
 
     options = creds.pi_native_model_options(
