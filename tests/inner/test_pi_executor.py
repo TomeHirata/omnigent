@@ -367,28 +367,52 @@ def test_sanitize_real_sys_session_send_args_collapses_to_object() -> None:
     assert sanitized_args == expected
 
 
-@pytest.mark.parametrize("union_key", ["anyOf", "oneOf"])
-@pytest.mark.parametrize("null_first", [False, True])
-def test_sanitize_nullable_union_stays_an_anyof(union_key: str, null_first: bool) -> None:
+_MODEL_IDS_BRANCH = {"type": "array", "items": {"type": "string", "default": "x"}}
+_SANITIZED_MODEL_IDS = {"type": "array", "items": {"type": "string"}}
+
+
+@pytest.mark.parametrize(
+    ("union_key", "branches", "kept"),
+    [
+        pytest.param("anyOf", [_MODEL_IDS_BRANCH, {"type": "null"}], True, id="anyOf"),
+        pytest.param("anyOf", [{"type": "null"}, _MODEL_IDS_BRANCH], True, id="anyOf-null-first"),
+        pytest.param("oneOf", [_MODEL_IDS_BRANCH, {"type": "null"}], True, id="oneOf"),
+        pytest.param("oneOf", [{"type": "null"}, _MODEL_IDS_BRANCH], True, id="oneOf-null-first"),
+        # Every allOf branch must hold at once, so it is no union.
+        pytest.param("allOf", [_MODEL_IDS_BRANCH, {"type": "null"}], False, id="allOf"),
+        pytest.param(
+            "anyOf",
+            [_MODEL_IDS_BRANCH, {"type": "null"}, {"description": "untyped"}],
+            False,
+            id="third-branch",
+        ),
+    ],
+)
+def test_sanitize_nullable_union_stays_an_anyof(
+    union_key: str, branches: list[dict[str, object]], kept: bool
+) -> None:
     """
-    A union of one type with ``null`` keeps both branches and its description.
+    An exact union of one type with ``null`` keeps both branches and its description.
 
     Collapsing it to the typed branch tells the model null is not allowed, so a
-    tool's documented clear-with-null operation becomes unreachable.
+    tool's documented clear-with-null operation becomes unreachable. Any other
+    composition still collapses to its typed branch.
 
-    :param union_key: The union keyword the source schema spells, e.g. ``"oneOf"``.
-    :param null_first: Whether the ``null`` branch comes first.
+    :param union_key: The keyword the source schema spells, e.g. ``"oneOf"``.
+    :param branches: The composition's branches.
+    :param kept: Whether the composition is an exact ``T | null`` union.
     """
-    branches = [{"type": "array", "items": {"type": "string", "default": "x"}}, {"type": "null"}]
-    schema = {
-        "description": "Model ids, or null for the server defaults.",
-        union_key: branches[::-1] if null_first else branches,
-    }
+    schema = {"description": "Model ids, or null for the server defaults.", union_key: branches}
 
-    assert _sanitize_schema(schema) == {
-        "anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}],
-        "description": "Model ids, or null for the server defaults.",
-    }
+    expected = (
+        {
+            "anyOf": [_SANITIZED_MODEL_IDS, {"type": "null"}],
+            "description": "Model ids, or null for the server defaults.",
+        }
+        if kept
+        else _SANITIZED_MODEL_IDS
+    )
+    assert _sanitize_schema(schema) == expected
 
 
 def test_generated_extension_keeps_nullable_scheduled_task_ids() -> None:

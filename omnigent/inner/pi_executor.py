@@ -521,7 +521,7 @@ def _sanitize_schema(schema: ToolSpec) -> ToolSpec:
             continue
         if key in ("anyOf", "oneOf", "allOf"):
             if isinstance(value, list) and value:
-                nullable = _nullable_union_branch(value)
+                nullable = _nullable_union_branch(value) if key != "allOf" else None
                 if nullable is not None:
                     result["anyOf"] = [_sanitize_schema(nullable), {"type": "null"}]
                     continue
@@ -543,10 +543,11 @@ def _sanitize_schema(schema: ToolSpec) -> ToolSpec:
 
 
 def _nullable_union_branch(branches: list[Any]) -> ToolSpec | None:
-    """Return the typed branch of a ``T | null`` union, or ``None`` for any other union."""
-    typed = [c for c in branches if isinstance(c, dict) and "type" in c]
-    non_null = [c for c in typed if c["type"] != "null"]
-    return non_null[0] if len(non_null) == 1 and len(typed) == 2 else None
+    """Return the typed branch of an exact ``T | null`` union, or ``None`` for any other."""
+    if len(branches) != 2 or not all(isinstance(c, dict) and "type" in c for c in branches):
+        return None
+    non_null = [c for c in branches if c["type"] != "null"]
+    return non_null[0] if len(non_null) == 1 else None
 
 
 def _generate_extension_js(port: int, tool_schemas: list[ToolSpec], token: str) -> str:
