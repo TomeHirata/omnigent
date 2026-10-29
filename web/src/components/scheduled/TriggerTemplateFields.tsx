@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/scheduled/Label";
 import {
+  MAX_INSTRUCTIONS_CHARS,
   MAX_SESSIONS_PER_RUN,
   TRIGGER_TEMPLATES,
   type TriggerFields,
@@ -29,6 +30,7 @@ export function TriggerTemplateFields({
   onEditAsPrompt: () => void;
 }) {
   const template = TRIGGER_TEMPLATES[source];
+  const instructionsTooLong = fields.instructions.trim().length > MAX_INSTRUCTIONS_CHARS;
   return (
     <div className="flex flex-col gap-4" data-testid="task-trigger-fields">
       <div className="flex flex-col gap-1.5">
@@ -69,10 +71,17 @@ export function TriggerTemplateFields({
           className="resize-none text-ui"
           onChange={(e) => onChange({ ...fields, instructions: e.target.value })}
         />
-        <p className="text-sm text-muted-foreground">
-          Each run checks for new matches and starts one session per match, up to{" "}
-          {MAX_SESSIONS_PER_RUN} per run.
-        </p>
+        {instructionsTooLong ? (
+          <p className="text-sm text-destructive" role="alert" data-testid="task-trigger-too-long">
+            Keep instructions to {MAX_INSTRUCTIONS_CHARS.toLocaleString("en-US")} characters or
+            fewer so each session&apos;s first message has room for the item.
+          </p>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            Each run checks for new matches and starts one session per match, up to{" "}
+            {MAX_SESSIONS_PER_RUN} per run.
+          </p>
+        )}
       </div>
 
       <div className="flex items-center gap-2">

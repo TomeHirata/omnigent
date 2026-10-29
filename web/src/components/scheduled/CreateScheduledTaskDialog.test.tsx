@@ -1422,6 +1422,15 @@ describe("CreateScheduledTaskDialog trigger template", () => {
     fillJira();
     expect(submit).toBeEnabled();
     expect(screen.getByTestId("task-trigger-preview")).toHaveTextContent("project = ES");
+
+    // Over-long instructions would crowd the item out of a worker's first message.
+    fireEvent.change(screen.getByTestId("task-trigger-instructions"), {
+      target: { value: "x".repeat(2001) },
+    });
+    expect(submit).toBeDisabled();
+    expect(screen.getByTestId("task-trigger-too-long")).toHaveTextContent(
+      "Keep instructions to 2,000 characters or fewer",
+    );
   });
 
   it("creates an hourly continue-mode task whose prompt is the rendered template", async () => {

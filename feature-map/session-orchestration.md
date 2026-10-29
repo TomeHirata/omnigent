@@ -15,7 +15,9 @@ workers on its host or a new managed sandbox. This is enabled by default, with
   Chat/Terminal header rechecks access when opened, hides attribution during the
   lookup, and links to the creator when accessible; otherwise it says "Created by
   another session". `sys_session_list` and `sys_session_get_info` expose
-  `created_by_session_id` so managers can identify their workers across restarts.
+  `created_by_session_id` so managers can identify their workers across restarts;
+  `sys_session_list` with `include_archived` also lists archived workers, each
+  marked `archived`.
 - `kill-switch`: an explicit disable refuses new peer sends and independent
   creates, even if an enable is also listed. Restart every server replica to
   apply it. Already accepted tasks may finish; ordinary reads and child work remain.

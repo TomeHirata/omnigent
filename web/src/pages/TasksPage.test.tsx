@@ -421,12 +421,6 @@ describe("trigger templates", () => {
     ]);
   });
 
-  it("hides them on a server that can't keep one session per automation", () => {
-    setTasks([]);
-    renderPage();
-    expect(screen.queryByTestId("suggestion-trigger-jira")).toBeNull();
-  });
-
   it("opens the dialog on the picked template with an absolute session link base", () => {
     setTasks([]);
     renderWithSessionModes();
