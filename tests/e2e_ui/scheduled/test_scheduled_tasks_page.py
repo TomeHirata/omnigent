@@ -839,7 +839,7 @@ def test_scheduled_task_trigger_template_creates_hourly_manager_task(
     page.get_by_test_id("task-trigger-instructions").fill("Triage the ticket.")
     page.get_by_test_id("task-trigger-preview").locator("summary").click()
     expect(page.get_by_test_id("task-trigger-preview")).to_contain_text(
-        "(project = ES AND labels = omnigent) AND updated >= <that time>"
+        "(project = ES AND labels = omnigent) AND created >= <that time>"
     )
     page.get_by_test_id("create-scheduled-task-submit").click()
 

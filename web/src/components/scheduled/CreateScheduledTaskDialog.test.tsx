@@ -1412,6 +1412,9 @@ describe("CreateScheduledTaskDialog trigger template", () => {
     expect(screen.getByTestId("task-session-mode-trigger")).toHaveTextContent(
       "Continue one session",
     );
+    expect(screen.getByTestId("task-trigger-fields")).toHaveTextContent(
+      "Each run looks for newly created tickets that match and starts one session for each, up to 10 per run. Older ones that change or start matching later don't.",
+    );
     // The form says the source is untrusted and that link-back writes there.
     const note = screen.getByTestId("task-trigger-untrusted-note");
     expect(note).toHaveTextContent("Anyone who can write in what you watch can try to steer");
@@ -1449,7 +1452,7 @@ describe("CreateScheduledTaskDialog trigger template", () => {
     const arg = mutateAsync.mock.calls[0][0];
     expect(arg).toMatchObject({ name: "Jira tickets", sessionMode: "continue" });
     expect(arg.rrule).toMatch(/^FREQ=HOURLY/);
-    expect(arg.prompt).toContain("(project = ES) AND updated >= <that time>");
+    expect(arg.prompt).toContain("(project = ES) AND created >= <that time>");
     expect(arg.prompt).toContain('placement "same_host"');
     expect(arg.prompt).toContain("https://omni.example.com/c/CONVERSATION_ID");
     expect(arg.prompt).toMatch(/Instructions for each session:\nTriage it\.$/);
@@ -1497,7 +1500,7 @@ describe("CreateScheduledTaskDialog trigger template", () => {
 
     await waitFor(() => expect(mutateAsync).toHaveBeenCalledTimes(1));
     const { prompt } = mutateAsync.mock.calls[0][0];
-    expect(prompt).toContain("Slack messages in #eng-support that report a bug");
+    expect(prompt).toContain("new Slack messages in #eng-support that report a bug");
     expect(prompt).not.toContain("Omnigent session:");
   });
 
@@ -1511,7 +1514,7 @@ describe("CreateScheduledTaskDialog trigger template", () => {
 
     expect(screen.queryByTestId("task-trigger-fields")).toBeNull();
     const prompt = screen.getByTestId("task-prompt-input") as HTMLTextAreaElement;
-    expect(prompt.value).toContain("repo:acme/app updated:>=<that time>");
+    expect(prompt.value).toContain("repo:acme/app created:>=<that time>");
     // The kept session stays, but the user may now change it.
     expect(screen.getByTestId("task-session-mode-trigger")).toBeEnabled();
   });

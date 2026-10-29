@@ -51,9 +51,14 @@ describe("renderTriggerPrompt", () => {
   it("renders the Jira manager prompt with the JQL, placement, dedupe title and link", () => {
     const prompt = renderTriggerPrompt("jira", fields(), CTX);
 
+    // Only creation fires: an older ticket that's edited or starts matching later doesn't.
     expect(prompt).toContain(
-      "Watch: Jira tickets matching this JQL:\nproject = ES AND labels = omnigent",
+      "starts one Omnigent session for each newly created ticket that matches.",
     );
+    expect(prompt).toContain(
+      "Watch: new Jira tickets matching this JQL:\nproject = ES AND labels = omnigent",
+    );
+    expect(prompt).not.toMatch(/\bupdated\b/);
     expect(prompt).toContain('placement "same_host"');
     expect(prompt).toContain('title "Jira <ticket key>"');
     // Each worker gets the owner's instructions first and the ticket fenced as data.
@@ -70,11 +75,11 @@ describe("renderTriggerPrompt", () => {
     expect(prompt.endsWith("Instructions for each session:\nInvestigate the ticket.")).toBe(true);
   });
 
-  it("walks matches oldest update first and only checkpoints what it fully read", () => {
+  it("walks newly created matches oldest first and only checkpoints what it fully read", () => {
     const prompt = renderTriggerPrompt("jira", fields(), CTX);
 
     expect(prompt).toContain(
-      "search for (project = ES AND labels = omnigent) AND updated >= <that time> ORDER BY updated ASC.",
+      "search for (project = ES AND labels = omnigent) AND created >= <that time> ORDER BY created ASC.",
     );
     expect(prompt).toContain(
       "Read every page of results in that order. If you can't read them all, stop at the last result you read.",
@@ -88,20 +93,22 @@ describe("renderTriggerPrompt", () => {
       "Note the current UTC time; it ends this run's window. Then search from 5 minutes before the check time",
     );
     expect(prompt).toContain(
-      'End with "Checked through: <time>" in ISO 8601 UTC: the time you noted before searching if you read every result and handled every match; otherwise the update time of the last ticket you handled (started or skipped) before you stopped, or the previous check time if you handled none',
+      'End with "Checked through: <time>" in ISO 8601 UTC: the time you noted before searching if you read every result and handled every match; otherwise the time the last ticket you handled (started or skipped) before you stopped was created, or the previous check time if you handled none',
     );
   });
 
   it("skips handled tickets from earlier replies or an archive-inclusive, fully paged listing", () => {
     const prompt = renderTriggerPrompt("jira", fields(), CTX);
 
-    expect(prompt).toContain("Check your earlier replies in this session first.");
+    expect(prompt).toContain(
+      'Skip any ticket you already started a session for, or that is on a "Delivery pending:" line. Check the sessions your earlier replies in this session say you started first.',
+    );
     expect(prompt).toContain(
       "For results not listed there, call sys_session_list once with include_archived true, following next_cursor through every page, and look for sessions whose created_by_session_id is your session ID",
     );
-    // Older runners don't know include_archived; earlier replies still cover archived workers.
+    // Older runners silently ignore include_archived; their rows lack the archived field.
     expect(prompt).toContain(
-      "If the runner rejects include_archived, call it without that argument and rely on your earlier replies for archived sessions.",
+      "If the listed rows have no archived field, the runner predates include_archived and listed only active sessions, so rely on your earlier replies for archived ones.",
     );
     expect(prompt).toContain("Reply with the title and session ID of each session you started");
   });
@@ -112,8 +119,9 @@ describe("renderTriggerPrompt", () => {
     expect(prompt).toContain(
       "If a call is refused, nothing was started: report it and stop there, so the next run tries again.",
     );
+    // The session may exist without its task, so the item is tracked, not just skipped.
     expect(prompt).toContain(
-      "If a call times out or its result is unclear, don't retry it in this run: report it and stop there, and the next run's skip check will find the session if it was created.",
+      'If a call times out or its result is unclear, the session may exist without its task: don\'t retry it in this run; list its title as "<title> unconfirmed" on a "Delivery pending:" line and stop there.',
     );
     expect(prompt).not.toContain("before retrying");
   });
@@ -141,18 +149,25 @@ describe("renderTriggerPrompt", () => {
       'If it returns a conversation_id with status created_initial_message_failed, the session exists but its task wasn\'t delivered: don\'t create another or resend now; list it as "<title> <conversation_id>" on a "Delivery pending:" line and go on.',
     );
     expect(prompt).toContain(
-      "2. For each pending delivery, read that session's history with sys_session_get_history. If your task message is there, it was delivered: drop it from the list. If the session has no message from you, rebuild the message for that ticket (fetch it again if needed) and send it with sys_session_message. If you can't tell, or sending fails or is unclear, keep it pending. Never create another session for it.",
+      "2. For each pending delivery, find its session: by its conversation_id, or, for an unconfirmed start listed without one, by its title among the sessions you created (sys_session_list with include_archived true).",
+    );
+    // An unconfirmed start that never happened goes back to being a new ticket.
+    expect(prompt).toContain(
+      "If no such session exists, the start never happened: drop the entry, and the search below finds the ticket again.",
+    );
+    expect(prompt).toContain(
+      "Otherwise read that session's history with sys_session_get_history. If your task message is there, it was delivered: drop the entry. If the session has no message from you, rebuild the message for that ticket (fetch it again if needed) and send it with sys_session_message. If you can't tell, or sending fails or is unclear, keep it pending. Never create another session for it.",
     );
   });
 
-  it("replaces a sorted query's ORDER BY with update order", () => {
+  it("replaces a sorted query's ORDER BY with creation order", () => {
     const prompt = renderTriggerPrompt(
       "jira",
       fields({ watch: "project = ES ORDER BY created DESC" }),
       CTX,
     );
     expect(prompt).toContain(
-      "search for (project = ES) AND updated >= <that time> ORDER BY updated ASC.",
+      "search for (project = ES) AND created >= <that time> ORDER BY created ASC.",
     );
     expect(prompt).not.toContain("ORDER BY created DESC.");
   });
@@ -185,13 +200,13 @@ describe("renderTriggerPrompt", () => {
       fields({ watch: "#eng-support", filter: "report a bug" }),
       CTX,
     );
-    expect(filtered).toContain("Watch: Slack messages in #eng-support that report a bug");
+    expect(filtered).toContain("Watch: new Slack messages in #eng-support that report a bug");
     expect(filtered).toContain("Only messages that report a bug count.");
     expect(filtered).toContain('title "Slack <channel> <message ts>"');
     expect(filtered).toContain("in the thread of each message");
 
     const unfiltered = renderTriggerPrompt("slack", fields({ watch: "#eng-support" }), CTX);
-    expect(unfiltered).toContain("Watch: Slack messages in #eng-support\n");
+    expect(unfiltered).toContain("Watch: new Slack messages in #eng-support\n");
     expect(unfiltered).toContain("Every top-level message counts.");
   });
 
@@ -202,11 +217,15 @@ describe("renderTriggerPrompt", () => {
       CTX,
     );
     expect(prompt).toContain(
-      "search for: repo:acme/app is:issue label:bug updated:>=<that time>, oldest update first (for example gh search issues --include-prs --sort updated --order asc --limit 100).",
+      "search for: repo:acme/app is:issue label:bug created:>=<that time>, oldest first (for example gh search issues --include-prs --sort created --order asc --limit 100).",
+    );
+    // --limit caps the total, so a full result set ends this run's range.
+    expect(prompt).toContain(
+      "The limit caps the total, not a page: if you get as many results as the limit, there may be more, so treat the last one as the last result you read.",
     );
     expect(prompt).toContain('title "GitHub <owner/repo>#<number>"');
 
     const unfiltered = renderTriggerPrompt("github", fields({ watch: "acme/app" }), CTX);
-    expect(unfiltered).toContain("search for: repo:acme/app updated:>=<that time>");
+    expect(unfiltered).toContain("search for: repo:acme/app created:>=<that time>");
   });
 });

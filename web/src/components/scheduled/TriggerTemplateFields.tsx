@@ -79,8 +79,9 @@ export function TriggerTemplateFields({
           </p>
         ) : (
           <p className="text-sm text-muted-foreground">
-            Each run checks for new matches and starts one session per match, up to{" "}
-            {MAX_SESSIONS_PER_RUN} per run.
+            Each run looks for newly created {template.itemPlural} that match and starts one session
+            for each, up to {MAX_SESSIONS_PER_RUN} per run. Older ones that change or start matching
+            later don&apos;t.
           </p>
         )}
       </div>
