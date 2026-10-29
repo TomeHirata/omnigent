@@ -367,6 +367,52 @@ def test_sanitize_real_sys_session_send_args_collapses_to_object() -> None:
     assert sanitized_args == expected
 
 
+@pytest.mark.parametrize("union_key", ["anyOf", "oneOf"])
+@pytest.mark.parametrize("null_first", [False, True])
+def test_sanitize_nullable_union_stays_an_anyof(union_key: str, null_first: bool) -> None:
+    """
+    A union of one type with ``null`` keeps both branches and its description.
+
+    Collapsing it to the typed branch tells the model null is not allowed, so a
+    tool's documented clear-with-null operation becomes unreachable.
+
+    :param union_key: The union keyword the source schema spells, e.g. ``"oneOf"``.
+    :param null_first: Whether the ``null`` branch comes first.
+    """
+    branches = [{"type": "array", "items": {"type": "string", "default": "x"}}, {"type": "null"}]
+    schema = {
+        "description": "Model ids, or null for the server defaults.",
+        union_key: branches[::-1] if null_first else branches,
+    }
+
+    assert _sanitize_schema(schema) == {
+        "anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}],
+        "description": "Model ids, or null for the server defaults.",
+    }
+
+
+def test_generated_extension_keeps_nullable_scheduled_task_ids() -> None:
+    """
+    SDK Pi registers ``sys_scheduled_task_update`` with both nullable ids intact.
+
+    ``project_id: null`` stops filing runs into a project and ``session_id: null``
+    clears the continued session; the registered contract must allow and
+    describe both.
+    """
+    from omnigent.tools.builtins.scheduled_tasks import SysScheduledTaskUpdateTool
+
+    spec = SysScheduledTaskUpdateTool().get_schema()["function"]
+    js = _generate_extension_js(12345, [spec], "tok")
+    tools = json.loads(js.split("const TOOLS = ", 1)[1].split(";\nconst BRIDGED", 1)[0])
+
+    registered = tools[0]["parameters"]["properties"]
+    for field in ("project_id", "session_id"):
+        assert registered[field] == {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "description": spec["parameters"]["properties"][field]["description"],
+        }
+
+
 # ---------------------------------------------------------------------------
 # _pi_provider_for_model tests
 # ---------------------------------------------------------------------------
