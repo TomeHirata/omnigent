@@ -19,7 +19,8 @@ workers on its host or a new managed sandbox. This is enabled by default, with
   `sys_session_list` with `include_archived` also lists archived workers, each
   marked `archived`.
 - `kill-switch`: an explicit disable refuses new peer sends and independent
-  creates, even if an enable is also listed. Restart every server replica to
+  creates, even if an enable is also listed, and hides the Automations page's
+  trigger templates (`/v1/info` reports `features.session_orchestration`). Restart every server replica to
   apply it. Already accepted tasks may finish; ordinary reads and child work remain.
 - `create`: `sys_session_create` retains child creation by default; `same_host`
   and `managed` placements create independent, initially private sessions.

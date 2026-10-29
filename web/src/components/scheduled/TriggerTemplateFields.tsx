@@ -10,6 +10,7 @@ import {
   MAX_INSTRUCTIONS_CHARS,
   MAX_SESSIONS_PER_RUN,
   TRIGGER_TEMPLATES,
+  triggerServiceName,
   type TriggerFields,
   type TriggerSource,
 } from "@/components/scheduled/triggerTemplates";
@@ -96,6 +97,11 @@ export function TriggerTemplateFields({
           {template.linkBackLabel}
         </label>
       </div>
+      <p className="text-sm text-muted-foreground" data-testid="task-trigger-untrusted-note">
+        Anyone who can write in what you watch can try to steer these sessions, which run with your
+        tools.
+        {fields.linkBack && ` Link-back posts to ${triggerServiceName(source)} with your account.`}
+      </p>
 
       {renderedPrompt !== "" && (
         <details className="group" data-testid="task-trigger-preview">

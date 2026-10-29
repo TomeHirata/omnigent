@@ -1411,6 +1411,12 @@ describe("CreateScheduledTaskDialog trigger template", () => {
     expect(screen.getByTestId("task-session-mode-trigger")).toHaveTextContent(
       "Continue one session",
     );
+    // The form says the source is untrusted and that link-back writes there.
+    const note = screen.getByTestId("task-trigger-untrusted-note");
+    expect(note).toHaveTextContent("Anyone who can write in what you watch can try to steer");
+    expect(note).toHaveTextContent("Link-back posts to Jira with your account.");
+    fireEvent.click(screen.getByTestId("task-trigger-link-back"));
+    expect(note).not.toHaveTextContent("Link-back posts");
   });
 
   it("keeps submit disabled until the watch value and instructions are filled", () => {

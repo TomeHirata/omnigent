@@ -9,6 +9,7 @@
 
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
+import { basenamedRouting, RoutingProvider } from "@/lib/routing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TasksPage } from "./TasksPage";
 import * as hooks from "@/hooks/useScheduledTasks";
@@ -395,16 +396,35 @@ describe("row actions", () => {
 });
 
 describe("trigger templates", () => {
-  function renderWithSessionModes() {
+  const TRIGGER_INFO = {
+    ...SERVER_INFO_OFFLINE_FALLBACK,
+    scheduled_task_session_modes: true,
+    features: { session_orchestration: true },
+  };
+
+  function renderWithSessionModes(
+    info: typeof SERVER_INFO_OFFLINE_FALLBACK = TRIGGER_INFO,
+    { basename, mount }: { basename?: string; mount?: string } = {},
+  ) {
+    const page = mount ? (
+      <RoutingProvider value={basenamedRouting(mount)}>
+        <TasksPage />
+      </RoutingProvider>
+    ) : (
+      <TasksPage />
+    );
     return render(
-      <CapabilitiesProvider
-        info={{ ...SERVER_INFO_OFFLINE_FALLBACK, scheduled_task_session_modes: true }}
-      >
-        <MemoryRouter>
-          <TasksPage />
+      <CapabilitiesProvider info={info}>
+        <MemoryRouter basename={basename} initialEntries={[`${basename ?? ""}/tasks`]}>
+          {page}
         </MemoryRouter>
       </CapabilitiesProvider>,
     );
+  }
+
+  function linkBaseAfterPickingSlack(): string | null {
+    fireEvent.click(screen.getByTestId("suggestion-trigger-slack"));
+    return screen.getByTestId("manual-dialog-open").getAttribute("data-session-link-base");
   }
 
   it("adds the Jira, Slack and GitHub chips after the prompt suggestions", () => {
@@ -433,5 +453,27 @@ describe("trigger templates", () => {
     // A later plain open drops the template.
     fireEvent.click(screen.getByTestId("new-task-button"));
     expect(screen.getByTestId("manual-dialog-open").getAttribute("data-initial-trigger")).toBe("");
+  });
+
+  it("keeps a standalone base path in the session link base", () => {
+    setTasks([]);
+    renderWithSessionModes(TRIGGER_INFO, { basename: "/proxy/6767" });
+    expect(linkBaseAfterPickingSlack()).toBe(`${window.location.origin}/proxy/6767/c/`);
+  });
+
+  it("keeps an embed's mount path, under the host router's basename, in the link base", () => {
+    setTasks([]);
+    renderWithSessionModes(TRIGGER_INFO, { basename: "/host", mount: "/ml/omnigent-embed" });
+    expect(linkBaseAfterPickingSlack()).toBe(`${window.location.origin}/host/ml/omnigent-embed/c/`);
+  });
+
+  it.each([
+    ["can't keep one session per automation", { scheduled_task_session_modes: false }],
+    ["has session orchestration turned off", { features: { session_orchestration: false } }],
+  ])("hides the chips when the server %s", (_name, overrides) => {
+    setTasks([]);
+    renderWithSessionModes({ ...TRIGGER_INFO, ...overrides });
+    expect(screen.getByTestId("suggestion-follow-up-monitor")).toBeInTheDocument();
+    expect(screen.queryByTestId("suggestion-trigger-jira")).toBeNull();
   });
 });

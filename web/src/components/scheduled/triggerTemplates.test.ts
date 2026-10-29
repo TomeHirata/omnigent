@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_INSTRUCTIONS_CHARS,
   renderTriggerPrompt,
+  splitJqlOrderBy,
   triggerFieldsComplete,
   type TriggerFields,
   type TriggerPromptContext,
@@ -23,16 +24,26 @@ function fields(overrides: Partial<TriggerFields> = {}): TriggerFields {
 }
 
 describe("triggerFieldsComplete", () => {
-  it("needs a watch value and instructions, but not a filter", () => {
-    expect(triggerFieldsComplete(fields())).toBe(true);
-    expect(triggerFieldsComplete(fields({ watch: "  " }))).toBe(false);
-    expect(triggerFieldsComplete(fields({ instructions: "" }))).toBe(false);
+  // Instructions are capped so each worker's first message has room for the item.
+  it.each<[string, Partial<TriggerFields>, boolean]>([
+    ["watch and instructions, no filter", {}, true],
+    ["blank watch value", { watch: "  " }, false],
+    ["empty instructions", { instructions: "" }, false],
+    ["instructions at the cap", { instructions: "x".repeat(MAX_INSTRUCTIONS_CHARS) }, true],
+    ["instructions over the cap", { instructions: "x".repeat(MAX_INSTRUCTIONS_CHARS + 1) }, false],
+  ])("%s", (_name, overrides, complete) => {
+    expect(triggerFieldsComplete(fields(overrides))).toBe(complete);
   });
+});
 
-  it("caps the instructions so each worker's first message has room for the item", () => {
-    const atLimit = "x".repeat(MAX_INSTRUCTIONS_CHARS);
-    expect(triggerFieldsComplete(fields({ instructions: atLimit }))).toBe(true);
-    expect(triggerFieldsComplete(fields({ instructions: `${atLimit}x` }))).toBe(false);
+describe("splitJqlOrderBy", () => {
+  it.each([
+    ["project = ES", "project = ES", ""],
+    ["project = ES ORDER BY created DESC", "project = ES", "ORDER BY created DESC"],
+    ['summary ~ "order by" order by updated', 'summary ~ "order by"', "order by updated"],
+    ["project = SHORDER", "project = SHORDER", ""],
+  ])("splits %j", (jql, where, orderBy) => {
+    expect(splitJqlOrderBy(jql)).toEqual({ where, orderBy });
   });
 });
 
@@ -64,7 +75,25 @@ describe("renderTriggerPrompt", () => {
       'Comment "Omnigent session: https://omni.example.com/c/<conversation_id>" on each ticket',
     );
     expect(prompt).toContain('End with "Checked through: <time>"');
+    // A failed run keeps the old checkpoint so nothing older than the overlap is skipped.
+    expect(prompt).toContain(
+      '"Checked through:" line of your most recent reply in this session that has one',
+    );
+    expect(prompt).toContain(
+      "If the search or a session start failed and you couldn't recover, repeat the previous check time instead",
+    );
     expect(prompt.endsWith("Instructions for each session:\nInvestigate the ticket.")).toBe(true);
+  });
+
+  it("keeps a sorted query's ORDER BY after the time condition", () => {
+    const prompt = renderTriggerPrompt(
+      "jira",
+      fields({ watch: "project = ES ORDER BY created DESC" }),
+      CTX,
+    );
+    expect(prompt).toContain(
+      "search for (project = ES) AND updated >= <that time> ORDER BY created DESC.",
+    );
   });
 
   it("numbers the steps without a link-back step when it is off", () => {
