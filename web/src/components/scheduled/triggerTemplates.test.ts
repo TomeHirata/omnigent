@@ -180,6 +180,21 @@ describe("renderTriggerPrompt", () => {
       "Replace CONVERSATION_ID with the conversation_id that sys_session_create returned",
     );
     expect(prompt.endsWith("Instructions for each session:\nInvestigate the ticket.")).toBe(true);
+
+    // A raw JQL row's own ORDER BY gives way to creation order.
+    const sorted = renderTriggerPrompt(
+      "jira",
+      fields({
+        conditions: [
+          { field: "jql", operator: "matches", value: "type = Bug ORDER BY created DESC" },
+        ],
+      }),
+      CTX,
+    );
+    expect(sorted).toContain(
+      'search for (project = "ES" AND (type = Bug)) AND created >= <that time> ORDER BY created ASC.',
+    );
+    expect(sorted).not.toContain("ORDER BY created DESC");
   });
 
   it("walks newly created matches oldest first and only checkpoints what it fully read", () => {
@@ -262,29 +277,17 @@ describe("renderTriggerPrompt", () => {
     // An unconfirmed start that never happened is fetched again by key, since the
     // checkpoint may have moved past its creation time while it was pending.
     expect(prompt).toContain(
-      "If no such session exists, the start never happened: drop the entry, fetch that ticket again by the key in its title, and handle it with this run's matches below, since the search window may have moved past it.",
+      "If no such session exists and the listed rows carry an archived field (so archived sessions were included), the start never happened: drop the entry, fetch that ticket again by the key in its title, and handle it with this run's matches below, since the search window may have moved past it.",
+    );
+    // An older runner lists only active sessions, so "not found" proves nothing there.
+    expect(prompt).toContain(
+      "If the rows have no archived field, an archived session could be hiding: keep the entry pending and ask the owner in your reply to check for that session.",
     );
     // A task missing from history may still be queued, so it is never resent.
     expect(prompt).toContain(
       "Otherwise read that session's history with sys_session_get_history. If your task message is there, it was delivered: drop the entry. If it isn't, keep the entry pending and point the owner to that session in your reply: the task may still be queued where the history can't show it, so never resend it and never create another session for it.",
     );
     expect(prompt).not.toContain("send it with sys_session_message");
-  });
-
-  it("replaces a raw JQL row's ORDER BY with creation order", () => {
-    const prompt = renderTriggerPrompt(
-      "jira",
-      fields({
-        conditions: [
-          { field: "jql", operator: "matches", value: "type = Bug ORDER BY created DESC" },
-        ],
-      }),
-      CTX,
-    );
-    expect(prompt).toContain(
-      'search for (project = "ES" AND (type = Bug)) AND created >= <that time> ORDER BY created ASC.',
-    );
-    expect(prompt).not.toContain("ORDER BY created DESC");
   });
 
   it("numbers the steps without a link-back step when it is off", () => {
