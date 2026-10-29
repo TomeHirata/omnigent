@@ -79,8 +79,13 @@ describe("renderTriggerPrompt", () => {
     expect(prompt).toContain(
       'Read your state from your most recent reply in this session that has a "Checked through:" line',
     );
+    // The window ends when the search starts, so an item arriving during a long
+    // run falls inside the next run's search.
     expect(prompt).toContain(
-      'End with "Checked through: <time>": the current UTC time in ISO 8601 if you read every result and handled every match; otherwise the update time of the last ticket you handled (started or skipped) before you stopped, or the previous check time if you handled none',
+      "Note the current UTC time; it ends this run's window. Then search from 5 minutes before the check time",
+    );
+    expect(prompt).toContain(
+      'End with "Checked through: <time>" in ISO 8601 UTC: the time you noted before searching if you read every result and handled every match; otherwise the update time of the last ticket you handled (started or skipped) before you stopped, or the previous check time if you handled none',
     );
   });
 
@@ -115,12 +120,25 @@ describe("renderTriggerPrompt", () => {
 
     // One command per link, so a permission allow rule for that command applies.
     expect(prompt).toContain("post each link with its own command or tool call");
-    expect(prompt).toContain('that check time, and any "Link-back pending:" line.');
     expect(prompt).toContain(
-      "2. Post each pending link-back first, the same way as below. Don't start sessions for them; one that fails again stays pending.",
+      'that check time, and any "Delivery pending:" and "Link-back pending:" lines.',
+    );
+    expect(prompt).toContain(
+      "3. Post each pending link-back, the same way as below. Don't start sessions for them; one that fails again stays pending.",
     );
     expect(prompt).toContain(
       'If posting fails, don\'t retry it in this run: list it as "<title> <conversation_id>" on a "Link-back pending:" line in your reply.',
+    );
+  });
+
+  it("recovers a worker whose first task wasn't delivered without creating another", () => {
+    const prompt = renderTriggerPrompt("jira", fields(), CTX);
+
+    expect(prompt).toContain(
+      'If it returns a conversation_id with status created_initial_message_failed, the session exists but its task wasn\'t delivered: don\'t create another or resend now; list it as "<title> <conversation_id>" on a "Delivery pending:" line and go on.',
+    );
+    expect(prompt).toContain(
+      "2. For each pending delivery, read that session's history with sys_session_get_history. If your task message is there, it was delivered: drop it from the list. If the session has no message from you, rebuild the message for that ticket (fetch it again if needed) and send it with sys_session_message. If you can't tell, or sending fails or is unclear, keep it pending. Never create another session for it.",
     );
   });
 
@@ -142,7 +160,7 @@ describe("renderTriggerPrompt", () => {
     expect(prompt).not.toContain("Omnigent session:");
     expect(prompt).not.toContain("Link-back pending:");
     expect(prompt).toContain(
-      "\n5. Reply with the title and session ID of each session you started.",
+      "\n6. Reply with the title and session ID of each session you started,",
     );
   });
 
