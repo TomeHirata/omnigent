@@ -672,6 +672,36 @@ describe("CreateScheduledTaskDialog submit", () => {
     await waitFor(() => expect(screen.getByTestId("create-scheduled-task-submit")).toBeEnabled());
   });
 
+  it("keeps the saved workspace in view and in the update when the host changes", async () => {
+    vi.mocked(hostsHook.useHosts).mockReturnValue({
+      data: [
+        { host_id: "host_1", name: "laptop", owner: "me", status: "online" },
+        { host_id: "host_2", name: "desktop", owner: "me", status: "online" },
+      ],
+    } as unknown as ReturnType<typeof hostsHook.useHosts>);
+    render(
+      <CreateScheduledTaskDialog
+        open
+        onOpenChange={vi.fn()}
+        editingTask={scheduledTask({ hostId: "host_1", workspace: "/home/me/repo" })}
+      />,
+    );
+    const hostTrigger = screen.getByTestId("task-host-trigger");
+    fireEvent.pointerDown(hostTrigger, new MouseEvent("pointerdown", { bubbles: true, button: 0 }));
+    fireEvent.click(hostTrigger);
+    fireEvent.click(screen.getByRole("option", { name: /desktop/ }));
+
+    // Omitting the workspace would keep the saved one, so the form keeps showing it.
+    expect(screen.getByTestId("task-workspace-browse")).toHaveTextContent("/home/me/repo");
+    fireEvent.click(screen.getByTestId("create-scheduled-task-submit"));
+
+    await waitFor(() => expect(updateMutateAsync).toHaveBeenCalledTimes(1));
+    expect(updateMutateAsync.mock.calls[0][0].input).toMatchObject({
+      hostId: "host_2",
+      workspace: "/home/me/repo",
+    });
+  });
+
   it("keeps an older unpinned task unpinned until a host is picked", async () => {
     render(<CreateScheduledTaskDialog open onOpenChange={vi.fn()} editingTask={scheduledTask()} />);
 

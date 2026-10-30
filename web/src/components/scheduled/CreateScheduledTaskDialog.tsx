@@ -781,8 +781,9 @@ export function CreateScheduledTaskDialog({
                   return;
                 }
                 setSandboxMode(false);
-                // A workspace belongs to its host.
-                if (v !== hostId) setWorkspace("");
+                // Keep the workspace on a host switch: an update omits an empty
+                // one, which leaves the saved path in place, so the form must
+                // show what gets saved. The server checks it against the new host.
                 setHostId(v);
                 setWorkspaceBrowserOpen(false);
               }}
