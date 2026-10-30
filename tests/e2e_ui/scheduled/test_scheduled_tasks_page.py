@@ -19,10 +19,11 @@ never exercised.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
-from contextlib import suppress
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -138,6 +139,17 @@ def _delete_scheduled_tasks_created_by_test(live_server: str) -> Iterator[None]:
             ).raise_for_status()
 
 
+@contextmanager
+def _online_host(
+    root: Path, live_server: str, config: Mapping[str, Any] | None = None
+) -> Iterator[Host]:
+    """Start a real host and wait until the server lists it online."""
+    with isolated_host(root, live_server, config=config) as host:
+        with httpx.Client(base_url=live_server) as client:
+            host.wait_online(client, timeout=90)
+        yield host
+
+
 @pytest.fixture
 def online_host(live_server: str, tmp_path: Path) -> Iterator[Host]:
     """A connected host: the create dialog pins a new automation to one.
@@ -145,9 +157,32 @@ def online_host(live_server: str, tmp_path: Path) -> Iterator[Host]:
     Function-scoped so it is offline again by the next test, whose seeded
     unpinned tasks must still find no online host.
     """
-    with isolated_host(tmp_path / "host", live_server) as host:
-        with httpx.Client(base_url=live_server) as client:
-            host.wait_online(client, timeout=90)
+    with _online_host(tmp_path / "host", live_server) as host:
+        yield host
+
+
+@pytest.fixture
+def claude_ready_host(
+    live_server: str, mock_llm_server_url: str, tmp_path: Path
+) -> Iterator[Host]:
+    """A connected host where Claude Code is signed in, so the agent picker can select it.
+
+    A host whose Claude Code has no credential reports it as needing sign-in,
+    and the picker disables that row. A key provider pointed at the mock LLM is
+    that credential; no turn runs.
+    """
+    providers = {
+        "e2e-claude": {
+            "kind": "key",
+            "default": ["anthropic"],
+            "anthropic": {
+                "base_url": mock_llm_server_url,
+                "api_key": "mock-key",
+                "models": {"default": "claude-sonnet-4-20250514"},
+            },
+        }
+    }
+    with _online_host(tmp_path / "host", live_server, config={"providers": providers}) as host:
         yield host
 
 
@@ -315,7 +350,7 @@ def test_scheduled_task_next_run_label_live_ticks_without_navigation(
     expect(next_run).to_have_text("Next run in 5 mins", timeout=30_000)
 
 
-@pytest.mark.usefixtures("online_host")
+@pytest.mark.usefixtures("claude_ready_host")
 def test_scheduled_task_create_edit_modal_and_time_picker(
     page: Page,
     live_server: str,
