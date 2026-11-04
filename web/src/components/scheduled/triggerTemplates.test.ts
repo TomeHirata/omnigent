@@ -225,6 +225,19 @@ describe("isTriggerPrompt", () => {
     },
   );
 
+  // Saved automations keep the prompt they were created with, so these openings must
+  // stay recognized even if the renderer's wording changes later.
+  it.each([
+    "This automation watches Jira and starts one Omnigent session for each newly created ticket that matches.",
+    "This automation watches Slack and starts one Omnigent session for each newly created message that matches.",
+    "This automation watches GitHub and starts one Omnigent session for each newly created issue or pull request that matches.",
+    "This automation watches Linear and starts one Omnigent session for each newly created issue that matches.",
+  ])("recognizes a saved prompt opening %#", (opening) => {
+    expect(isTriggerPrompt(`${opening} Every run sends this prompt to this same session.`)).toBe(
+      true,
+    );
+  });
+
   it("doesn't match a prompt written by hand", () => {
     expect(isTriggerPrompt("Summarize the new Jira tickets.")).toBe(false);
     expect(isTriggerPrompt(` ${renderTriggerPrompt("jira", fields(), CTX)}`)).toBe(false);

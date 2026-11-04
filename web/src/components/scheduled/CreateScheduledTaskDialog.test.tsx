@@ -2204,6 +2204,10 @@ describe("CreateScheduledTaskDialog session mode", () => {
 
   it("clears the continued session when asked to start a new one on the next run", async () => {
     renderWithSessionModes(scheduledTask({ sessionMode: "continue", sessionId: "conv_1" }));
+    // A task written by hand keeps its session choice on edit.
+    expect(screen.getByTestId("task-session-mode-trigger")).toHaveTextContent(
+      "Continue in the same session",
+    );
     fireEvent.click(screen.getByTestId("task-start-new-session"));
     fireEvent.click(screen.getByTestId("create-scheduled-task-submit"));
 
@@ -2241,13 +2245,6 @@ describe("CreateScheduledTaskDialog session mode", () => {
       "This automation watches Slack and starts one Omnigent session for each newly created message that matches.";
     renderWithSessionModes(scheduledTask({ sessionMode: "continue", prompt }));
     expect(screen.queryByTestId("task-session-mode-field")).toBeNull();
-  });
-
-  it("keeps the session choice when editing an automation written by hand", () => {
-    renderWithSessionModes(scheduledTask({ sessionMode: "continue", sessionId: "conv_1" }));
-    expect(screen.getByTestId("task-session-mode-trigger")).toHaveTextContent(
-      "Continue in the same session",
-    );
   });
 
   it("offers no new-session option before the first run creates a session", () => {
