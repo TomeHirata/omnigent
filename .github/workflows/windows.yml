@@ -112,6 +112,10 @@ jobs:
           tests/test_mcp_disabled_servers.py
           -p no:cacheprovider -q
 
+      - name: Scratch diag
+        continue-on-error: true
+        run: uv run python dev/scratch/win_diag.py
+
       - name: Codex skill junction regressions (hard)
         run: >-
           uv run pytest
