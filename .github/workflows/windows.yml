@@ -126,4 +126,11 @@ jobs:
         run: >-
           uv run pytest tests/inner tests/runtime/harnesses
           -m "not posix_only"
-          -p no:cacheprovider -q -n 4 --timeout=120 -rfE --tb=line
+          -p no:cacheprovider -q -n 4 --timeout=120 --tb=line --junitxml=sweep.xml
+
+      - name: Upload sweep junit
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: windows-sweep
+          path: sweep.xml
