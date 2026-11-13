@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import sys
 import tempfile
 import threading
 import tomllib
@@ -138,22 +139,22 @@ def _read(path: Path, *, for_write: bool = False) -> list[ServerKey]:
 def _exclusive_file_lock(lock_path: Path) -> Iterator[None]:
     """Hold an exclusive cross-process lock on *lock_path* (flock, or msvcrt on Windows)."""
     with lock_path.open("a+b") as lock:
-        if os.name == "posix":
+        if sys.platform == "win32":
+            import msvcrt
+
+            # Byte-range lock on byte 0; LK_LOCK retries for ~10s, then raises OSError.
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+            try:
+                yield
+            finally:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
             import fcntl
 
             fcntl.flock(lock, fcntl.LOCK_EX)
             yield
-            return
-        import msvcrt
-
-        # Byte-range lock on byte 0; LK_LOCK retries for ~10s, then raises OSError.
-        lock.seek(0)
-        msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
-        try:
-            yield
-        finally:
-            lock.seek(0)
-            msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def set_disabled(key: ServerKey, disabled: bool) -> None:
