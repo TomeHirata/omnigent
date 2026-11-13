@@ -47,7 +47,6 @@ import re
 import secrets
 import shlex
 import shutil
-import signal
 import tempfile
 import time
 from asyncio import Queue, Task
@@ -64,6 +63,7 @@ from omnigent.harnesses.pi_native.credentials import (
     _is_databricks_ai_gateway_url,
     global_pi_agent_dir,
 )
+from omnigent.inner._proc import kill_tree, spawn_kwargs
 from omnigent.inner.agent_env import clean_agent_env
 from omnigent.inner.native_attachments import parse_data_uri
 from omnigent.inner.pi_settings import PI_CONTEXT_FILE_NAMES
@@ -183,15 +183,14 @@ async def _fetch_shell_command_token(command: str, *, timeout_s: float | None = 
         command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.DEVNULL,
-        start_new_session=True,
+        **spawn_kwargs(),
     )
     try:
         try:
             stdout, _ = await asyncio.wait_for(process.communicate(), timeout_s)
         except (TimeoutError, asyncio.CancelledError):
             # Children may still hold stdout open after the helper shell exits.
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
+            kill_tree(process)
             await process.communicate()
             raise
         if process.returncode != 0:

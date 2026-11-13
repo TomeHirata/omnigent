@@ -40,7 +40,7 @@ from typing import Any, Protocol, TypeAlias, cast
 
 from packaging.version import InvalidVersion, Version
 
-from omnigent._platform import resolve_cli_binary
+from omnigent._platform import IS_WINDOWS, resolve_cli_binary
 from omnigent.databricks_ai_gateway import (
     CLIENT_SURFACES_HEADER,
     CODEX_AGENT,
@@ -3189,7 +3189,11 @@ class _CodexAppServerSession:
         self._codex_home_identity = (home_stat.st_dev, home_stat.st_ino)
         os.chmod(self._codex_home_dir, 0o700)
         home_stat = self._codex_home_dir.lstat()
-        if not stat.S_ISDIR(home_stat.st_mode) or stat.S_IMODE(home_stat.st_mode) != 0o700:
+        # Windows has no POSIX mode bits (chmod only toggles read-only); mkdtemp's
+        # per-user temp dir ACL is the isolation there.
+        if not stat.S_ISDIR(home_stat.st_mode) or (
+            not IS_WINDOWS and stat.S_IMODE(home_stat.st_mode) != 0o700
+        ):
             raise OSError("unsafe signer CODEX_HOME")
         # The runner grants only this session's skills directory to its tools.
         # Keep its inode stable so cached sandbox mounts survive worker restarts.
