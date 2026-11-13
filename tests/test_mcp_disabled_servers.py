@@ -256,7 +256,7 @@ def test_default_config_home(tmp_path, monkeypatch):
     import subprocess
     import sys
 
-    env = {**os.environ, "HOME": str(tmp_path)}
+    env = {**os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path)}
     env.pop("OMNIGENT_CONFIG_HOME", None)
     subprocess.run(
         [
