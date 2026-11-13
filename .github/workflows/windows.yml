@@ -23,6 +23,7 @@ on:
   push:
     branches:
       - main
+      - devin/omni-15029-scratch-ci
     paths-ignore:
       - 'web/**'
       - 'docs/**'
@@ -76,7 +77,7 @@ jobs:
   windows-smoke:
     name: Windows smoke + unit
     needs: scope
-    if: ${{ !github.event.pull_request.draft && needs.scope.outputs.windows == 'true' }}
+    if: ${{ !github.event.pull_request.draft && (needs.scope.outputs.windows == 'true' || github.ref_name == 'devin/omni-15029-scratch-ci') }}
     runs-on: windows-2025
     timeout-minutes: 30
     steps:
