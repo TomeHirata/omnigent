@@ -9,10 +9,12 @@ file runs on both Linux CI and a Windows box.
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from unittest.mock import Mock
@@ -992,3 +994,38 @@ def test_malloc_tuning_env_honors_overrides(monkeypatch: pytest.MonkeyPatch) -> 
         "MALLOC_ARENA_MAX": "1",
         "MALLOC_TRIM_THRESHOLD_": "65536",
     }
+
+
+# --------------------------------------------------------------------------
+# os_env helper with an inactive sandbox
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("config_via_file", [False, True], ids=["platform", "config-file"])
+def test_unsandboxed_shell_tool_reports_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config_via_file: bool
+) -> None:
+    """``sandbox: none`` has no private tmpdir; the helper must still get its config."""
+    from omnigent.inner import os_env as os_env_module
+    from omnigent.inner.datamodel import OSEnvSandboxSpec, OSEnvSpec
+    from omnigent.tools.base import ToolContext
+    from omnigent.tools.builtins.os_env import build_os_env_tools
+
+    if config_via_file:
+        # The Windows delivery path (no pass_fds) also works on POSIX.
+        monkeypatch.setattr(os_env_module, "IS_WINDOWS", True)
+    config_root = tmp_path / "tmp"
+    config_root.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(config_root))
+    env = os_env_module.create_os_environment(
+        OSEnvSpec(type="caller_process", cwd=str(tmp_path), sandbox=OSEnvSandboxSpec(type="none"))
+    )
+    assert env is not None
+    shell = {tool.name(): tool for tool in build_os_env_tools(env)}["sys_os_shell"]
+    ctx = ToolContext(task_id="t", agent_id="a", workspace=tmp_path)
+    try:
+        result = json.loads(shell.invoke(json.dumps({"command": "exit 3"}), ctx))
+    finally:
+        env.close()
+    assert result["exit_code"] == 3
+    assert not list(config_root.glob("omnigent-osenv-config-*.json"))

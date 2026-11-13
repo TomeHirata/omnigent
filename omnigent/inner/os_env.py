@@ -663,10 +663,20 @@ class _HelperProcessClient:
         # the Windows config carries no secret — only non-sensitive
         # paths/booleans — but we still keep the file private and ephemeral.
         r_fd: int | None = None
+        config_file: Path | None = None
         if IS_WINDOWS:
-            assert self._tmpdir is not None
-            config_file = self._tmpdir / "helper-config.json"
-            config_file.write_bytes(config_bytes)
+            if self._tmpdir is not None:
+                config_file = self._tmpdir / "helper-config.json"
+                config_file.write_bytes(config_bytes)
+            else:
+                # An inactive sandbox (``type: none``) has no private tmpdir; use a
+                # private file in the per-user temp dir. The helper unlinks it.
+                config_fd, config_name = tempfile.mkstemp(
+                    prefix="omnigent-osenv-config-", suffix=".json"
+                )
+                with os.fdopen(config_fd, "wb") as config_out:
+                    config_out.write(config_bytes)
+                config_file = Path(config_name)
             config_arg = ["--config-file", str(config_file)]
         else:
             r_fd, w_fd = os.pipe()
@@ -730,6 +740,9 @@ class _HelperProcessClient:
                 )
             ).result()
         except Exception:
+            if config_file is not None:
+                with contextlib.suppress(OSError):
+                    config_file.unlink()
             self._stop_locked()
             raise
         finally:
