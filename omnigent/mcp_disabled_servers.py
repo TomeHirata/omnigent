@@ -15,8 +15,8 @@ import re
 import tempfile
 import threading
 import tomllib
-from collections.abc import Collection, Iterable, Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final, Literal, overload
@@ -134,20 +134,37 @@ def _read(path: Path, *, for_write: bool = False) -> list[ServerKey]:
         return []
 
 
+@contextmanager
+def _exclusive_file_lock(lock_path: Path) -> Iterator[None]:
+    """Hold an exclusive cross-process lock on *lock_path* (flock, or msvcrt on Windows)."""
+    with lock_path.open("a+b") as lock:
+        if os.name == "posix":
+            import fcntl
+
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
+            return
+        import msvcrt
+
+        # Byte-range lock on byte 0; LK_LOCK retries for ~10s, then raises OSError.
+        lock.seek(0)
+        msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
+
+
 def set_disabled(key: ServerKey, disabled: bool) -> None:
     """Atomically update exactly one key, preserving unknown-to-inventory entries."""
     _validate(key)
-    if os.name != "posix":
-        raise DisabledServerWriteError("io")
-    import fcntl
-
     temporary: str | None = None
     try:
         path = global_config_path().parent / FILENAME
         with _write_lock:
             path.parent.mkdir(parents=True, exist_ok=True)
-            with path.with_suffix(".lock").open("a") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
+            with _exclusive_file_lock(path.with_suffix(".lock")):
                 entries = _read(path, for_write=True)
                 if disabled and key not in entries:
                     entries.append(key)

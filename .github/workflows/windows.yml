@@ -108,6 +108,7 @@ jobs:
           uv run pytest
           tests/inner/test_proc_and_platform.py
           tests/runtime/test_process_manager.py
+          tests/test_mcp_disabled_servers.py
           -p no:cacheprovider -q
 
       - name: Codex skill junction regressions (hard)
@@ -125,4 +126,5 @@ jobs:
         run: >-
           uv run pytest tests/inner tests/runtime/harnesses
           -m "not posix_only"
+          -n 4 --timeout=120
           -p no:cacheprovider -q

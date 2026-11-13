@@ -199,7 +199,7 @@ def _process_write(config_home, barrier, index):
         set_disabled(ServerKey("codex", f"process_{index}_{suffix}"), True)
 
 
-def test_posix_writers_do_not_lose_updates(tmp_path):
+def test_cross_process_writers_do_not_lose_updates(tmp_path):
     import multiprocessing
 
     context = multiprocessing.get_context("spawn")
